@@ -1,0 +1,285 @@
+{
+  "task_id": "task_20260802_214438",
+  "task_type": "food-finding",
+  "status": "ready_to_dispatch",
+  "timestamp": "2026-08-02T21:44:38+08:00",
+  "summary": "北京望京恒电大厦附近，明天(周一)晚6点，23人团建聚餐，家常菜不辣，有小孩，需包间或分桌，预算100-400/人，打车前往，提前预订不排队",
+  "sections": [
+    {
+      "name": "basic_info",
+      "label": "基础信息收集",
+      "description": "确认用餐时间、人数、饮食偏好及位置，为 POI 搜索做准备",
+      "status": "completed",
+      "items": [
+        {
+          "field": "dining_time",
+          "label": "用餐时间",
+          "value": "2026-08-03T18:00:00+08:00",
+          "source": "user_provided"
+        },
+        {
+          "field": "meal_type",
+          "label": "餐别",
+          "value": "dinner",
+          "source": "inferred"
+        },
+        {
+          "field": "party_size",
+          "label": "用餐人数",
+          "value": 23,
+          "source": "user_provided"
+        },
+        {
+          "field": "dietary_preference",
+          "label": "饮食偏好/禁忌",
+          "value": "家常菜，不太能吃辣",
+          "source": "user_provided"
+        },
+        {
+          "field": "city",
+          "label": "城市",
+          "value": "北京",
+          "source": "user_provided"
+        },
+        {
+          "field": "place_name",
+          "label": "具体地点",
+          "value": "望京恒电大厦",
+          "source": "user_provided"
+        },
+        {
+          "field": "place_location",
+          "label": "地点坐标",
+          "value": "116.487901,40.008555",
+          "source": "geocoded"
+        },
+        {
+          "field": "min_rating",
+          "label": "最低评分",
+          "value": 4.0,
+          "source": "default"
+        },
+        {
+          "field": "max_cost",
+          "label": "最高人均",
+          "value": 400,
+          "source": "user_provided"
+        },
+        {
+          "field": "min_cost",
+          "label": "最低人均",
+          "value": 100,
+          "source": "user_provided"
+        }
+      ],
+      "completion_criteria": "dining_time, party_size, dietary_preference, city 已确认；place_name 或 district 至少填一个",
+      "criteria_met": true,
+      "dialogue_summary": "用户确认明天(周一)晚6点、23人团建、家常菜不太能吃辣、北京望京恒电大厦附近、预算100-400/人"
+    },
+    {
+      "name": "constraint_resolution",
+      "label": "约束探测与消解",
+      "description": "探测用户的特殊约束条件，检测冲突，推荐消解方案",
+      "status": "completed",
+      "items": [
+        {
+          "field": "has_pregnant",
+          "label": "是否有孕妇",
+          "value": false,
+          "source": "user_provided"
+        },
+        {
+          "field": "has_children",
+          "label": "是否有小孩",
+          "value": true,
+          "source": "user_provided"
+        },
+        {
+          "field": "children_age",
+          "label": "小孩年龄",
+          "value": "未提供",
+          "source": "not_collected"
+        },
+        {
+          "field": "has_pet",
+          "label": "是否带宠物",
+          "value": false,
+          "source": "default"
+        },
+        {
+          "field": "need_private_room",
+          "label": "是否需要包间",
+          "value": "preferred_flexible",
+          "source": "user_provided",
+          "note": "最好包间，也可以分几桌坐"
+        },
+        {
+          "field": "privacy_level",
+          "label": "私密性要求",
+          "value": "private_room",
+          "source": "user_provided"
+        },
+        {
+          "field": "max_queue_minutes",
+          "label": "最大排队容忍时间",
+          "value": 0,
+          "source": "user_provided",
+          "note": "提前预订，不接受排队"
+        }
+      ],
+      "completion_criteria": "所有约束字段已确认（含默认值），冲突检测已完成",
+      "criteria_met": true,
+      "conflict_detection": {
+        "conflicts_found": [],
+        "notes": "小孩+包间无冲突；23人大桌建议包间或分2-3桌，用户已接受分桌方案；提前预订解决排队问题"
+      },
+      "dialogue_summary": "无孕妇，有小孩(年龄未提供)，无宠物。最好包间但可接受分桌。不接受排队，需提前预订。冲突检测通过。"
+    },
+    {
+      "name": "value_added_services",
+      "label": "增值服务关联",
+      "description": "确认停车、特殊餐具、低消、生日定制等增值服务需求",
+      "status": "completed",
+      "items": [
+        {
+          "field": "need_parking",
+          "label": "是否需要停车",
+          "value": false,
+          "source": "user_provided",
+          "note": "团队打车前往"
+        },
+        {
+          "field": "license_plate",
+          "label": "车牌号",
+          "value": "不需要",
+          "source": "user_provided"
+        },
+        {
+          "field": "need_special_tableware",
+          "label": "是否需要特殊餐具",
+          "value": "待确认",
+          "source": "not_collected",
+          "note": "有小孩，需向餐厅确认儿童座椅/儿童餐具"
+        },
+        {
+          "field": "check_minimum_spend",
+          "label": "是否需要确认低消",
+          "value": true,
+          "source": "inferred",
+          "note": "23人大桌/包间通常有低消"
+        },
+        {
+          "field": "is_birthday",
+          "label": "是否是生日用餐",
+          "value": false,
+          "source": "default"
+        }
+      ],
+      "completion_criteria": "所有增值服务字段已确认",
+      "criteria_met": true,
+      "dialogue_summary": "团队打车，不需要停车。有小孩需确认儿童座椅。需确认包间/大桌低消。非生日用餐。"
+    },
+    {
+      "name": "global_validation",
+      "label": "全局校验与确认",
+      "description": "汇总所有信息，用户确认或修改",
+      "status": "completed",
+      "items": [],
+      "completion_criteria": "用户确认所有信息无误",
+      "criteria_met": true,
+      "dialogue_summary": "用户确认信息无误，要求按格式输出，进入 Phrase 4 外呼确认阶段。"
+    }
+  ],
+  "interaction_objects": [
+    {
+      "object_id": "B0IAVADVEZ",
+      "name": "美锦酒家(中航产融大厦店)",
+      "address": "望京东园四区2号中航资本大厦2层202室",
+      "phone": "010-88135566;18201623521",
+      "extra_info": {
+        "rating": 4.6,
+        "cost": 144,
+        "business_area": "望京",
+        "opentime_today": "10:30-21:00",
+        "opentime_week": "周一至周日 10:30-21:00",
+        "tag": "北京菜",
+        "keytag": "北京菜",
+        "location": "116.491493,40.000709",
+        "distance_from_target": "~400m",
+        "estimated_total": 3312,
+        "budget_fit": true
+      }
+    },
+    {
+      "object_id": "B0H0SC4IXH",
+      "name": "肆月河豚·新淮扬菜(望京店)",
+      "address": "望京东园四区2号中航产融大厦2层201",
+      "phone": "18515938562;18568263341",
+      "extra_info": {
+        "rating": 4.7,
+        "cost": 188,
+        "business_area": "望京",
+        "opentime_today": "11:00-14:00 17:00-22:00",
+        "opentime_week": "周一至周日 11:00-14:00,17:00-22:00",
+        "tag": "淮扬菜,河豚,红烧肉,佛跳墙",
+        "keytag": "淮扬菜",
+        "location": "116.491527,40.000770",
+        "distance_from_target": "~900m",
+        "estimated_total": 4324,
+        "budget_fit": true
+      }
+    },
+    {
+      "object_id": "B000A9N40W",
+      "name": "嘉府中餐厅(昆泰酒店店)",
+      "address": "望京启阳路2号昆泰酒店1层",
+      "phone": "010-84106655;010-84106679",
+      "extra_info": {
+        "rating": 4.1,
+        "cost": 256,
+        "business_area": "望京",
+        "opentime_today": "11:00-14:00 17:00-22:00",
+        "opentime_week": "周一至周日 11:00-14:00,17:00-22:00",
+        "tag": "淮扬菜,三文鱼,炒饭,杨枝甘露",
+        "keytag": "淮扬菜",
+        "location": "116.491177,40.006510",
+        "distance_from_target": "~400m",
+        "estimated_total": 5888,
+        "budget_fit": true
+      }
+    },
+    {
+      "object_id": "B0KBR7P8RL",
+      "name": "金鼎轩(望京金辉大厦店)",
+      "address": "启阳路金辉大厦3层(望京东地铁站B口旁)",
+      "phone": "010-68656988;15712917316",
+      "extra_info": {
+        "rating": 4.6,
+        "cost": 75,
+        "business_area": "望京",
+        "opentime_today": "07:00-22:00",
+        "opentime_week": "周一至周日 07:00-22:00",
+        "tag": "粤菜,点心,虾饺皇,烧鸭",
+        "keytag": "粤菜",
+        "location": "116.488970,40.003047",
+        "distance_from_target": "~600m",
+        "estimated_total": 1725,
+        "budget_fit": false,
+        "budget_note": "人均75低于用户设定的100下限，但空间大、不辣、适合带小孩"
+      }
+    }
+  ],
+  "phrase_4_dispatch": {
+    "status": "blocked",
+    "reason": "语音外呼工具(voice_call)未实现，无法自动拨打电话预订",
+    "action_required": "用户需手动拨打以上4家餐厅电话确认",
+    "confirm_items_per_restaurant": [
+      "明天周一晚6点，23人，有没有包间？包间能坐多少人？",
+      "没有包间的话，能不能安排3桌连排？",
+      "包间有没有最低消费？",
+      "有小孩，有没有儿童座椅？",
+      "家常菜口味，能不能做不辣的？",
+      "提前预订到店直接入座，不用排队对吧？"
+    ]
+  }
+}

@@ -11,6 +11,8 @@
 - [Part A: 项目全景](#part-a-项目全景)
 - [Part B: Hermes Agent 框架解读](#part-b-hermes-agent-框架解读)
 - [Part C: 餐馆预定 — Skill 驱动实战](#part-c-餐馆预定--skill-驱动实战)
+  - [C7 Skill Generator — 元 Skill 生成器](#c7-skill-generator--元-skill-生成器)
+  - [C8 Car Sales — 汽车销售领域 Skill](#c8-car-sales--汽车销售领域-skill)
 - [Part D: 源码分析索引](#part-d-源码分析索引)
 - [项目结构](#项目结构)
 
@@ -29,7 +31,7 @@
 **核心特性：**
 
 - **5 阶段流水线 (5-Phase Pipeline)**：信息输入 → 对象获取 → 信息输出 → 发起交互 → 结果整理
-- **双 Skill 协作**：`chinese-poi-search` 负责 POI 搜索，`interactive-task-food` 负责对话编排
+- **多 Skill 生态**：`chinese-poi-search` 负责 POI 搜索，`interactive-task-food` 负责餐馆预定对话编排，`interactive-task-skill-generator` 可生成任意领域的交互 Skill（如 `interactive-task-car-sales`）
 - **4 模块对话流**：基础信息 → 约束消解 → 增值服务 → 全局校验，模块间可回退修改
 - **约束冲突检测**：自动检测宠物/包间/孕妇/排队等约束冲突，提供消解方案
 - **LLM 驱动的电话外呼模拟**：LLM 扮演公司行政人员，自然地打电话给餐厅确认预定
@@ -112,41 +114,68 @@ python run_demo.py --api    # API 模式（通过 HTTP 调用服务）
 
 本项目实现了 Hermes Agent 框架中**最核心的扩展机制 —— Skill（技能）** 的领域应用。
 
-两个协作技能位于 `skills/` 目录：
+四个技能位于 `skills/` 目录，包含一个**工具 Skill**、一个**领域 Skill**、一个**元 Skill（Skill 生成器）**以及一个由生成器产出的**汽车销售领域 Skill**：
 
 ```
 skills/
-├── chinese-poi-search/        # POI 搜索技能（Phase 2 的 Resolver）
-│   ├── SKILL.md               #   技能定义（含 20 个实战 pitfall）
+├── chinese-poi-search/              # POI 搜索技能（Phase 2 的 Resolver）
+│   ├── SKILL.md                     #   技能定义（含 20 个实战 pitfall）
 │   ├── scripts/
-│   │   └── amap_poi_tool.py   #   高德 POI API 封装（33KB，6 个命令）
-│   └── references/            #   5 篇参考文档
-│       ├── amap-poi-api.md          # API 端点完整参考
-│       ├── cross-skill-validation.md # 跨技能引用验证
-│       ├── late-night-filtering.md   # 夜宵过滤策略
-│       ├── compound-name-geocoding.md # 复合地名地理编码
-│       └── hermes-nexus-phrase4.md   # Phrase 4 交互服务文档
+│   │   └── amap_poi_tool.py         #   高德 POI API 封装（33KB，6 个命令）
+│   └── references/                  #   5 篇参考文档
+│       ├── amap-poi-api.md                # API 端点完整参考
+│       ├── cross-skill-validation.md      # 跨技能引用验证
+│       ├── late-night-filtering.md         # 夜宵过滤策略
+│       ├── compound-name-geocoding.md      # 复合地名地理编码
+│       └── hermes-nexus-phrase4.md         # Phrase 4 交互服务文档
 │
-└── interactive-task-food/     # 餐馆预定领域技能（主导 Skill）
-    └── SKILL.md               #   44KB：5 阶段流水线 + 4 模块对话流
+├── interactive-task-food/           # 餐馆预定领域技能（参考实现）
+│   └── SKILL.md                     #   44KB：5 阶段流水线 + 4 模块对话流
+│
+├── interactive-task-skill-generator/  # 元 Skill：领域 Skill 生成器
+│   ├── SKILL.md                     #   5 阶段生成流水线 (G1-G5)
+│   ├── templates/
+│   │   └── domain-skill-template.md #   目标 Skill 骨架模板
+│   └── references/
+│       └── domain-heuristics.md     #   6 维度领域分析启发式指南
+│
+└── interactive-task-car-sales/      # 汽车销售领域技能（由 skill-generator 生成）
+    ├── SKILL.md                     #   5 阶段流水线 + 4 模块对话流
+    └── scripts/
+        └── resolve_car_dealers.py   #   4S 店搜索 Resolver（包装 amap_poi_tool）
 ```
 
 **技能协作关系：**
 
 ```
-interactive-task-food (领域 Skill — 主导编排)
-  │
-  ├─ Phase 2: 获取可交互对象
-  │   └─ 委托 → chinese-poi-search (工具 Skill)
-  │              └─ amap_poi_tool.resolve_restaurants()
-  │                  三种搜索模式: 地点名周边 / 城市区域 / 坐标周边
-  │
-  ├─ Phase 4: 发起交互
-  │   └─ 委托 → hermes-nexus (本项目 FastAPI 服务)
-  │              └─ POST /api/v1/chat
-  │
-  └─ Phase 5: 结果整理
-      └─ 本地处理 → 逐项对比用户需求 vs 餐厅回复 → 输出决策建议
+┌─────────────────────────────────────────────────────────────┐
+│                  Skill 生态全景                               │
+│                                                             │
+│  interactive-task-skill-generator (元 Skill — 生成器)         │
+│    │                                                        │
+│    │ 5 阶段启发式流水线:                                      │
+│    │   G1 领域分析 → G2 对象解析 → G3 模块设计 → G4 生成 → G5 校验  │
+│    │                                                        │
+│    ├─ 生成 ──→ interactive-task-food (参考实现)               │
+│    └─ 生成 ──→ interactive-task-car-sales (汽车销售)           │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  interactive-task-food / interactive-task-car-sales (领域 Skill)│
+│    │                                                        │
+│    ├─ Phase 2: 获取可交互对象                                  │
+│    │   └─ 委托 → chinese-poi-search (工具 Skill)              │
+│    │              ├─ amap_poi_tool.resolve_restaurants()     │
+│    │              └─ resolve_car_dealers() (包装 amap_poi_tool)│
+│    │                  三种搜索模式: 地点名周边 / 城市区域 / 坐标周边  │
+│    │                                                        │
+│    ├─ Phase 4: 发起交互                                       │
+│    │   └─ 委托 → hermes-nexus (本项目 FastAPI 服务)            │
+│    │              └─ POST /api/v1/chat                       │
+│    │                                                        │
+│    └─ Phase 5: 结果整理                                       │
+│        └─ 本地处理 → 逐项对比用户需求 vs 对方回复 → 输出决策建议    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### C2 Phase 1-2: 信息收集与 POI 搜索
@@ -335,6 +364,168 @@ Phase 5 (结果整理)
   └─ 全部满足 ✓ → 用户 accept → 🎉 预定成功！
 ```
 
+### C7 Skill Generator — 元 Skill 生成器
+
+`interactive-task-skill-generator` 是一个**元 Skill（Meta-Skill）**，它不直接处理用户业务，而是**生成其他领域 Skill**。给定一个领域描述（如"医院挂号"、"家政预约"、"汽车销售"），它通过启发式 5 阶段流水线自动生成完整的 `SKILL.md`。
+
+**5 阶段生成流水线：**
+
+```
+用户描述领域
+    │
+    ▼
+G1: 领域分析 ──┬── domain_definition (领域/动作/对象类型)
+               ├── 6 维度启发式特征提取
+               └── 信息按 3 种用途分类
+    │
+    ▼
+G2: 对象解析 ──┬── 确定 resolver 策略 (poi_search / api / user_provided)
+               ├── input_mapping (模块字段 → resolver 参数)
+               └── output_schema + on_empty/on_multi 策略
+    │
+    ▼
+G3: 模块设计 ──┬── 模块一: 基础信息 (用途1 → 筛选字段)
+               ├── 模块二: 约束探测 (用途2 → 约束字段 + 冲突规则)
+               ├── 模块三: 领域特色 (增值服务)
+               ├── 模块四: 全局校验 (用途3 → 后置判断基准)
+               └── 信息用途映射表
+    │
+    ▼
+G4: Skill 生成 ─┬── 加载模板 (templates/domain-skill-template.md)
+                ├── 填充 30+ 变量
+                ├── 写入 SKILL.md
+                └── 按需生成辅助文件 (resolver/references)
+    │
+    ▼
+G5: 校验交付 ──┬── Frontmatter 合法性校验
+               ├── 结构一致性检查 (12 项)
+               ├── 占位符残留检查
+               └── 交付确认
+```
+
+**G1: 6 维度领域启发式分析：**
+
+| 维度 | 启发式问题 | 对模块设计的影响 |
+|------|-----------|----------------|
+| **时间敏感性** | 精确到天/小时/分钟？有时段/截止概念？ | 决定 time 字段类型 (date/datetime/enum) |
+| **对象可变性** | 属性实时变化还是固定？信息会过期？ | 决定"容忍度"字段和实时确认需求 |
+| **约束复杂度** | 硬约束有哪些？已知冲突模式？隐性约束？ | 决定模块二字段数量和冲突规则数量 |
+| **增值服务** | 可选附加服务？需提前预约？额外费用？ | 决定模块三字段列表 |
+| **信息不对称** | 哪些信息只有交互对象才知道？ | 决定用途(2)字段和 Phase 4 确认项 |
+| **失败兜底** | 不可用时的备选？降级方案？替代渠道？ | 决定 Phase 5 alternatives 和早终止条件 |
+
+**模板与辅助文件：**
+
+| 文件 | 作用 |
+|------|------|
+| `templates/domain-skill-template.md` | 目标 Skill 骨架模板，含 30+ `{{变量}}` 占位符 |
+| `references/domain-heuristics.md` | 6 维度领域分析详细指南，含分级标准和冲突发现方法 |
+
+**关键设计原则：**
+- 模块二和模块三的区分：模块二的字段影响对象筛选，模块三的字段不影响选择但需确认
+- Phase 4/5 复用策略：默认复用 `hermes-nexus` 和 `chinese-poi-search`，不重复造轮子
+- 字段数量控制：模块一 6-8 个、模块二 5-7 个、模块三 4-6 个
+- `interactive-task-food` 作为参考实现，生成时做字段映射对照
+
+---
+
+### C8 Car Sales — 汽车销售领域 Skill
+
+`interactive-task-car-sales` 是由 **skill-generator** 生成的汽车销售领域技能。它复用相同的 **5 阶段流水线 + 4 模块对话流**架构，专为 4S 店看车、试驾、询价、购车场景设计。
+
+**领域定制概览：**
+
+```
+领域: car-sales (汽车销售)
+动作: 看车/试驾/询价/购车
+对象: 4S 店 / 汽车经销商
+Resolver: resolve_car_dealers (包装 chinese-poi-search)
+
+Phase 3 对话流:
+[模块一: 基础信息] → [模块二: 约束消解] → [模块三: 增值服务] → [模块四: 全局校验]
+```
+
+**4 模块字段设计：**
+
+| 模块 | 核心字段 | 用途 |
+|------|---------|------|
+| **模块一: 基础信息** | 品牌、车型偏好、预算范围、城市、地点/区县、能源类型、新车/二手车、用途、最低评分 | Phrase 2 搜索过滤 |
+| **模块二: 约束消解** | 试驾需求/时间、限牌城市/牌照类型、贷款/首付、置换/旧车信息、提车时间、颜色偏好 | 需 4S 店确认的约束 |
+| **模块三: 增值服务** | 保险/险种、代办上牌、装饰/明细、延保、赠品偏好 | 不影响筛选但需确认 |
+| **模块四: 全局校验** | 汇总展示 → 用户确认/修改 → 锁定 | 后置判断基准线 |
+
+**7 条领域冲突检测规则（模块二）：**
+
+| 冲突场景 | 消解方案 |
+|---------|---------|
+| 限牌城市 + 燃油车 + 需新申请牌照 | A) 转新能源 B) 接受摇号等待 C) 竞价拍牌 |
+| 热门新能源品牌 + 1 个月内提车 | A) 接受等车周期 B) 选有现车配置 C) 找其他经销商 |
+| 限牌城市 + 纯电 + 非限牌城市 | 提醒非限牌城市新能源牌照优势不显著 |
+| 二手车 + 试驾 + 1 周内提车 | 建议放宽至 2 周，或选已完成整备的二手车 |
+| 贷款 + 置换 + 高里程旧车 | 提醒置换估价可能偏低，建议增加首付 |
+| 10 万以内 + 全款 + 无置换 | 提醒选择面窄，建议考虑贷款扩大范围 |
+| 二手车 + 工作日试驾 | 部分二手车商无固定试驾车，建议调整时间 |
+
+**Phase 2 Resolver — `resolve_car_dealers.py`：**
+
+```python
+# 包装 chinese-poi-search 的 amap_poi_tool，专为汽车销售场景定制：
+# - 自动拼接品牌 + "4S店" 为搜索关键词
+# - 二手车/新车使用不同关键词策略
+# - 默认搜索半径 5km（4S 店比餐厅分散）
+# - 三种搜索模式：地点名周边 / 城市区域 / 坐标周边
+
+from resolve_car_dealers import resolve_car_dealers
+
+# 模式 1: 地点名周边搜索（推荐）
+results = resolve_car_dealers(brand="比亚迪", place_name="望京", area="北京")
+
+# 模式 2: 城市区域搜索
+results = resolve_car_dealers(brand="丰田", area="上海", district="浦东")
+
+# 模式 3: 坐标周边搜索
+results = resolve_car_dealers(brand="宝马", location="121.4752,31.2297", radius=8000)
+```
+
+**Phase 4 领域定制（复用 hermes-nexus）：**
+
+| 配置项 | food (参考) | car-sales (本技能) |
+|--------|------------|-------------------|
+| LLM 角色 | 公司行政人员订团建餐 | 购车客户致电 4S 店销售 |
+| 交互对象 | 餐厅前台/经理 | 4S 店销售顾问 |
+| 确认内容 | 时间/人数/包间/停车/低消 | 库存/试驾/优惠/贷款/置换/保险 |
+| 渠道 | TerminalChannel | TerminalChannel（复用） |
+
+**端到端示例：**
+
+用户说："帮我在北京望京附近找比亚迪 4S 店，想看汉 EV，预算 25 万，周末试驾"
+
+```
+Phase 1 (信息输入)
+  └─ 意图: Action=看车+试驾, Object=比亚迪4S店,
+     Constraints={望京, 汉EV, 25万, 周末试驾}
+
+Phase 3 (对话式需求采集)
+  ├─ 模块一: 比亚迪/汉EV/25万/new/bev/通勤/北京/望京 ✓
+  ├─ 模块二: need_test_drive=true(本周末)/限牌=true(需新申请)/
+  │          贷款=true(首付8万)/无置换/1个月内提车/白色
+  │   └─ 冲突检测: 限牌+纯电 → 绿牌免摇号，无冲突 ✓
+  ├─ 模块三: 保险(true)/上牌(true)/装饰(true)/延保(false)
+  ├─ 模块四: 汇总确认 → 用户确认 → 锁定
+  └─ status: ready_to_dispatch
+
+Phase 2 (POI 搜索)
+  └─ resolve_car_dealers(brand="比亚迪", place_name="望京", area="北京")
+  └─ → [{比亚迪海洋网(望京4S店), 评分4.2, 新车}]
+
+Phase 4 (外呼确认)
+  └─ POST /api/v1/chat → LLM 致电 4S 店
+  └─ 确认: 现车/试驾/优惠/贷款/保险/提车周期 → completed
+
+Phase 5 (结果整理)
+  └─ 全部满足 ✓ → 用户 accept → 🎉 预约到店！
+```
+
 ---
 
 ## Part D: 源码分析索引
@@ -366,13 +557,20 @@ hermes-nexus/
 │   ├── chat.py                 #   ChatSession 多轮对话编排器
 │   └── channel.py              #   TerminalChannel 通信渠道
 │
-├── skills/                     # Hermes Skill 定义
-│   ├── chinese-poi-search/     #   POI 搜索技能（高德 API）
+├── skills/                              # Hermes Skill 定义
+│   ├── chinese-poi-search/              #   POI 搜索技能（高德 API）
 │   │   ├── SKILL.md
 │   │   ├── scripts/amap_poi_tool.py
 │   │   └── references/ (x5)
-│   └── interactive-task-food/  #   餐馆预定领域技能（5 阶段流水线）
-│       └── SKILL.md
+│   ├── interactive-task-food/           #   餐馆预定领域技能（5 阶段流水线）
+│   │   └── SKILL.md
+│   ├── interactive-task-skill-generator/ #   元 Skill：领域 Skill 生成器
+│   │   ├── SKILL.md
+│   │   ├── templates/domain-skill-template.md
+│   │   └── references/domain-heuristics.md
+│   └── interactive-task-car-sales/      #   汽车销售领域技能（由生成器产出）
+│       ├── SKILL.md
+│       └── scripts/resolve_car_dealers.py
 │
 ├── docs/                       # Hermes Agent 源码分析（23 篇深度文档）
 │   ├── 00-目录与阅读引导.md

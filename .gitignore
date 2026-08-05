@@ -123,6 +123,8 @@ models-dev-upstream/
 # Local editor / agent tooling (machine-specific; keep in global config, not the repo)
 .idea
 .idea/
+.tmp
+.tmp/
 .codex/
 .claude
 .claude/

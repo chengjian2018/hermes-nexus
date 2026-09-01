@@ -203,3 +203,74 @@ def test_load_active_sessions_filters_expired(tmp_path):
     store.close()
 
     assert [s.session_id for s, _ in restored] == ["alive"]
+
+
+def _seed_two_sessions(store):
+    """造两个会话各一轮对话，返回 (ids)。"""
+    for sid in ("sa", "sb"):
+        session = make_session(sid, pattern_code="car_sales_route" if sid == "sa" else "other")
+        store.create_session(session)
+        session.cxt.add_message("user", f"q-{sid}", stage="chat")
+        session.cxt.add_message("assistant", f"a-{sid}", stage="chat")
+        store.save_turn(session, 0)
+
+
+def test_list_sessions_filter_and_order(tmp_path):
+    """按 pattern_code 过滤、按 last_active_at 倒序、含 message_count。"""
+    import time as _time
+
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    _seed_two_sessions(store)
+    # 把 sa 回拨为较旧
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "UPDATE sessions SET last_active_at = ? WHERE session_id = 'sa'",
+            (_time.time() - 100,),
+        )
+    conn.close()
+
+    all_rows = store.list_sessions(pattern_code=None, limit=50, offset=0)
+    assert [r["session_id"] for r in all_rows] == ["sb", "sa"]  # 新的在前
+
+    filtered = store.list_sessions(pattern_code="other", limit=50, offset=0)
+    assert [r["session_id"] for r in filtered] == ["sb"]
+
+    assert all_rows[0]["message_count"] == 2
+    assert "pattern_code" in all_rows[0]
+    store.close()
+
+
+def test_list_sessions_pagination(tmp_path):
+    """limit/offset 分页。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    _seed_two_sessions(store)
+
+    page = store.list_sessions(pattern_code=None, limit=1, offset=1)
+    assert len(page) == 1
+    assert page[0]["session_id"] in ("sa", "sb")
+    store.close()
+
+
+def test_get_messages_ordered_and_typed(tmp_path):
+    """消息按 id 升序、metadata 反序列化为 dict。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    _seed_two_sessions(store)
+
+    msgs = store.get_messages("sa")
+    assert msgs is not None
+    assert [m["content"] for m in msgs] == ["q-sa", "a-sa"]
+    assert msgs[0]["id"] < msgs[1]["id"]
+    assert isinstance(msgs[0]["metadata"], dict)
+    assert msgs[0]["stage"] == "chat"
+    store.close()
+
+
+def test_get_messages_missing_session(tmp_path):
+    """会话不存在返回 None（端点转 404 信封）。"""
+    store = SessionStore(str(tmp_path / "t.db"))
+    assert store.get_messages("nope") is None
+    store.close()

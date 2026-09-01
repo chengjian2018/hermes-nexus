@@ -189,3 +189,51 @@ class SessionStore:
                 ]
                 restored.append((session, row["last_active_at"]))
             return restored
+
+    # ------------------------------------------------------------------
+    # 审计查询（只读）
+    # ------------------------------------------------------------------
+
+    def list_sessions(
+        self,
+        pattern_code: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """会话列表（按 last_active_at 倒序），含消息计数。"""
+        sql = """
+            SELECT s.session_id, s.pattern_code, s.current_module_code,
+                   s.current_node_code, s.created_at, s.last_active_at,
+                   (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.session_id)
+                       AS message_count
+            FROM sessions s
+        """
+        params: List[Any] = []
+        if pattern_code:
+            sql += " WHERE s.pattern_code = ?"
+            params.append(pattern_code)
+        sql += " ORDER BY s.last_active_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_messages(self, session_id: str) -> Optional[List[Dict[str, Any]]]:
+        """某会话全程消息（按 id 升序）；会话不存在返回 None。"""
+        with self._lock:
+            exists = self._conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if exists is None:
+                return None
+            rows = self._conn.execute(
+                """SELECT id, role, content, stage, metadata, created_at
+                   FROM messages WHERE session_id = ? ORDER BY id""",
+                (session_id,),
+            ).fetchall()
+            messages = []
+            for r in rows:
+                d = dict(r)
+                d["metadata"] = json.loads(d["metadata"] or "{}")
+                messages.append(d)
+            return messages

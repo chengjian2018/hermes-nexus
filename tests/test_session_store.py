@@ -148,3 +148,58 @@ def test_save_turn_empty_increment_no_rows(tmp_path):
     store.close()
 
     assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 1
+
+
+def test_load_active_sessions_restores_fields(tmp_path):
+    """恢复：history/filled_slots/当前节点/任务信息还原；pattern 留空由调用方解析。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session("alive")
+    session.cxt.current_module_code = "car_sales_root"
+    session.cxt.current_node_code = "menu_sales"
+    session.cxt.filled_slots = {"brand": "特斯拉"}
+    store.create_session(session)
+    session.cxt.add_message("user", "你好", stage="chat")
+    session.cxt.add_message("assistant", "您好", stage="chat")
+    store.save_turn(session, 0)
+
+    restored = store.load_active_sessions(ttl_seconds=3600)
+    store.close()
+
+    assert len(restored) == 1
+    r, last_active = restored[0]
+    assert isinstance(last_active, float) and last_active > 0
+    assert r.session_id == "alive"
+    assert r.pattern_code == "car_sales_route"
+    assert r.pattern is None
+    assert r.task_info == {"caller": "pytest"}
+    assert r.cxt.metadata["request_id"] == "req-alive"
+    assert r.cxt.current_module_code == "car_sales_root"
+    assert r.cxt.current_node_code == "menu_sales"
+    assert r.cxt.filled_slots == {"brand": "特斯拉"}
+    assert [(m.role, m.content) for m in r.cxt.history] == [
+        ("user", "你好"),
+        ("assistant", "您好"),
+    ]
+
+
+def test_load_active_sessions_filters_expired(tmp_path):
+    """超过 ttl 未活跃的会话不恢复。"""
+    import time as _time
+
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    store.create_session(make_session("alive"))
+    store.create_session(make_session("dead"))
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "UPDATE sessions SET last_active_at = ? WHERE session_id = 'dead'",
+            (_time.time() - 9999,),
+        )
+    conn.close()
+
+    restored = store.load_active_sessions(ttl_seconds=3600)
+    store.close()
+
+    assert [s.session_id for s, _ in restored] == ["alive"]

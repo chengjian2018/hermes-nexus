@@ -142,3 +142,50 @@ class SessionStore:
                     session.session_id,
                 ),
             )
+
+    # ------------------------------------------------------------------
+    # 重启恢复
+    # ------------------------------------------------------------------
+
+    def load_active_sessions(self, ttl_seconds: float) -> List[Tuple[Session, float]]:
+        """加载 ``last_active_at`` 未过期的会话（startup 恢复用）。
+
+        Returns:
+            ``(Session, last_active_at 墙钟)`` 列表。Session.pattern 为 None、
+            node_map/module_map 为空——由调用方从注册中心解析注入。
+        """
+        cutoff = time.time() - ttl_seconds
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM sessions WHERE last_active_at >= ?"
+                " ORDER BY last_active_at DESC",
+                (cutoff,),
+            ).fetchall()
+            restored: List[Tuple[Session, float]] = []
+            for row in rows:
+                msgs = self._conn.execute(
+                    "SELECT role, content, stage, metadata FROM messages"
+                    " WHERE session_id = ? ORDER BY id",
+                    (row["session_id"],),
+                ).fetchall()
+                session = Session(
+                    session_id=row["session_id"],
+                    pattern_code=row["pattern_code"],
+                )
+                session.task_info = json.loads(row["task_info"] or "{}")
+                session.cxt.metadata["task_info"] = session.task_info
+                session.cxt.metadata["request_id"] = row["request_id"]
+                session.cxt.current_module_code = row["current_module_code"]
+                session.cxt.current_node_code = row["current_node_code"]
+                session.cxt.filled_slots = json.loads(row["filled_slots"] or "{}")
+                session.cxt.history = [
+                    SessionMessage(
+                        role=m["role"],
+                        content=m["content"],
+                        stage=m["stage"],
+                        metadata=json.loads(m["metadata"] or "{}"),
+                    )
+                    for m in msgs
+                ]
+                restored.append((session, row["last_active_at"]))
+            return restored

@@ -12,6 +12,7 @@ the framework default implementation is used when unset.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,38 @@ class ModuleType(Enum):
     AGENT = "agent"   # pure LLM agent replies directly
     FSM = "fsm"       # finite state machine (multi-layer node transitions)
     ROUTE = "route"   # root router + intent menu
+
+
+@dataclass
+class ModuleLink:
+    """邻接声明：A 的 sub_modules 里的一条边。
+
+    一字段两职责：既是对 transfer 合法目标的声明（转移图边集），
+    又定义 A 上下文中 B 的投影厚度（知识/工具借出配置）。
+    """
+
+    target: str
+    lend_knowledge: bool = True
+    lend_tools: Optional[List[str]] = None
+
+    def __post_init__(self):
+        self.lend_tools = self.lend_tools or []
+
+
+def _normalize_links(sub_modules: Optional[List[Any]]) -> List[ModuleLink]:
+    """把 str / ModuleLink 混合列表归一化为 List[ModuleLink]。
+
+    str 写法（旧兼容）自动包装为 lend_knowledge=True、lend_tools=[]。
+    """
+    links: List[ModuleLink] = []
+    for item in sub_modules or []:
+        if isinstance(item, ModuleLink):
+            links.append(item)
+        elif isinstance(item, str):
+            links.append(ModuleLink(target=item))
+        else:
+            raise ValueError(f"sub_modules 元素必须是 str 或 ModuleLink: {item!r}")
+    return links
 
 
 class BaseModule:
@@ -54,7 +87,7 @@ class BaseModule:
         module_description: Optional[str] = None,
         module_todo_description: Optional[str] = None,
         module_nodes: Optional[List[Any]] = None,
-        sub_modules: Optional[List[str]] = None,
+        sub_modules: Optional[List[Any]] = None,
         use_tools: Optional[List[Any]] = None,
         base_prompt: Optional[str] = None,
         base_nlu_prompt: Optional[str] = None,
@@ -64,6 +97,7 @@ class BaseModule:
         agent_stage: Optional[Any] = None,
         enable_clarify: bool = False,
         is_end: Optional[bool] = False,
+        answer_examples: Optional[List[str]] = None,
         **kwargs,
     ):
         self.module_code = module_code
@@ -75,7 +109,8 @@ class BaseModule:
         self.base_prompt = base_prompt
         self.base_nlu_prompt = base_nlu_prompt
         self.base_nlg_prompt = base_nlg_prompt
-        self.sub_modules = sub_modules or []
+        self.sub_modules = _normalize_links(sub_modules)
+        self.answer_examples = answer_examples or []
 
         # Module-level stage instances (priority over default implementations)
         self.nlu_stage = nlu_stage
@@ -96,6 +131,22 @@ class BaseModule:
             f"<{type(self).__name__} "
             f"code={self.module_code!r} type={self.type.value!r}>"
         )
+
+    def to_projection_text(self) -> str:
+        """模块头部投影：供邻接 module 的 agent prompt 注入（inject 原语）。
+
+        只含头部四字段（name/description/todo/answer_examples），不含内部
+        流程 prompt —— 流程深度不投影，深入需 transfer（spec §1.2）。
+        """
+        parts = []
+        if self.module_name:
+            parts.append(f"- 定义：【{self.module_name}】{self.module_description or ''}")
+        if self.module_todo_description:
+            parts.append(f"- 职责：{self.module_todo_description}")
+        if self.answer_examples:
+            examples = "；".join(self.answer_examples)
+            parts.append(f"- 回答范式：「{examples}」")
+        return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

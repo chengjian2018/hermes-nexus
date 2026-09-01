@@ -31,6 +31,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         models: Optional[List[str]] = None,
         timeout: int = 60,
         max_retries: int = 2,
+        enable_thinking: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -44,6 +45,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         )
         self.timeout = timeout
         self.max_retries = max_retries
+        self.enable_thinking = enable_thinking
 
     def _build_url(self) -> str:
         """Build the full chat-completions URL."""
@@ -75,6 +77,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": stream,
+            # Qwen3 思考模式开关（DashScope 兼容模式扩展参数），默认关闭
+            "enable_thinking": self.enable_thinking,
             **kwargs,
         }
 
@@ -154,6 +158,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             "max_tokens": max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
+            # Qwen3 思考模式开关（DashScope 兼容模式扩展参数），默认关闭
+            "enable_thinking": self.enable_thinking,
             **kwargs,
         }
 

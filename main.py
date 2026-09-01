@@ -130,6 +130,39 @@ class ChatResponse(BaseModel):
     data: Dict[str, str] = {}
 
 
+class SessionSummary(BaseModel):
+    session_id: str
+    pattern_code: str
+    current_module_code: Optional[str] = None
+    current_node_code: Optional[str] = None
+    message_count: int
+    created_at: float
+    last_active_at: float
+
+
+class SessionListResponse(BaseModel):
+    code: str
+    message: str
+    status: bool
+    data: Dict[str, List[SessionSummary]] = {}
+
+
+class MessageItem(BaseModel):
+    id: int
+    role: str
+    content: str
+    stage: str
+    metadata: Dict[str, Any] = {}
+    created_at: float
+
+
+class SessionMessagesResponse(BaseModel):
+    code: str
+    message: str
+    status: bool
+    data: Dict[str, List[MessageItem]] = {}
+
+
 
 # func1
 # 外呼任务发起：根据pattern_code注册一个对话任务，并新增session
@@ -247,4 +280,51 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
             "session_id": chat_request.session_id,
             "response": response_text,
         },
+    )
+
+
+# func3（只读审计）
+# 会话列表：按 last_active_at 倒序，可按 pattern_code 过滤、分页
+@app.get("/api/v1/sessions")
+def list_sessions(
+    pattern_code: str = "", limit: int = 50, offset: int = 0
+) -> SessionListResponse:
+    if store is None:
+        return SessionListResponse(code="500", status=False, message="会话存储未启用")
+
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    try:
+        sessions = store.list_sessions(
+            pattern_code=pattern_code or None, limit=limit, offset=offset
+        )
+    except Exception as e:
+        logger.exception("查询会话列表失败")
+        return SessionListResponse(code="500", status=False, message=f"查询会话列表失败: {e}")
+
+    return SessionListResponse(
+        code="0", status=True, message="success", data={"sessions": sessions}
+    )
+
+
+# func4（只读审计）
+# 某会话全程消息（含 NLU/NLG 等中间 stage 消息），按 id 升序
+@app.get("/api/v1/sessions/{session_id}/messages")
+def get_session_messages(session_id: str) -> SessionMessagesResponse:
+    if store is None:
+        return SessionMessagesResponse(code="500", status=False, message="会话存储未启用")
+
+    try:
+        messages = store.get_messages(session_id)
+    except Exception as e:
+        logger.exception("查询会话消息失败")
+        return SessionMessagesResponse(code="500", status=False, message=f"查询会话消息失败: {e}")
+
+    if messages is None:
+        return SessionMessagesResponse(
+            code="404", status=False, message=f"session_id '{session_id}' 不存在"
+        )
+
+    return SessionMessagesResponse(
+        code="0", status=True, message="success", data={"messages": messages}
     )

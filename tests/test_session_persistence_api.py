@@ -129,6 +129,62 @@ def test_store_failure_does_not_block(client, store, registry_guard, monkeypatch
     assert body["status"] is True, body["message"]
 
 
+def test_list_sessions_endpoint(client, store, registry_guard):
+    """GET /sessions：默认列表 + pattern_code 过滤 + 分页参数。"""
+    register_fake_provider()
+    launch(client, "api-a")
+    launch(client, "api-a2")
+    launch(client, "api-b", pattern_code="not_registered_is_rejected")
+
+    resp = client.get("/api/v1/sessions")
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["code"] == "0"
+    ids = [s["session_id"] for s in body["data"]["sessions"]]
+    assert "api-a" in ids and "api-b" not in ids  # 未注册 pattern 的 launch 被拒
+
+    resp = client.get("/api/v1/sessions", params={"pattern_code": "car_sales_route", "limit": 1})
+    sessions = resp.json()["data"]["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["pattern_code"] == "car_sales_route"
+
+
+def test_messages_endpoint_and_404(client, store, registry_guard):
+    """GET /sessions/{id}/messages：全程消息；不存在返回 404 信封。"""
+    register_fake_provider()
+    launch(client, "api-msg")
+    _use_fake_llm("api-msg")
+    chat(client, "api-msg", "你好")
+
+    resp = client.get("/api/v1/sessions/api-msg/messages")
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["code"] == "0"
+    msgs = body["data"]["messages"]
+    assert msgs[0]["role"] == "user"
+    assert msgs[-1]["role"] == "assistant"
+    assert all("stage" in m and "created_at" in m for m in msgs)
+
+    resp = client.get("/api/v1/sessions/no-such/messages")
+    body = resp.json()
+    assert resp.status_code == 200  # 业务码在信封里
+    assert body["code"] == "404"
+    assert body["status"] is False
+
+
+def test_audit_endpoints_degraded_when_no_store(client, registry_guard):
+    """store 未启用时审计端点返回 500 信封（降级可见）。"""
+    import main
+
+    prev = main.store
+    main.store = None
+    try:
+        assert client.get("/api/v1/sessions").json()["code"] == "500"
+        assert client.get("/api/v1/sessions/x/messages").json()["code"] == "500"
+    finally:
+        main.store = prev
+
+
 def test_launch_persist_failure_degrades(client, store, registry_guard, monkeypatch):
     """launch 落盘失败：launch 响应不受影响，会话仍在内存可用。"""
     import main

@@ -37,6 +37,14 @@ _LLM_ALL_FIELDS = _LLM_REQUIRED_FIELDS | _LLM_OPTIONAL_FIELDS
 
 
 # ============================================================================
+# 会话持久化配置
+# ============================================================================
+
+# 会话审计 SQLite 文件缺省路径（相对服务启动目录）
+DEFAULT_SESSION_DB_PATH = "data/dialogue.db"
+
+
+# ============================================================================
 # 配置加载
 # ============================================================================
 
@@ -140,6 +148,8 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
 
     return {
         "llm": llm_config,
+        # 会话持久化 SQLite 路径（可选，缺省 data/dialogue.db）
+        "session_db_path": raw.get("session_db_path", DEFAULT_SESSION_DB_PATH),
         # 后续可扩展其他节点，如: "dialogue", "logging", "storage" 等
     }
 
@@ -150,3 +160,11 @@ def get_llm_config(config_path: str = "") -> Dict[str, Any]:
     Equivalent to ``load_config(config_path)["llm"]``.
     """
     return load_config(config_path)["llm"]
+
+
+def get_session_db_path(config_path: str = "") -> str:
+    """便捷方法：返回会话持久化 SQLite 文件路径。
+
+    Equivalent to ``load_config(config_path)["session_db_path"]``.
+    """
+    return load_config(config_path)["session_db_path"]

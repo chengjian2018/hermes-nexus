@@ -1,13 +1,15 @@
 import logging
 import threading
 import time
-from typing import Dict
+from typing import Any, Dict, List, Optional
 
 import fastapi
 from pydantic import BaseModel
 
+from config.config import get_session_db_path
 from src.chat.chat import chat
 from src.chat.session import Session
+from src.chat.store import SessionStore
 from src.dialogue.register import registry as pattern_registry
 from src.dialogue.register import discover_builtin_patterns
 from src.tools.register import registry as tool_registry
@@ -34,6 +36,10 @@ all_sessions: Dict[str, Session] = {}
 _session_last_active: Dict[str, float] = {}
 # 保护 all_sessions / _session_last_active 的并发读写（launch 登记、chat 校验、过期与超限逐出）
 _sessions_lock = threading.Lock()
+
+# 会话持久化 store（SQLite 审计 + 重启恢复）；startup 时初始化，测试可替换。
+# None = 未启用（降级：对话正常，无审计/无恢复）
+store: Optional[SessionStore] = None
 
 
 def _touch_session(session_id: str) -> None:
@@ -85,6 +91,73 @@ def _evict_oldest_if_over_limit() -> int:
     return len(evicted)
 
 
+def _init_store() -> None:
+    """初始化会话持久化 store；失败降级为 None（对话可用，审计/恢复关闭）。"""
+    global store
+    try:
+        db_path = get_session_db_path()
+        store = SessionStore(db_path)
+        logger.info("会话存储已启用: %s", db_path)
+    except Exception:
+        logger.exception("初始化会话存储失败，审计与重启恢复降级")
+        store = None
+
+
+def _restore_sessions() -> int:
+    """从 store 恢复未过期会话回内存（重启恢复）。
+
+    pattern 按 pattern_code 从注册中心重新解析并注入 node_map/module_map；
+    未注册的 pattern 跳过并 warning。DB 墙钟换算 monotonic 基准。
+
+    Returns:
+        int: 实际恢复的会话数
+    """
+    if store is None:
+        return 0
+    restored = 0
+    now_wall = time.time()
+    try:
+        active_sessions = store.load_active_sessions(SESSION_TTL_SECONDS)
+    except Exception:
+        logger.exception("加载未过期会话失败，跳过恢复")
+        return 0
+    for session, last_active_wall in active_sessions:
+        try:
+            pattern = pattern_registry.get(session.pattern_code)
+            if pattern is None:
+                logger.warning(
+                    "恢复跳过会话 %s: pattern '%s' 未注册",
+                    session.session_id,
+                    session.pattern_code,
+                )
+                continue
+            session.pattern = pattern
+            session.cxt.module_map = pattern.module_map
+            session.cxt.node_map = pattern.node_map
+            with _sessions_lock:
+                all_sessions[session.session_id] = session
+                _session_last_active[session.session_id] = time.monotonic() - (
+                    now_wall - last_active_wall
+                )
+            restored += 1
+        except Exception:
+            logger.exception("恢复会话失败，跳过: session=%s", session.session_id)
+            continue
+    if restored:
+        logger.info("重启恢复会话 %d 个", restored)
+    return restored
+
+
+@app.on_event("startup")
+def _startup_persistence() -> None:
+    """服务启动：初始化会话存储 + 恢复未过期会话。"""
+    _init_store()
+    try:
+        _restore_sessions()
+    except Exception:
+        logger.exception("重启恢复失败，跳过恢复")
+
+
 # # check aleady registried patterns and tools
 # print(pattern_registry._patterns)
 # print(tool_registry._tools)
@@ -123,6 +196,39 @@ class ChatResponse(BaseModel):
     message: str
     status: bool
     data: Dict[str, str] = {}
+
+
+class SessionSummary(BaseModel):
+    session_id: str
+    pattern_code: str
+    current_module_code: Optional[str] = None
+    current_node_code: Optional[str] = None
+    message_count: int
+    created_at: float
+    last_active_at: float
+
+
+class SessionListResponse(BaseModel):
+    code: str
+    message: str
+    status: bool
+    data: Dict[str, List[SessionSummary]] = {}
+
+
+class MessageItem(BaseModel):
+    id: int
+    role: str
+    content: str
+    stage: str
+    metadata: Dict[str, Any] = {}
+    created_at: float
+
+
+class SessionMessagesResponse(BaseModel):
+    code: str
+    message: str
+    status: bool
+    data: Dict[str, List[MessageItem]] = {}
 
 
 
@@ -172,6 +278,13 @@ def launch_dialogue(dialogue_request: DialogueRequest) -> DialogueResponse:
         all_sessions[dialogue_request.session_id] = session
         _touch_session(dialogue_request.session_id)
 
+    # 6. 审计落盘（内存登记成功后）；失败仅记日志，不阻断 launch
+    if store is not None:
+        try:
+            store.create_session(session)
+        except Exception:
+            logger.exception("会话落盘失败: session=%s", dialogue_request.session_id)
+
     return DialogueResponse(
         code="0",
         status=True,
@@ -200,6 +313,9 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
     # 2. 调用 chat 函数处理对话。
     #    锁外执行：LLM 调用耗时长，不能阻塞其他请求；chat 内部持 session 本地引用，
     #    即便本轮处理中被并发逐出也不影响本次对话
+    # 3. 轮末审计落盘：追加本轮新增消息 + 状态快照（含上方异常路径；失败仅记日志）
+    start_idx = len(session.cxt.history)
+    error: Optional[Exception] = None
     try:
         response_text = chat(
             query=chat_request.query,
@@ -208,10 +324,19 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
         )
     except Exception as e:
         logger.exception("对话处理异常")
+        error = e
+
+    if store is not None:
+        try:
+            store.save_turn(session, start_idx)
+        except Exception:
+            logger.exception("会话轮末落盘失败: session=%s", chat_request.session_id)
+
+    if error is not None:
         return ChatResponse(
             code="500",
             status=False,
-            message=f"对话处理异常: {e}",
+            message=f"对话处理异常: {error}",
         )
 
     return ChatResponse(
@@ -223,4 +348,51 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
             "session_id": chat_request.session_id,
             "response": response_text,
         },
+    )
+
+
+# func3（只读审计）
+# 会话列表：按 last_active_at 倒序，可按 pattern_code 过滤、分页
+@app.get("/api/v1/sessions")
+def list_sessions(
+    pattern_code: str = "", limit: int = 50, offset: int = 0
+) -> SessionListResponse:
+    if store is None:
+        return SessionListResponse(code="500", status=False, message="会话存储未启用")
+
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    try:
+        sessions = store.list_sessions(
+            pattern_code=pattern_code or None, limit=limit, offset=offset
+        )
+    except Exception as e:
+        logger.exception("查询会话列表失败")
+        return SessionListResponse(code="500", status=False, message=f"查询会话列表失败: {e}")
+
+    return SessionListResponse(
+        code="0", status=True, message="success", data={"sessions": sessions}
+    )
+
+
+# func4（只读审计）
+# 某会话全程消息（含 NLU/NLG 等中间 stage 消息），按 id 升序
+@app.get("/api/v1/sessions/{session_id}/messages")
+def get_session_messages(session_id: str) -> SessionMessagesResponse:
+    if store is None:
+        return SessionMessagesResponse(code="500", status=False, message="会话存储未启用")
+
+    try:
+        messages = store.get_messages(session_id)
+    except Exception as e:
+        logger.exception("查询会话消息失败")
+        return SessionMessagesResponse(code="500", status=False, message=f"查询会话消息失败: {e}")
+
+    if messages is None:
+        return SessionMessagesResponse(
+            code="404", status=False, message=f"session_id '{session_id}' 不存在"
+        )
+
+    return SessionMessagesResponse(
+        code="0", status=True, message="success", data={"messages": messages}
     )

@@ -75,6 +75,8 @@ ignored/
 .worktrees/
 environments/benchmarks/evals/
 
+config/local_config.yaml
+
 # Web UI build output
 hermes_cli/web_dist/
 # Cross-process web UI build lock (flock target, always empty)
@@ -99,11 +101,11 @@ apps/desktop/release/
 # `npm run sync-assets` (see web/package.json).
 web/public/fonts/
 web/public/ds-assets/
-
 # Release script temp files
 .release_notes.md
 mini-swe-agent/
 
+tmp.py
 # Nix
 .direnv/
 .nix-stamps/
@@ -191,3 +193,9 @@ infographics/
 infograficos/
 infografico/
 native/fts5_cjk/*.so
+/src/llm/test_openai.py
+/src/tools/test_tool.py
+/test_tool_llm.py
+
+# Pattern 可视化生成产物（python -m src.dialogue.visualize 输出目录）
+/diagrams/

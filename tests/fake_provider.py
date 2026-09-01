@@ -1,6 +1,6 @@
 """脚本化 FakeProvider —— 离线测试共用的伪 LLM provider（不访问真实 API）。
 
-按 prompt 内容区分 NLU / NLG / 重试三类请求并返回固定结果，
+按 prompt 内容区分 统一阶段 / NLU / NLG / 重试 四类请求并返回固定结果，
 供 route pattern 的逻辑测试与 API 测试复用。
 """
 
@@ -122,14 +122,81 @@ def _fsm_nlu(node_name: str, query: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _unified(node_name: str, query: str, retry: bool) -> str:
+    """统一阶段（单次调用 + structured output）的脚本化结果。
+
+    输出协议：{"reply", "next_node", "slots"}，reply 内嵌目标节点名称便于断言。
+    """
+    if "解析失败重试" in query and not retry:
+        return "这不是合法的 JSON 输出"  # 触发第一次解析失败
+    if "永远解析失败" in query:
+        return "这不是合法的 JSON 输出"
+    if "跳到不存在节点" in query:
+        # 模拟模型违反转移边约束，供代码级硬 guard 测试
+        return json.dumps(
+            {
+                "reply": "统一回复: 非法节点",
+                "next_node": "not_exist_node",
+                "slots": {},
+            },
+            ensure_ascii=False,
+        )
+
+    # 路由根节点：意图分类到菜单
+    if node_name == "统一路由根节点":
+        if any(k in query for k in ("买车", "购车", "车型", "试驾", "询价")):
+            return json.dumps(
+                {
+                    "reply": "统一回复: 购车菜单",
+                    "next_node": "u_menu_sales",
+                    "slots": {},
+                },
+                ensure_ascii=False,
+            )
+        if any(k in query for k in ("你好", "谢谢", "再见")):
+            return json.dumps(
+                {
+                    "reply": "统一回复: 闲聊菜单",
+                    "next_node": "u_menu_chitchat",
+                    "slots": {},
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {"reply": "统一回复: 统一路由根节点", "next_node": "", "slots": {}},
+            ensure_ascii=False,
+        )
+
+    # FSM 节点：推进流程 + 槽位抽取，reply 为所选下一节点话术
+    mapping = {
+        "询问品牌": ("u_ask_budget", "brand", "统一回复: 询问预算"),
+        "询问预算": ("u_confirm", "budget", "统一回复: 确认购车信息"),
+        "确认购车信息": ("", None, "统一回复: 确认购车信息"),
+    }
+    next_node, slot_key, reply = mapping.get(
+        node_name, ("", None, "统一回复: 未知节点")
+    )
+    slots = {slot_key: query} if slot_key else {}
+    return json.dumps(
+        {"reply": reply, "next_node": next_node, "slots": slots},
+        ensure_ascii=False,
+    )
+
+
 def scripted_response(prompt: str) -> str:
     """按 prompt 类型返回脚本化 LLM 输出。"""
     node_name = _extract_node_name(prompt)
 
-    # NLU 重试修正 prompt（含「修正要求」段落）→ 返回正确格式
+    # NLU 重试修正 prompt（含「修正要求」段落）→ 按协议返回正确格式
     if "修正要求" in prompt:
         query = _extract_query(prompt).replace("解析失败重试", "")
+        if '"reply"' in prompt:
+            return _unified(node_name, query, retry=True)
         return _route_nlu(query, retry=True)
+
+    # 统一阶段 prompt：含 reply + next_node 的三字段 JSON 协议（先于 NLU 判定）
+    if '"reply"' in prompt and '"next_node"' in prompt:
+        return _unified(node_name, _extract_query(prompt), retry=False)
 
     # NLU prompt：含 next_node JSON 输出要求
     if '"next_node"' in prompt:

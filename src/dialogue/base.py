@@ -78,6 +78,12 @@ class DialogueContext:
     """Dialogue context flowing through the whole Pipeline.
 
     Every PipelineStage receives and returns this object; all intermediate results are stored here.
+
+    # metadata 键约定（module dispatch 机制使用，见 dispatch.py）：
+    #   dispatch_graph       : Dict[str, Set[str]]  合法转移边（chat 启动时注入）
+    #   dispatch_log         : List[Dict]           本轮转移链（每轮开头清空）
+    #   handoff_context      : Dict                 最近一次转移的承接信息
+    #   served_by_projection : str                  A 借投影答轮的来源域
     """
 
     session_id: str

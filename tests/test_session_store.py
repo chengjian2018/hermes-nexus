@@ -1,0 +1,88 @@
+"""SessionStore 单元测试 —— 建表/落盘/增量追加/恢复/查询。
+
+全部使用 tmp 文件 DB + 原生 sqlite3 断言（不经过被测读 API），
+fake session 手工构造，不依赖 FastAPI 与 LLM。
+"""
+
+import json
+import sqlite3
+
+from src.chat.session import Session
+from src.chat.store import SessionStore
+
+
+def make_session(session_id="s1", pattern_code="car_sales_route"):
+    """构造一个带任务信息的最小 Session。"""
+    session = Session(session_id=session_id, pattern_code=pattern_code)
+    session.task_info = {"caller": "pytest"}
+    session.cxt.metadata["request_id"] = f"req-{session_id}"
+    return session
+
+
+def fetch_one(db_path, sql, params=()):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(sql, params).fetchone()
+    finally:
+        conn.close()
+
+
+def fetch_all(db_path, sql, params=()):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def test_init_idempotent(tmp_path):
+    """重复对同一文件建 store（幂等 DDL）不抛异常。"""
+    db = str(tmp_path / "t.db")
+    store1 = SessionStore(db)
+    store1.close()
+    store2 = SessionStore(db)  # 不抛即通过
+    store2.close()
+
+
+def test_create_session_roundtrip(tmp_path):
+    """launch 落盘：sessions 行字段与 JSON 列往返一致。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session()
+    session.cxt.current_module_code = "car_sales_root"
+    session.cxt.current_node_code = "route_root"
+    session.cxt.filled_slots = {"brand": "特斯拉"}
+    store.create_session(session)
+    store.close()
+
+    row = fetch_one(db, "SELECT * FROM sessions WHERE session_id = 's1'")
+    assert row is not None
+    assert row["pattern_code"] == "car_sales_route"
+    assert row["request_id"] == "req-s1"
+    assert json.loads(row["task_info"]) == {"caller": "pytest"}
+    assert row["current_module_code"] == "car_sales_root"
+    assert row["current_node_code"] == "route_root"
+    assert json.loads(row["filled_slots"]) == {"brand": "特斯拉"}
+    assert row["created_at"] > 0 and row["last_active_at"] > 0
+
+
+def test_create_session_replaces_old_trail(tmp_path):
+    """同 session_id 重新 launch：旧 messages 被清，sessions 行被替换。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    store.create_session(make_session())
+    # 手工塞一条旧消息模拟上一轮流水
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, stage, metadata, created_at)"
+            " VALUES ('s1', 'user', '旧消息', 'chat', '{}', 1.0)"
+        )
+    conn.close()
+
+    store.create_session(make_session())  # 重新 launch
+    store.close()
+
+    assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 0

@@ -196,3 +196,62 @@ def test_launch_persist_failure_degrades(client, store, registry_guard, monkeypa
     body = launch(client, "audit-degraded2")
     assert body["status"] is True
     assert "audit-degraded2" in main.all_sessions
+
+
+def test_restart_recovery_restores_and_continues(client, store, registry_guard):
+    """模拟重启：清空内存 → _restore_sessions → 会话还原且能继续对话、DB 流水连续。"""
+    import main
+
+    register_fake_provider()
+    launch(client, "rs-1")
+    _use_fake_llm("rs-1")
+    chat(client, "rs-1", "你好")
+    count_before = len(store.get_messages("rs-1"))
+
+    # 模拟重启：内存清空
+    with main._sessions_lock:
+        main.all_sessions.clear()
+        main._session_last_active.clear()
+
+    restored = main._restore_sessions()
+    assert restored >= 1
+    session = main.all_sessions["rs-1"]
+    assert session.pattern is not None  # pattern 从注册中心重新解析
+    assert session.cxt.node_map and session.cxt.module_map  # 管线地图重新注入
+    assert len(session.cxt.history) >= 2  # history 从 DB 还原
+    assert "rs-1" in main._session_last_active  # 活跃时间已换算登记
+
+    # 恢复后继续对话：新消息接在还原 history 之后，DB 侧流水连续
+    session.cxt.llm_config = fake_llm_config()
+    body = chat(client, "rs-1", "我想买车")
+    assert body["status"] is True, body["message"]
+
+    msgs = store.get_messages("rs-1")
+    assert len(msgs) == count_before + 2  # user + assistant
+    assert msgs[count_before]["role"] == "user"
+
+
+def test_restore_skips_unregistered_pattern(client, store, registry_guard):
+    """pattern_code 未注册的会话跳过恢复（不抛、不进内存）。"""
+    import main
+    from src.chat.session import Session
+
+    store.create_session(Session(session_id="ghost", pattern_code="no_such_pattern"))
+    restored = main._restore_sessions()
+    assert "ghost" not in main.all_sessions
+    assert restored == 0
+
+
+def test_init_store_degrades_on_failure(monkeypatch):
+    """配置/DB 初始化失败 → store=None 降级，不抛异常。"""
+    import main
+
+    prev = main.store
+
+    def boom():
+        raise RuntimeError("no config")
+
+    monkeypatch.setattr(main, "get_session_db_path", boom)
+    main._init_store()
+    assert main.store is None
+    main.store = prev

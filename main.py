@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import fastapi
 from pydantic import BaseModel
 
+from config.config import get_session_db_path
 from src.chat.chat import chat
 from src.chat.session import Session
 from src.chat.store import SessionStore
@@ -88,6 +89,61 @@ def _evict_oldest_if_over_limit() -> int:
             evicted,
         )
     return len(evicted)
+
+
+def _init_store() -> None:
+    """初始化会话持久化 store；失败降级为 None（对话可用，审计/恢复关闭）。"""
+    global store
+    try:
+        db_path = get_session_db_path()
+        store = SessionStore(db_path)
+        logger.info("会话存储已启用: %s", db_path)
+    except Exception:
+        logger.exception("初始化会话存储失败，审计与重启恢复降级")
+        store = None
+
+
+def _restore_sessions() -> int:
+    """从 store 恢复未过期会话回内存（重启恢复）。
+
+    pattern 按 pattern_code 从注册中心重新解析并注入 node_map/module_map；
+    未注册的 pattern 跳过并 warning。DB 墙钟换算 monotonic 基准。
+
+    Returns:
+        int: 实际恢复的会话数
+    """
+    if store is None:
+        return 0
+    restored = 0
+    now_wall = time.time()
+    for session, last_active_wall in store.load_active_sessions(SESSION_TTL_SECONDS):
+        pattern = pattern_registry.get(session.pattern_code)
+        if pattern is None:
+            logger.warning(
+                "恢复跳过会话 %s: pattern '%s' 未注册",
+                session.session_id,
+                session.pattern_code,
+            )
+            continue
+        session.pattern = pattern
+        session.cxt.module_map = pattern.module_map
+        session.cxt.node_map = pattern.node_map
+        with _sessions_lock:
+            all_sessions[session.session_id] = session
+            _session_last_active[session.session_id] = time.monotonic() - (
+                now_wall - last_active_wall
+            )
+        restored += 1
+    if restored:
+        logger.info("重启恢复会话 %d 个", restored)
+    return restored
+
+
+@app.on_event("startup")
+def _startup_persistence() -> None:
+    """服务启动：初始化会话存储 + 恢复未过期会话。"""
+    _init_store()
+    _restore_sessions()
 
 
 # # check aleady registried patterns and tools

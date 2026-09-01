@@ -199,3 +199,6 @@ native/fts5_cjk/*.so
 
 # Pattern 可视化生成产物（python -m src.dialogue.visualize 输出目录）
 /diagrams/
+
+# 会话持久化 SQLite 数据目录
+data/

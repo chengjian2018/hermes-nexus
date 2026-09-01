@@ -1,13 +1,14 @@
 import logging
 import threading
 import time
-from typing import Dict
+from typing import Any, Dict, List, Optional
 
 import fastapi
 from pydantic import BaseModel
 
 from src.chat.chat import chat
 from src.chat.session import Session
+from src.chat.store import SessionStore
 from src.dialogue.register import registry as pattern_registry
 from src.dialogue.register import discover_builtin_patterns
 from src.tools.register import registry as tool_registry
@@ -34,6 +35,10 @@ all_sessions: Dict[str, Session] = {}
 _session_last_active: Dict[str, float] = {}
 # 保护 all_sessions / _session_last_active 的并发读写（launch 登记、chat 校验、过期与超限逐出）
 _sessions_lock = threading.Lock()
+
+# 会话持久化 store（SQLite 审计 + 重启恢复）；startup 时初始化，测试可替换。
+# None = 未启用（降级：对话正常，无审计/无恢复）
+store: Optional[SessionStore] = None
 
 
 def _touch_session(session_id: str) -> None:
@@ -172,6 +177,13 @@ def launch_dialogue(dialogue_request: DialogueRequest) -> DialogueResponse:
         all_sessions[dialogue_request.session_id] = session
         _touch_session(dialogue_request.session_id)
 
+    # 6. 审计落盘（内存登记成功后）；失败仅记日志，不阻断 launch
+    if store is not None:
+        try:
+            store.create_session(session)
+        except Exception:
+            logger.exception("会话落盘失败: session=%s", dialogue_request.session_id)
+
     return DialogueResponse(
         code="0",
         status=True,
@@ -200,6 +212,9 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
     # 2. 调用 chat 函数处理对话。
     #    锁外执行：LLM 调用耗时长，不能阻塞其他请求；chat 内部持 session 本地引用，
     #    即便本轮处理中被并发逐出也不影响本次对话
+    # 3. 轮末审计落盘：追加本轮新增消息 + 状态快照（含上方异常路径；失败仅记日志）
+    start_idx = len(session.cxt.history)
+    error: Optional[Exception] = None
     try:
         response_text = chat(
             query=chat_request.query,
@@ -208,10 +223,19 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
         )
     except Exception as e:
         logger.exception("对话处理异常")
+        error = e
+
+    if store is not None:
+        try:
+            store.save_turn(session, start_idx)
+        except Exception:
+            logger.exception("会话轮末落盘失败: session=%s", chat_request.session_id)
+
+    if error is not None:
         return ChatResponse(
             code="500",
             status=False,
-            message=f"对话处理异常: {e}",
+            message=f"对话处理异常: {error}",
         )
 
     return ChatResponse(

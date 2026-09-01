@@ -53,3 +53,17 @@ def test_dispatch_no_graph_denies():
     ctx = _mk_ctx()
     ctx.metadata.pop("dispatch_graph")
     assert dispatch(ctx, ModuleDispatch(target_module_code="b")) is False
+
+
+def test_bounce_back_legal_next_turn():
+    """M-6(a)：同轮回弹被拒；跨轮（dispatch_log 清空后）返回原模块合法（sticky 逃生）。"""
+    ctx = _mk_ctx()
+    dispatch(ctx, ModuleDispatch(target_module_code="b"))
+    # 同轮 A→B→A 拒绝
+    assert dispatch(ctx, ModuleDispatch(target_module_code="a")) is False
+    assert ctx.current_module_code == "b"
+    # 模拟下一轮：chat() 每轮开头清空 dispatch_log
+    ctx.metadata.pop("dispatch_log", None)
+    # 跨轮返回合法
+    assert dispatch(ctx, ModuleDispatch(target_module_code="a")) is True
+    assert ctx.current_module_code == "a"

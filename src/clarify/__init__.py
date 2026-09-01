@@ -7,5 +7,6 @@
 """
 
 from src.clarify.rule import ClarifyRouteRule
+from src.clarify.stage import ClarifyStage
 
-__all__ = ["ClarifyRouteRule"]
+__all__ = ["ClarifyRouteRule", "ClarifyStage"]

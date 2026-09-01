@@ -35,12 +35,14 @@ flowchart TB
         carsales["dialogue/car_sales_route.py<br/>(示例 pattern)"]
         carsalesagent["dialogue/car_sales_agent.py<br/>(Agent 多模块示例 pattern)"]
         carsalesuni["dialogue/car_sales_unified_route.py<br/>(统一阶段示例 pattern)"]
+        xianyuagent["dialogue/xianyu_agent_route.py<br/>(闲鱼客服 pattern<br/>复刻 xianyu-auto-reply)"]
         tools["tools/calculator_tool.py<br/>weather_tool.py<br/>workorder_tool.py"]
         clarify["src/clarify/<br/>偏题澄清"]
     end
     carsales -.-> preg
     carsalesagent -.-> preg
     carsalesuni -.-> preg
+    xianyuagent -.-> preg
     tools -.-> treg
 ```
 
@@ -60,6 +62,13 @@ flowchart TB
   （get/launch/run_turn），channel 模块不感知会话治理与 LLM；闲鱼适配把
   `(account_id, chat_id)` 派生为稳定 session_id 并对不存在会话自动 launch
   （get-or-create），错误一律非 200（对方 parse 契约：非 200 不发送）
+- **xianyu_agent pattern**：闲鱼卖家客服流程（`dialogue/xianyu_agent_route.py`），
+  复刻 xianyu-auto-reply 的 agent 对话管理：单 RouteModule 内 XianyuIntentNLU
+  （本地关键词意图检测 price/tech/default，零 LLM，模块级 nlu_stage）+ 意图级
+  节点 `base_nlg_prompt`（议价/技术/通用三套模板）+ 议价轮数控制（user 消息
+  metadata 回标 intent 计数，达上限切拒绝节点走 FixedNLG 固定话术，零 LLM）。
+  ROUTE 轮末回 root 与原实现"每条消息独立检测"同构；议价设置经
+  `ctx.metadata["bargain_settings"]` 注入（账号级配置入口）
 
 ## 公共契约（改动需走内核流程）
 

@@ -1,28 +1,47 @@
 """
-Agent dialogue loop — builds system_prompt from module, injects tools, runs multi-turn dialogue.
+Agent dialogue loop — run_agent 双原语执行器（inject 投影直接答 / transfer 拦截立即返回）。
 
 Supports:
 - Two-layer tool filtering: pattern permissions + module.use_tools
-- Multi-turn tool calling (ReAct style)
-- [jump xx] module/node jumps
+- Lent tools from neighbor modules (via ModuleLink.lend_tools)
+- transfer_to_XX tools generated per sub_modules link; on call, dispatch()
+  transfers state immediately and the turn ends (spec §3.3)
+- Tool round-trips recorded into DialogueContext history
 """
 
 import json
 import logging
-import re
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from src.chat.session import Session
+from src.dialogue.base import DialogueContext, fill_prompt_template
+from src.dialogue.dispatch import ModuleDispatch, dispatch
 from src.llm.resolve import build_provider
+from src.prompt import (
+    AGENT_PROJECTION_RECALL_PROMPT,
+    AGENT_TAKEOVER_PROMPT,
+    AGENT_TEAM_RULES_PROMPT,
+)
 from src.tools.register import registry as tool_registry
 
 logger = logging.getLogger(__name__)
 
-# Jump tag regex
-_JUMP_PATTERN = re.compile(r'\[jump\s+(\w+)\]')
+TRANSFER_TOOL_PREFIX = "transfer_to_"
 
 # Max tool calling rounds to prevent infinite loops
 _MAX_TOOL_ROUNDS = 10
+
+# 系统提示总长超过该值时告警（spec §5 投影膨胀观测）
+_PROMPT_LENGTH_WARN = 4000
+
+
+@dataclass
+class TurnResult:
+    """单模块单轮执行结果：reply 与 dispatch_event 互斥（spec §3.2）。"""
+
+    reply: Optional[str] = None
+    dispatch_event: Optional[ModuleDispatch] = None
 
 
 def conversation(
@@ -30,10 +49,13 @@ def conversation(
     module,
     llm_config: Dict[str, Any],
 ) -> str:
-    """Agent dialogue loop.
+    """兼容 wrapper：调 run_agent，dispatch_event 为 None 时返回 reply。"""
+    result = run_agent(session, module, llm_config)
+    return result.reply or ""
 
-    Builds system_prompt from module, injects the tools declared by module,
-    runs multi-turn LLM dialogue (with tool calling) until the LLM returns plain text.
+
+def run_agent(session: Session, module, llm_config: Dict[str, Any]) -> TurnResult:
+    """执行单个 AGENT 模块一轮：inject 直接答 / transfer 立即返回（spec §3.3）。
 
     Args:
         session: current session
@@ -41,33 +63,25 @@ def conversation(
         llm_config: LLM config dict with code, model, temperature, etc.
 
     Returns:
-        str: final reply text
+        TurnResult: reply 与 dispatch_event 互斥。
     """
     cxt = session.cxt
-
-    # Build the provider via the unified entry: yaml config values
-    # (api_base / api_key / api_key_env / timeout / max_retries) are
-    # forwarded as instantiate() overrides
     provider = build_provider(llm_config)
 
-    # ------------------------------------------------------------------
-    # 1. Build system_prompt from module
-    # ------------------------------------------------------------------
     system_prompt = _build_system_prompt(module, cxt)
+    if len(system_prompt) > _PROMPT_LENGTH_WARN:
+        logger.warning(
+            "Agent system_prompt 过长 (%d 字符): session=%s, module=%s（投影膨胀观测）",
+            len(system_prompt), cxt.session_id, module.module_code,
+        )
 
-    # ------------------------------------------------------------------
-    # 2. Tool injection: filter by pattern permissions + module.use_tools
-    # ------------------------------------------------------------------
-    tools = _resolve_tools(module, session.pattern)
+    own_tools = _resolve_tools(module, session.pattern)
+    lent_schemas, lent_by = _resolve_lent_tools(module, session.pattern)
+    transfer_tools = build_transfer_tools(module, cxt.module_map)
+    tools = own_tools + lent_schemas + transfer_tools
 
-    # ------------------------------------------------------------------
-    # 3. Build initial message list
-    # ------------------------------------------------------------------
     messages = _build_messages(system_prompt, cxt)
 
-    # ------------------------------------------------------------------
-    # 4. Agent multi-turn loop (with tool calling)
-    # ------------------------------------------------------------------
     model = llm_config["model"]
     temperature = llm_config.get("temperature", 0.7)
     max_tokens = llm_config.get("max_tokens", 2048)
@@ -75,132 +89,160 @@ def conversation(
     for round_idx in range(_MAX_TOOL_ROUNDS):
         logger.info(
             "Agent loop 第 %d 轮: session=%s, module=%s, tools=%d",
-            round_idx + 1,
-            cxt.session_id,
-            module.module_code,
-            len(tools),
+            round_idx + 1, cxt.session_id, module.module_code, len(tools),
         )
 
-        # Call LLM
         if tools:
             result = provider.chat_completion(
-                messages=messages,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                tools=tools,
-                tool_choice="auto",
+                messages=messages, model=model, temperature=temperature,
+                max_tokens=max_tokens, tools=tools, tool_choice="auto",
             )
         else:
             result = provider.chat_completion(
-                messages=messages,
-                model=model,
-                temperature=temperature,
+                messages=messages, model=model, temperature=temperature,
                 max_tokens=max_tokens,
             )
 
         content = result.get("content", "") or ""
         tool_calls = result.get("tool_calls", []) or []
 
-        # No tool calls means the LLM gave the final reply
+        # 无工具调用 → inject 原语：直接回答
         if not tool_calls:
             logger.info("Agent loop 完成，共 %d 轮", round_idx + 1)
-            response = content
+            return TurnResult(reply=content)
 
-            # Handle [jump xx] jump tags
-            response = _process_jump_tags(response, session)
-            return response
-
-        # Tool calls present: execute tools and append results to messages
-        logger.info(
-            "Agent loop 第 %d 轮检测到 %d 个 tool calls",
-            round_idx + 1,
-            len(tool_calls),
+        # 本轮工具调用里是否含 transfer
+        transfer_call = next(
+            (tc for tc in tool_calls
+             if tc.get("function", {}).get("name", "").startswith(TRANSFER_TOOL_PREFIX)),
+            None,
         )
+        if transfer_call is not None:
+            # A 的 content 不出口但保留进 history（spec §3.3）
+            if content:
+                cxt.add_message("assistant", content, stage="agent",
+                                metadata={"suppressed": True})
+            _execute_transfer(session, transfer_call)
+            # 状态已由 _execute_transfer 内 dispatch() 转移；event 供 chat 层消费
+            return TurnResult(dispatch_event=ModuleDispatch(
+                target_module_code=transfer_call["function"]["name"][
+                    len(TRANSFER_TOOL_PREFIX):],
+                reason=_parse_args(transfer_call).get("reason", "")
+                if isinstance(_parse_args(transfer_call), dict) else "",
+                source="handoff_tool",
+            ))
 
-        # Append assistant message (with tool_calls)
-        assistant_msg: Dict[str, Any] = {
-            "role": "assistant",
-            "content": content or None,
-            "tool_calls": tool_calls,
-        }
-        messages.append(assistant_msg)
-
-        # Execute each tool call and append its result
+        # 普通工具调用：执行、落 history、回填
+        messages.append({"role": "assistant", "content": content or None,
+                         "tool_calls": tool_calls})
         for tc in tool_calls:
-            tool_name = tc.get("function", {}).get("name", "")
-            tool_args_str = tc.get("function", {}).get("arguments", "{}")
-            tc_id = tc.get("id", "")
+            name = tc.get("function", {}).get("name", "")
+            args = _parse_args(tc)
+            tool_result = _execute_tool(name, args)
+            source = lent_by.get(name)
+            if source:
+                cxt.metadata["served_by_projection"] = source
+            metadata = {"tool_name": name}
+            if source:
+                metadata["lent_by"] = source
+            cxt.add_message("tool", tool_result, stage="agent", metadata=metadata)
+            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                             "content": tool_result})
 
-            try:
-                tool_args = (
-                    json.loads(tool_args_str)
-                    if isinstance(tool_args_str, str)
-                    else tool_args_str
-                )
-            except json.JSONDecodeError:
-                tool_args = {}
-
-            logger.info("执行工具: %s(%s)", tool_name, tool_args_str[:200])
-
-            tool_result = _execute_tool(tool_name, tool_args)
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc_id,
-                "content": tool_result,
-            })
-
-    # Exceeded max rounds, force return
     logger.warning(
         "Agent loop 达到最大轮次 %d，强制终止: session=%s",
-        _MAX_TOOL_ROUNDS,
-        cxt.session_id,
+        _MAX_TOOL_ROUNDS, cxt.session_id,
     )
-    return "抱歉，处理超时，请稍后重试。"
+    return TurnResult(reply="抱歉，处理超时，请稍后重试。")
+
+
+# ---------------------------------------------------------------------------
+# Projection / transfer tool builders
+# ---------------------------------------------------------------------------
+
+def build_projection_block(module, module_map) -> str:
+    """邻接投影块：每条 lend_knowledge 边一片（spec §4 §3.2）。"""
+    blocks = []
+    for link in module.sub_modules:
+        if not link.lend_knowledge:
+            continue
+        target = module_map.get(link.target)
+        if target is None:
+            continue
+        parts = [f"## 邻接能力：{target.module_name}（{target.module_code}）"]
+        parts.append(target.to_projection_text())
+        if link.lend_tools:
+            parts.append(f"- 可借工具：{', '.join(link.lend_tools)}")
+        blocks.append("\n".join(parts))
+    return "\n\n".join(blocks)
+
+
+def build_transfer_tools(module, module_map) -> list:
+    """由 sub_modules 逐边生成 transfer 工具（spec §4 §3.3）。"""
+    tools = []
+    for link in module.sub_modules:
+        target = module_map.get(link.target)
+        if target is None:
+            continue
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": f"{TRANSFER_TOOL_PREFIX}{link.target}",
+                "description": (
+                    f"移交给【{target.module_name}】。适用：该域的多轮深入流程。"
+                    f"不适用：一句话或一次工具能解决的请求——那类直接自己处理。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"reason": {
+                        "type": "string",
+                        "description": "移交原因及已收集的用户信息摘要，供接手方无缝承接",
+                    }},
+                    "required": ["reason"],
+                },
+            },
+        })
+    return tools
 
 
 # ---------------------------------------------------------------------------
 # System Prompt construction
 # ---------------------------------------------------------------------------
 
-def _build_system_prompt(module, cxt) -> str:
-    """Build system_prompt from module.
-
-    Concatenates the module's base_prompt with key info from the dialogue context (slots, task info, etc.).
-
-    Args:
-        module: current module object
-        cxt: dialogue context
-
-    Returns:
-        str: complete system prompt
-    """
+def _build_system_prompt(module, cxt: DialogueContext) -> str:
+    """五块结构：base_prompt + 投影块 + 承接块 + 回看块 + 任务/槽位。"""
     parts = []
 
-    # Module base prompt
-    base_prompt = module.base_prompt or ""
-    if base_prompt:
-        parts.append(base_prompt)
+    if module.base_prompt:
+        parts.append(module.base_prompt)
 
-    # Task info
+    projection = build_projection_block(module, cxt.module_map)
+    if projection:
+        parts.append(projection)
+        parts.append(AGENT_TEAM_RULES_PROMPT)
+
+    handoff = cxt.metadata.get("handoff_context")
+    if handoff:
+        parts.append(fill_prompt_template(AGENT_TAKEOVER_PROMPT, {
+            "from_module": handoff.get("from", ""),
+            "reason": handoff.get("reason", "") or "（无补充信息）",
+        }))
+
+    served = cxt.metadata.get("served_by_projection")
+    if served:
+        parts.append(fill_prompt_template(AGENT_PROJECTION_RECALL_PROMPT, {
+            "projection_source": served,
+        }))
+
     task_info = cxt.metadata.get("task_info", {})
     if task_info:
         parts.append("\n## 任务信息")
         for key, value in task_info.items():
             parts.append(f"- {key}: {value}")
 
-    # Filled slots
     if cxt.filled_slots:
         parts.append("\n## 已填充槽位")
         parts.append(json.dumps(cxt.filled_slots, ensure_ascii=False, indent=2))
-
-    # Module jump instructions
-    parts.append("""
-## 模块跳转
-如需切换到其他模块，请在回复末尾使用 [jump 模块code] 标识。
-例如：[jump faq] 表示跳转到 faq 模块。
-""")
 
     return "\n".join(parts)
 
@@ -215,19 +257,9 @@ def _resolve_tools(module, pattern=None) -> List[Dict[str, Any]]:
     Two-layer filtering:
     1. **Pattern layer**: get the tool set allowed for the current pattern +
        module via :meth:`ToolRegistry.get_allowed_tools_for_pattern`.
-       - tool's ``allowed_patterns`` is None → denied (deny by default)
-       - tool's ``allowed_patterns`` contains ``"*"`` or the current pattern code → allowed
     2. **Module layer**: if ``module.use_tools`` is non-empty, take the
        intersection; if empty, use all tools allowed by the pattern layer.
-
-    Args:
-        module: current module object
-        pattern: current dialogue pattern (optional, for permission checks)
-
-    Returns:
-        list: OpenAI-format tool definitions
     """
-    # Step 1: Pattern-level access control
     pattern_code = pattern.code if pattern is not None else ""
     module_code = module.module_code or ""
 
@@ -236,29 +268,23 @@ def _resolve_tools(module, pattern=None) -> List[Dict[str, Any]]:
             pattern_code, module_code
         )
     else:
-        # Without pattern context, only allow tools with allowed_patterns={"*": True}
-        # (pure general-purpose tools); deny all tools without pattern permissions
         allowed_tool_names = tool_registry.get_allowed_tools_for_pattern(
             "*", module_code
         )
 
-    # Step 2: Module-level filter (module.use_tools)
     use_tools = module.use_tools or []
     if use_tools:
         tool_names_from_module = set(use_tools)
 
         missing = tool_names_from_module - allowed_tool_names
         if missing:
-            # Tool declared in module.use_tools but not authorized by pattern layer or not registered
             logger.warning(
                 "模块 '%s' 声明的工具不可用: %s (未授权或未注册)",
                 module_code, missing,
             )
 
-        # Intersect pattern layer with module layer
         tool_names = allowed_tool_names & tool_names_from_module
     else:
-        # No use_tools declared: use all tools allowed by pattern layer
         tool_names = allowed_tool_names
 
     if not tool_names:
@@ -279,28 +305,39 @@ def _resolve_tools(module, pattern=None) -> List[Dict[str, Any]]:
     return tool_schemas
 
 
+def _resolve_lent_tools(module, pattern):
+    """解析借入工具 schema 与 name→来源域映射（spec §3.3 权限）。
+
+    Returns:
+        (schemas, lent_by)：schemas 为 OpenAI 格式列表；lent_by 为
+        {tool_name: 来源 module_code}。
+    """
+    schemas, lent_by = [], {}
+    for link in module.sub_modules:
+        if not link.lend_tools:
+            continue
+        target = (pattern.module_map if pattern else {}).get(link.target)
+        if target is None:
+            continue
+        allowed = set(target.use_tools or []) & set(link.lend_tools)
+        for schema in tool_registry.get_definitions(allowed):
+            name = schema["function"]["name"]
+            schemas.append(schema)
+            lent_by[name] = link.target
+    return schemas, lent_by
+
+
 # ---------------------------------------------------------------------------
 # Message list construction
 # ---------------------------------------------------------------------------
 
 def _build_messages(system_prompt: str, cxt) -> List[Dict[str, Any]]:
-    """Build the message list sent to the LLM.
-
-    Includes the system prompt and user/assistant messages from dialogue history.
-
-    Args:
-        system_prompt: system prompt text
-        cxt: dialogue context
-
-    Returns:
-        list: list of message dicts
-    """
+    """Build the message list sent to the LLM (system prompt + history)."""
     messages: List[Dict[str, Any]] = []
 
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
 
-    # Add dialogue history (keep only user and assistant messages)
     for msg in cxt.history:
         if msg.role in ("user", "assistant"):
             messages.append({"role": msg.role, "content": msg.content})
@@ -312,16 +349,18 @@ def _build_messages(system_prompt: str, cxt) -> List[Dict[str, Any]]:
 # Tool execution
 # ---------------------------------------------------------------------------
 
+def _parse_args(tc) -> Dict[str, Any]:
+    """Parse a tool_call's arguments string into a dict."""
+    args_str = tc.get("function", {}).get("arguments", "{}")
+    try:
+        args = json.loads(args_str) if isinstance(args_str, str) else args_str
+    except json.JSONDecodeError:
+        args = {}
+    return args if isinstance(args, dict) else {}
+
+
 def _execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
-    """Execute a single tool call.
-
-    Args:
-        tool_name: tool name
-        tool_args: tool arguments
-
-    Returns:
-        str: tool execution result (JSON string)
-    """
+    """Execute a single tool call, returning a JSON string result."""
     try:
         result = tool_registry.dispatch(tool_name, tool_args)
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
@@ -331,46 +370,17 @@ def _execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Jump tag handling
+# Transfer handling
 # ---------------------------------------------------------------------------
 
-def _process_jump_tags(response: str, session: Session) -> str:
-    """Handle [jump xx] jump tags in the LLM reply.
-
-    Args:
-        response: raw LLM reply text
-        session: current session
-
-    Returns:
-        str: reply text with jump tags removed
-    """
-    matches = _JUMP_PATTERN.findall(response)
-    if not matches:
-        return response
-
+def _execute_transfer(session: Session, transfer_call) -> None:
+    """解析 transfer 工具调用并执行 dispatch()（含 reason）。"""
     cxt = session.cxt
-    for jump_target in matches:
-        if jump_target in cxt.module_map:
-            cxt.current_module_code = jump_target
-            cxt.current_node_code = None
-            logger.info("[jump] 跳转到模块: %s", jump_target)
-        elif jump_target in cxt.node_map:
-            cxt.current_node_code = jump_target
-            target_node = cxt.node_map[jump_target]
-            for mod_code, mod in cxt.module_map.items():
-                if target_node in mod.module_nodes:
-                    cxt.current_module_code = mod_code
-                    logger.info(
-                        "[jump] 跳转到节点: %s (模块: %s)", jump_target, mod_code
-                    )
-                    break
-            else:
-                logger.warning(
-                    "[jump] 节点 '%s' 不属于任何已知模块", jump_target
-                )
-        else:
-            logger.warning(
-                "[jump] 跳转目标 '%s' 不在 module_map 或 node_map 中", jump_target
-            )
-
-    return _JUMP_PATTERN.sub("", response).strip()
+    name = transfer_call.get("function", {}).get("name", "")
+    target = name[len(TRANSFER_TOOL_PREFIX):]
+    args = _parse_args(transfer_call)
+    reason = args.get("reason", "") if isinstance(args, dict) else ""
+    ok = dispatch(cxt, ModuleDispatch(target_module_code=target,
+                                      reason=reason, source="handoff_tool"))
+    if not ok:
+        logger.warning("[transfer] 目标 %s 转移失败（不邻接/回弹），本轮继续", target)

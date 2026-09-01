@@ -86,3 +86,65 @@ def test_create_session_replaces_old_trail(tmp_path):
     store.close()
 
     assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 0
+
+
+def test_save_turn_appends_incrementally(tmp_path):
+    """两轮对话：save_turn 只追加本轮新增消息，状态快照整体回写。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session()
+    store.create_session(session)
+
+    # 第一轮：user + assistant
+    session.cxt.add_message("user", "你好", stage="chat")
+    session.cxt.add_message("assistant", "您好", stage="chat")
+    store.save_turn(session, 0)
+
+    # 第二轮前状态变化 + 新消息（start_idx=2 只追加第二轮）
+    session.cxt.filled_slots["brand"] = "特斯拉"
+    session.cxt.current_node_code = "buy_ask_budget"
+    session.cxt.add_message("user", "我想买车", stage="chat")
+    session.cxt.add_message("assistant", "回复", stage="chat")
+    store.save_turn(session, 2)
+    store.close()
+
+    msgs = fetch_all(db, "SELECT * FROM messages ORDER BY id")
+    assert [m["content"] for m in msgs] == ["你好", "您好", "我想买车", "回复"]
+    assert all(m["session_id"] == "s1" for m in msgs)
+    assert msgs[0]["role"] == "user" and msgs[1]["role"] == "assistant"
+
+    row = fetch_one(db, "SELECT * FROM sessions WHERE session_id = 's1'")
+    assert row["current_node_code"] == "buy_ask_budget"
+    assert json.loads(row["filled_slots"]) == {"brand": "特斯拉"}
+    # 第二轮后 last_active_at 被刷新（大于 created_at）
+    assert row["last_active_at"] >= row["created_at"]
+
+
+def test_save_turn_message_metadata_json(tmp_path):
+    """消息 metadata 列 JSON 往返。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session()
+    store.create_session(session)
+    session.cxt.add_message(
+        "tool", "tool_result", stage="agent", metadata={"tool": "calculator"}
+    )
+    store.save_turn(session, 0)
+    store.close()
+
+    row = fetch_one(db, "SELECT metadata FROM messages")
+    assert json.loads(row[0]) == {"tool": "calculator"}
+
+
+def test_save_turn_empty_increment_no_rows(tmp_path):
+    """start_idx 之后无新消息时不插入行，仅刷新状态（不抛异常）。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session()
+    store.create_session(session)
+    session.cxt.add_message("user", "q", stage="chat")
+    store.save_turn(session, 0)
+    store.save_turn(session, 1)  # 无新增
+    store.close()
+
+    assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 1

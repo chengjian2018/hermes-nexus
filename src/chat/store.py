@@ -98,3 +98,47 @@ class SessionStore:
                     now,
                 ),
             )
+
+    # ------------------------------------------------------------------
+    # 轮末落盘
+    # ------------------------------------------------------------------
+
+    def save_turn(self, session: Session, start_idx: int) -> None:
+        """轮末落盘：追加 ``cxt.history[start_idx:]`` 新消息 + 回写状态快照。
+
+        一个事务；``start_idx`` 为本轮开始时的 ``len(cxt.history)`` 快照。
+        """
+        now = time.time()
+        rows = [
+            (
+                session.session_id,
+                msg.role,
+                msg.content,
+                msg.stage,
+                json.dumps(msg.metadata or {}, ensure_ascii=False),
+                now,
+            )
+            for msg in session.cxt.history[start_idx:]
+        ]
+        filled_slots = json.dumps(session.cxt.filled_slots or {}, ensure_ascii=False)
+        with self._lock, self._conn:
+            if rows:
+                self._conn.executemany(
+                    """INSERT INTO messages
+                       (session_id, role, content, stage, metadata, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+            self._conn.execute(
+                """UPDATE sessions
+                   SET current_module_code = ?, current_node_code = ?,
+                       filled_slots = ?, last_active_at = ?
+                   WHERE session_id = ?""",
+                (
+                    session.cxt.current_module_code,
+                    session.cxt.current_node_code,
+                    filled_slots,
+                    now,
+                    session.session_id,
+                ),
+            )

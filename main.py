@@ -116,24 +116,33 @@ def _restore_sessions() -> int:
         return 0
     restored = 0
     now_wall = time.time()
-    for session, last_active_wall in store.load_active_sessions(SESSION_TTL_SECONDS):
-        pattern = pattern_registry.get(session.pattern_code)
-        if pattern is None:
-            logger.warning(
-                "恢复跳过会话 %s: pattern '%s' 未注册",
-                session.session_id,
-                session.pattern_code,
-            )
+    try:
+        active_sessions = store.load_active_sessions(SESSION_TTL_SECONDS)
+    except Exception:
+        logger.exception("加载未过期会话失败，跳过恢复")
+        return 0
+    for session, last_active_wall in active_sessions:
+        try:
+            pattern = pattern_registry.get(session.pattern_code)
+            if pattern is None:
+                logger.warning(
+                    "恢复跳过会话 %s: pattern '%s' 未注册",
+                    session.session_id,
+                    session.pattern_code,
+                )
+                continue
+            session.pattern = pattern
+            session.cxt.module_map = pattern.module_map
+            session.cxt.node_map = pattern.node_map
+            with _sessions_lock:
+                all_sessions[session.session_id] = session
+                _session_last_active[session.session_id] = time.monotonic() - (
+                    now_wall - last_active_wall
+                )
+            restored += 1
+        except Exception:
+            logger.exception("恢复会话失败，跳过: session=%s", session.session_id)
             continue
-        session.pattern = pattern
-        session.cxt.module_map = pattern.module_map
-        session.cxt.node_map = pattern.node_map
-        with _sessions_lock:
-            all_sessions[session.session_id] = session
-            _session_last_active[session.session_id] = time.monotonic() - (
-                now_wall - last_active_wall
-            )
-        restored += 1
     if restored:
         logger.info("重启恢复会话 %d 个", restored)
     return restored
@@ -143,7 +152,10 @@ def _restore_sessions() -> int:
 def _startup_persistence() -> None:
     """服务启动：初始化会话存储 + 恢复未过期会话。"""
     _init_store()
-    _restore_sessions()
+    try:
+        _restore_sessions()
+    except Exception:
+        logger.exception("重启恢复失败，跳过恢复")
 
 
 # # check aleady registried patterns and tools

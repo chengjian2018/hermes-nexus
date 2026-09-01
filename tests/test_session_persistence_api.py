@@ -255,3 +255,41 @@ def test_init_store_degrades_on_failure(monkeypatch):
     main._init_store()
     assert main.store is None
     main.store = prev
+
+
+def test_restore_failure_does_not_block(client, store, registry_guard, monkeypatch):
+    """恢复过程异常不阻断：store 级抛错返回 0，单会话抛错跳过，均不向外传播。"""
+    import main
+    from src.chat.session import Session
+
+    # 1) store 级失败（如 DB 读异常）：不抛，返回 0
+    def store_boom(ttl):
+        raise RuntimeError("db read down")
+
+    monkeypatch.setattr(store, "load_active_sessions", store_boom)
+    assert main._restore_sessions() == 0
+
+    # 2) 单会话失败（如行数据损坏触发的任意异常）：跳过该会话，不阻断整体
+    good = Session(session_id="rs-good", pattern_code="car_sales_route")
+    bad = Session(session_id="rs-bad", pattern_code="car_sales_route")
+
+    def fake_load(ttl):
+        return [(good, main.time.time()), (bad, main.time.time())]
+
+    monkeypatch.setattr(store, "load_active_sessions", fake_load)
+
+    real_get = main.pattern_registry.get
+    calls = []
+
+    def get_or_raise(code):
+        calls.append(code)
+        if len(calls) == 2:
+            raise RuntimeError("corrupted row")
+        return real_get(code)
+
+    monkeypatch.setattr(main.pattern_registry, "get", get_or_raise)
+
+    restored = main._restore_sessions()
+    assert restored == 1
+    assert "rs-good" in main.all_sessions
+    assert "rs-bad" not in main.all_sessions

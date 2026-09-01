@@ -68,8 +68,8 @@ def test_create_session_roundtrip(tmp_path):
     assert row["created_at"] > 0 and row["last_active_at"] > 0
 
 
-def test_create_session_replaces_old_trail(tmp_path):
-    """同 session_id 重新 launch：旧 messages 被清，sessions 行被替换。"""
+def test_create_session_keeps_old_trail(tmp_path):
+    """同 session_id 重新 launch：旧 messages 保留（代次方案），sessions 行 epoch+1。"""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     store.create_session(make_session())
@@ -85,7 +85,69 @@ def test_create_session_replaces_old_trail(tmp_path):
     store.create_session(make_session())  # 重新 launch
     store.close()
 
-    assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 0
+    assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 1
+    row = fetch_one(db, "SELECT launch_epoch FROM sessions WHERE session_id = 's1'")
+    assert row["launch_epoch"] == 1
+
+
+def test_save_turn_writes_current_epoch(tmp_path):
+    """重 launch 后：新消息带当代 epoch=1，旧消息 epoch=0。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session()
+    store.create_session(session)
+    session.cxt.add_message("user", "第一代", stage="chat")
+    store.save_turn(session, 0)
+
+    store.create_session(make_session())  # 重新 launch，epoch=1
+    session.cxt.add_message("user", "第二代", stage="chat")
+    store.save_turn(session, 1)
+    store.close()
+
+    msgs = fetch_all(db, "SELECT content, launch_epoch FROM messages ORDER BY id")
+    assert [(m["content"], m["launch_epoch"]) for m in msgs] == [
+        ("第一代", 0),
+        ("第二代", 1),
+    ]
+
+
+def test_load_active_sessions_restores_current_epoch_only(tmp_path):
+    """恢复只取当代消息：旧代消息保留在 DB 但不进 history。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session("alive")
+    store.create_session(session)
+    session.cxt.add_message("user", "旧代消息", stage="chat")
+    store.save_turn(session, 0)
+
+    store.create_session(make_session("alive"))  # epoch=1
+    session.cxt.add_message("user", "当代消息", stage="chat")
+    store.save_turn(session, 1)
+
+    restored = store.load_active_sessions(ttl_seconds=3600)
+    store.close()
+
+    r, _ = restored[0]
+    assert [m.content for m in r.cxt.history] == ["当代消息"]
+
+
+def test_get_messages_includes_all_epochs(tmp_path):
+    """审计：get_messages 返回全部代次消息，带 launch_epoch 键，id 升序。"""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session()
+    store.create_session(session)
+    session.cxt.add_message("user", "第一代", stage="chat")
+    store.save_turn(session, 0)
+    store.create_session(make_session())  # epoch=1
+    session.cxt.add_message("user", "第二代", stage="chat")
+    store.save_turn(session, 1)
+
+    msgs = store.get_messages("s1")
+    store.close()
+    assert [m["content"] for m in msgs] == ["第一代", "第二代"]
+    assert [m["launch_epoch"] for m in msgs] == [0, 1]
+    assert msgs[0]["id"] < msgs[1]["id"]
 
 
 def test_save_turn_appends_incrementally(tmp_path):

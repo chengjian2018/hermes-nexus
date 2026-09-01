@@ -22,6 +22,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id          TEXT PRIMARY KEY,
     pattern_code        TEXT NOT NULL,
+    launch_epoch        INTEGER NOT NULL DEFAULT 0,
     request_id          TEXT,
     task_info           TEXT NOT NULL DEFAULT '{}',
     current_module_code TEXT,
@@ -36,6 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_pattern    ON sessions(pattern_code);
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    launch_epoch INTEGER NOT NULL DEFAULT 0,
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
     stage      TEXT NOT NULL DEFAULT '',
@@ -69,26 +71,29 @@ class SessionStore:
     def create_session(self, session: Session) -> None:
         """落盘一个新会话（launch 时调用）。
 
-        同 session_id 重新 launch 视为新审计流水：先清旧 messages，
-        再 upsert sessions 行，一个事务。
+        同 session_id 重新 launch 视为新一代（launch_epoch + 1）：
+        旧代 messages 审计流水原地保留，sessions 行 upsert（created_at 重置）。
         """
         now = time.time()
         request_id = (session.cxt.metadata or {}).get("request_id")
         task_info = json.dumps(session.task_info or {}, ensure_ascii=False)
         filled_slots = json.dumps(session.cxt.filled_slots or {}, ensure_ascii=False)
         with self._lock, self._conn:
-            self._conn.execute(
-                "DELETE FROM messages WHERE session_id = ?", (session.session_id,)
-            )
+            row = self._conn.execute(
+                "SELECT launch_epoch FROM sessions WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            epoch = (row["launch_epoch"] + 1) if row is not None else 0
             self._conn.execute(
                 """INSERT OR REPLACE INTO sessions
-                   (session_id, pattern_code, request_id, task_info,
+                   (session_id, pattern_code, launch_epoch, request_id, task_info,
                     current_module_code, current_node_code, filled_slots,
                     created_at, last_active_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session.session_id,
                     session.pattern_code,
+                    epoch,
                     request_id,
                     task_info,
                     session.cxt.current_module_code,
@@ -109,24 +114,30 @@ class SessionStore:
         一个事务；``start_idx`` 为本轮开始时的 ``len(cxt.history)`` 快照。
         """
         now = time.time()
-        rows = [
-            (
-                session.session_id,
-                msg.role,
-                msg.content,
-                msg.stage,
-                json.dumps(msg.metadata or {}, ensure_ascii=False),
-                now,
-            )
-            for msg in session.cxt.history[start_idx:]
-        ]
         filled_slots = json.dumps(session.cxt.filled_slots or {}, ensure_ascii=False)
         with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT launch_epoch FROM sessions WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            epoch = row["launch_epoch"] if row is not None else 0
+            rows = [
+                (
+                    session.session_id,
+                    epoch,
+                    msg.role,
+                    msg.content,
+                    msg.stage,
+                    json.dumps(msg.metadata or {}, ensure_ascii=False),
+                    now,
+                )
+                for msg in session.cxt.history[start_idx:]
+            ]
             if rows:
                 self._conn.executemany(
                     """INSERT INTO messages
-                       (session_id, role, content, stage, metadata, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                       (session_id, launch_epoch, role, content, stage, metadata, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     rows,
                 )
             self._conn.execute(
@@ -158,6 +169,8 @@ class SessionStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM sessions WHERE last_active_at >= ?"
+                " AND launch_epoch = (SELECT MAX(launch_epoch) FROM sessions s2"
+                "                      WHERE s2.session_id = sessions.session_id)"
                 " ORDER BY last_active_at DESC",
                 (cutoff,),
             ).fetchall()
@@ -165,8 +178,8 @@ class SessionStore:
             for row in rows:
                 msgs = self._conn.execute(
                     "SELECT role, content, stage, metadata FROM messages"
-                    " WHERE session_id = ? ORDER BY id",
-                    (row["session_id"],),
+                    " WHERE session_id = ? AND launch_epoch = ? ORDER BY id",
+                    (row["session_id"], row["launch_epoch"]),
                 ).fetchall()
                 session = Session(
                     session_id=row["session_id"],
@@ -202,7 +215,8 @@ class SessionStore:
     ) -> List[Dict[str, Any]]:
         """会话列表（按 last_active_at 倒序），含消息计数。"""
         sql = """
-            SELECT s.session_id, s.pattern_code, s.current_module_code,
+            SELECT s.session_id, s.pattern_code, s.launch_epoch,
+                   s.current_module_code,
                    s.current_node_code, s.created_at, s.last_active_at,
                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.session_id)
                        AS message_count
@@ -219,7 +233,7 @@ class SessionStore:
             return [dict(r) for r in rows]
 
     def get_messages(self, session_id: str) -> Optional[List[Dict[str, Any]]]:
-        """某会话全程消息（按 id 升序）；会话不存在返回 None。"""
+        """某会话全程消息（含所有代次，带 launch_epoch；按 id 升序）；不存在返回 None。"""
         with self._lock:
             exists = self._conn.execute(
                 "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
@@ -227,7 +241,7 @@ class SessionStore:
             if exists is None:
                 return None
             rows = self._conn.execute(
-                """SELECT id, role, content, stage, metadata, created_at
+                """SELECT id, launch_epoch, role, content, stage, metadata, created_at
                    FROM messages WHERE session_id = ? ORDER BY id""",
                 (session_id,),
             ).fetchall()

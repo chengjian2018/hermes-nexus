@@ -14,7 +14,8 @@ flowchart TB
     chat --> nlu["dialogue/nlu.py<br/>FSMNLU · RouteNLU"]
     chat --> nlg["dialogue/nlg.py"]
     chat --> uni["dialogue/unified.py<br/>统一阶段(单次调用 NLU+NLG)<br/>FSMUnifiedNLU · RouteUnifiedNLU · PassThroughNLG"]
-    chat --> loop2["chat/loop.py<br/>Agent ReAct 循环"]
+    chat --> disp["dialogue/dispatch.py<br/>模块分发原语 dispatch()<br/>同轮移交 · 回弹拒绝"]
+    chat --> loop2["chat/loop.py<br/>Agent ReAct 循环<br/>工具授权过滤 · 借出工具解析"]
     chat --> store["chat/store.py<br/>SessionStore(SQLite)"]
 
     preg --> pattern["dialogue/pattern.py"]
@@ -31,11 +32,13 @@ flowchart TB
 
     subgraph 应用层
         carsales["dialogue/car_sales_route.py<br/>(示例 pattern)"]
+        carsalesagent["dialogue/car_sales_agent.py<br/>(Agent 多模块示例 pattern)"]
         carsalesuni["dialogue/car_sales_unified_route.py<br/>(统一阶段示例 pattern)"]
-        tools["tools/calculator_tool.py<br/>weather_tool.py"]
+        tools["tools/calculator_tool.py<br/>weather_tool.py<br/>workorder_tool.py"]
         clarify["src/clarify/<br/>偏题澄清"]
     end
     carsales -.-> preg
+    carsalesagent -.-> preg
     carsalesuni -.-> preg
     tools -.-> treg
 ```

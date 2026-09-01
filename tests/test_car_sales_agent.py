@@ -21,3 +21,18 @@ def test_pattern_discovered_and_edges():
 
     # 转移图：专家可转回 reception
     assert "reception" in p.dispatch_graph["after_sales"]
+
+
+def test_workorder_tool_lend_chain():
+    """工具按 after_sales 名义注册，经 lend_tools 借给 reception。"""
+    import src.tools.workorder_tool  # noqa: F401 触发注册
+    from src.chat.loop import _resolve_lent_tools
+    from src.dialogue.register import discover_builtin_patterns, registry
+
+    discover_builtin_patterns()
+    p = registry.get("car_sales_agent")
+    rec = p.module_map["reception"]
+    schemas, lent_by = _resolve_lent_tools(rec, p)
+    assert "query_workorder" in lent_by
+    assert lent_by["query_workorder"] == "after_sales"
+    assert any(s["function"]["name"] == "query_workorder" for s in schemas)

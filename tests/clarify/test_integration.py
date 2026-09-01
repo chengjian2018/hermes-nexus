@@ -55,16 +55,15 @@ def test_off_topic_turn_routes_kb_and_keeps_node():
 
     sessions = {"it": session}
 
-    # 第 1 轮：路由进入购车模块 → 询问品牌节点
+    # 第 1 轮：路由静默分发，buy FSM 首节点 buy_ask_brand 同轮消化该句，
+    # brand 槽位 = 整句 query，节点推进到 buy_ask_budget
     r1 = chat_fn("我想买车", "it", sessions)
-    assert "menu_sales" in str(session.cxt.current_module_code) or True
+    assert session.cxt.current_module_code == "car_sales_buy"
+    assert session.cxt.current_node_code == "buy_ask_budget"
+    assert session.cxt.filled_slots.get("brand") == "我想买车"
+    assert "询问品牌" in r1  # FSMNLG 用转移前节点生成回复
 
-    # 第 2 轮：回答品牌
-    chat_fn("比亚迪汉", "it", sessions)
-    node_before = session.cxt.current_node_code
-    assert node_before == "buy_ask_budget"
-
-    # 第 3 轮：偏题（应询问预算时反问收费）
+    # 第 2 轮：偏题（应询问预算时反问收费）
     r3 = chat_fn("还要收别的钱吗", "it", sessions)
     clarify_info = session.cxt.metadata["clarify"]
     assert clarify_info["triggered"] is True
@@ -73,9 +72,10 @@ def test_off_topic_turn_routes_kb_and_keeps_node():
     assert "预算" in r3                              # 拉回主线
     assert session.cxt.current_node_code == "buy_ask_budget"   # 节点不动
     assert "topic" not in session.cxt.filled_slots   # 澄清槽位未污染
-    assert session.cxt.filled_slots.get("brand") == "比亚迪汉"  # 业务槽位保留
+    assert session.cxt.filled_slots.get("brand") == "我想买车"  # 业务槽位保留
 
-    # 第 4 轮：恢复正常（回答预算）
+    # 第 3 轮：恢复正常（回答预算）
     r4 = chat_fn("20万左右", "it", sessions)
     assert session.cxt.metadata["clarify"]["triggered"] is False   # 元数据已重置
     assert session.cxt.current_node_code == "buy_ask_city"
+    assert session.cxt.filled_slots["budget"] == "20万左右"

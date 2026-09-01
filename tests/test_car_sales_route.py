@@ -124,42 +124,43 @@ def test_route_to_buy_fsm_full_flow(pattern, sessions):
     """购车意图：路由分发 → 购车 FSM 子模块完整多轮（品牌→预算→城市→确认）。"""
     session = launch(pattern, sessions)
 
-    # 第 1 轮：顶层路由，NLU 命中 menu_sales，回复来自菜单节点并分发到子模块
+    # 第 1 轮：路由命中 menu_sales → 静默分发，FSM 首节点 buy_ask_brand 同轮消化该句
+    # （FSM NLU 抽 brand=整句并推进到 buy_ask_budget；FSMNLG 用转移前节点生成回复）
     reply = chat(sessions, "s1", "我想买车，帮忙看看有什么车型")
-    assert "购车咨询" in reply, f"回复应来自菜单节点，实际: {reply!r}"
-    assert session.cxt.current_module_code == "car_sales_buy"
-    assert session.cxt.current_node_code is None  # 下一轮从子模块首节点开始
-
-    # 第 2 轮：FSM 首节点询问品牌
-    reply = chat(sessions, "s1", "比亚迪")
-    assert "询问品牌" in reply
+    assert "询问品牌" in reply, f"回复应来自 FSM 首节点消化后的 NLG，实际: {reply!r}"
     assert session.cxt.current_module_code == "car_sales_buy"
     assert session.cxt.current_node_code == "buy_ask_budget"
-    assert session.cxt.filled_slots["brand"] == "比亚迪"
+    assert session.cxt.filled_slots["brand"] == "我想买车，帮忙看看有什么车型"
 
-    # 第 3 轮：询问预算
-    reply = chat(sessions, "s1", "预算20万左右")
+    # 第 2 轮：buy_ask_budget 消化，推进到 buy_ask_city
+    reply = chat(sessions, "s1", "比亚迪")
     assert "询问预算" in reply
+    assert session.cxt.current_module_code == "car_sales_buy"
     assert session.cxt.current_node_code == "buy_ask_city"
-    assert session.cxt.filled_slots["budget"] == "预算20万左右"
+    assert session.cxt.filled_slots["budget"] == "比亚迪"
 
-    # 第 4 轮：询问城市
-    reply = chat(sessions, "s1", "北京")
+    # 第 3 轮：buy_ask_city 消化，推进到 buy_confirm
+    reply = chat(sessions, "s1", "预算20万左右")
     assert "询问城市" in reply
     assert session.cxt.current_node_code == "buy_confirm"
-    assert session.cxt.filled_slots["city"] == "北京"
+    assert session.cxt.filled_slots["city"] == "预算20万左右"
 
-    # 第 5 轮：确认节点（is_end），无后续节点则停留
-    reply = chat(sessions, "s1", "好的，就这些")
+    # 第 4 轮：确认节点（is_end），无后续节点则停留
+    reply = chat(sessions, "s1", "北京")
     assert "确认购车信息" in reply
     assert session.cxt.current_module_code == "car_sales_buy"
     assert session.cxt.current_node_code == "buy_confirm"
 
-    # 槽位贯穿始终
+    # 第 5 轮：终节点保持不动
+    reply = chat(sessions, "s1", "好的，就这些")
+    assert "确认购车信息" in reply
+    assert session.cxt.current_node_code == "buy_confirm"
+
+    # 槽位贯穿始终（brand 在静默分发轮被首节点用整句消化）
     assert session.cxt.filled_slots == {
-        "brand": "比亚迪",
-        "budget": "预算20万左右",
-        "city": "北京",
+        "brand": "我想买车，帮忙看看有什么车型",
+        "budget": "比亚迪",
+        "city": "预算20万左右",
     }
 
 
@@ -167,20 +168,24 @@ def test_route_to_after_fsm_flow(pattern, sessions):
     """售后意图：路由分发 → 售后 FSM 子模块流程。"""
     session = launch(pattern, sessions)
 
+    # 静默分发：after FSM 首节点 after_ask_issue 同轮消化该句，推进到 after_ask_vehicle
     reply = chat(sessions, "s1", "我的车需要维修")
-    assert "售后咨询" in reply
-    assert session.cxt.current_module_code == "car_sales_after"
-    assert session.cxt.current_node_code is None
-
-    reply = chat(sessions, "s1", "发动机故障灯亮了")
     assert "询问问题类型" in reply
+    assert session.cxt.current_module_code == "car_sales_after"
     assert session.cxt.current_node_code == "after_ask_vehicle"
-    assert session.cxt.filled_slots["issue_type"] == "发动机故障灯亮了"
+    assert session.cxt.filled_slots["issue_type"] == "我的车需要维修"
 
-    reply = chat(sessions, "s1", "比亚迪汉 京A12345")
+    # 第 2 轮：after_ask_vehicle 消化，推进到 after_confirm
+    reply = chat(sessions, "s1", "发动机故障灯亮了")
     assert "询问车辆信息" in reply
     assert session.cxt.current_node_code == "after_confirm"
-    assert session.cxt.filled_slots["car_info"] == "比亚迪汉 京A12345"
+    assert session.cxt.filled_slots["car_info"] == "发动机故障灯亮了"
+
+    # 第 3 轮：终节点保持不动
+    reply = chat(sessions, "s1", "比亚迪汉 京A12345")
+    assert "确认售后信息" in reply
+    assert session.cxt.current_node_code == "after_confirm"
+    assert session.cxt.filled_slots["car_info"] == "发动机故障灯亮了"
 
 
 def test_chitchat_stays_in_route_module(pattern, sessions):
@@ -192,9 +197,10 @@ def test_chitchat_stays_in_route_module(pattern, sessions):
     assert session.cxt.current_module_code == "car_sales_root"
     assert session.cxt.current_node_code == "route_root"
 
-    # 下一轮仍可继续路由
+    # 下一轮仍可继续路由（静默分发后 FSM 首节点同轮消化）
     reply = chat(sessions, "s1", "我想买车")
     assert session.cxt.current_module_code == "car_sales_buy"
+    assert session.cxt.current_node_code == "buy_ask_budget"
 
 
 def test_unknown_intent_falls_back_to_root(pattern, sessions):
@@ -213,10 +219,11 @@ def test_route_nlu_parse_failure_retries_and_recovers(pattern, sessions):
     before = FakeProvider.call_count
 
     reply = chat(sessions, "s1", "解析失败重试 买车")
-    # NLU 失败 + 重试 + NLG = 3 次调用
-    assert FakeProvider.call_count - before == 3
+    # NLU 失败 + 重试（route 分类）+ route NLG + FSM 首节点 NLU + FSMNLG = 5 次调用
+    assert FakeProvider.call_count - before == 5
     assert session.cxt.current_module_code == "car_sales_buy"
-    assert "购车咨询" in reply
+    assert session.cxt.current_node_code == "buy_ask_budget"
+    assert "询问品牌" in reply
 
 
 def test_route_nlu_parse_failure_exhausted_falls_back(pattern, sessions):

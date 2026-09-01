@@ -86,21 +86,23 @@ def test_route_pattern_api_flow(client, session_id):
     """launch → 路由分发 → FSM 多轮，走完整 HTTP 链路。"""
     import main
 
-    # 第 1 轮：顶层路由命中购车意图
+    # 第 1 轮：顶层路由命中购车意图 → 静默分发，FSM 首节点同轮消化该句
     body = chat(client, session_id, "我想买车，帮忙看看车型")
     assert body["status"] is True, body["message"]
-    assert "购车咨询" in body["data"]["response"]
+    assert "询问品牌" in body["data"]["response"]
     session = main.all_sessions[session_id]
     assert session.cxt.current_module_code == "car_sales_buy"
-    assert session.cxt.current_node_code is None
-
-    # 第 2 轮：FSM 询问品牌
-    body = chat(client, session_id, "比亚迪")
-    assert "询问品牌" in body["data"]["response"]
     assert session.cxt.current_node_code == "buy_ask_budget"
-    assert session.cxt.filled_slots["brand"] == "比亚迪"
+    assert session.cxt.filled_slots["brand"] == "我想买车，帮忙看看车型"
 
-    # 第 3 轮：询问预算
-    body = chat(client, session_id, "预算20万左右")
+    # 第 2 轮：buy_ask_budget 消化，推进到 buy_ask_city
+    body = chat(client, session_id, "比亚迪")
+    assert "询问预算" in body["data"]["response"]
     assert session.cxt.current_node_code == "buy_ask_city"
-    assert session.cxt.filled_slots["budget"] == "预算20万左右"
+    assert session.cxt.filled_slots["budget"] == "比亚迪"
+
+    # 第 3 轮：buy_ask_city 消化，推进到 buy_confirm
+    body = chat(client, session_id, "预算20万左右")
+    assert "询问城市" in body["data"]["response"]
+    assert session.cxt.current_node_code == "buy_confirm"
+    assert session.cxt.filled_slots["city"] == "预算20万左右"

@@ -74,12 +74,17 @@ def chat(sessions, session_id, query):
     return chat_fn(query=query, session_id=session_id, all_sessions=sessions)
 
 
-def chat_once(pattern, sessions, query):
-    """处理一轮对话并断言恰好消耗 1 次 LLM 调用（统一阶段核心收益）。"""
+def chat_once(pattern, sessions, query, expect_calls=1):
+    """处理一轮对话并断言恰好消耗 expect_calls 次 LLM 调用。
+
+    正常轮为 1 次（统一阶段核心收益）；ROUTE 静默分发轮目标 FSM 首节点
+    在同轮重入消化 query，故为 2 次（route 统一阶段 + FSM 统一阶段）。
+    """
     before = FakeProvider.call_count
     reply = chat(sessions, "s1", query)
-    assert FakeProvider.call_count - before == 1, (
-        f"统一阶段每轮应恰好 1 次 LLM 调用，实际 {FakeProvider.call_count - before} 次"
+    assert FakeProvider.call_count - before == expect_calls, (
+        f"本轮应恰好 {expect_calls} 次 LLM 调用，"
+        f"实际 {FakeProvider.call_count - before} 次"
     )
     return reply
 
@@ -157,33 +162,30 @@ def test_route_then_fsm_full_flow_single_call_per_turn(pattern, sessions):
     """购车流程全链路：路由分发 → 品牌 → 预算 → 确认，每轮恰好 1 次调用。"""
     session = launch(pattern, sessions)
 
-    # 第 1 轮：顶层路由（统一阶段一次产出意图分类 + 菜单回复），分发到购车子模块
-    reply = chat_once(pattern, sessions, "我想买车，看看有什么车型")
-    assert "购车菜单" in reply, f"回复应来自统一阶段的菜单话术，实际: {reply!r}"
+    # 第 1 轮：路由命中 u_menu_sales → 静默分发，FSM 首节点 u_ask_brand 同轮消化该句
+    # （route 统一阶段 + FSM 统一阶段 = 2 次调用；reply 来自 FSM 侧）
+    reply = chat_once(pattern, sessions, "我想买车，看看有什么车型", expect_calls=2)
+    assert "询问预算" in reply, f"回复应来自 FSM 首节点统一阶段直出，实际: {reply!r}"
     assert session.cxt.current_module_code == "unified_buy"
-    assert session.cxt.current_node_code is None  # 下一轮从子模块首节点开始
-
-    # 第 2 轮：FSM 首节点询问品牌，一次产出 brand 槽位 + 预算引导话术 + 跳转
-    reply = chat_once(pattern, sessions, "比亚迪")
-    assert "询问预算" in reply
     assert session.cxt.current_node_code == "u_ask_budget"
-    assert session.cxt.filled_slots["brand"] == "比亚迪"
+    assert session.cxt.filled_slots["brand"] == "我想买车，看看有什么车型"
 
-    # 第 3 轮：询问预算
+    # 第 2 轮：u_ask_budget 消化，一次产出 budget 槽位 + 确认话术 + 跳转
+    reply = chat_once(pattern, sessions, "比亚迪")
+    assert "确认购车信息" in reply
+    assert session.cxt.current_node_code == "u_confirm"
+    assert session.cxt.filled_slots["budget"] == "比亚迪"
+
+    # 第 3 轮：终节点，next_node 为空保持不动（budget 保持第 2 轮抽取值）
     reply = chat_once(pattern, sessions, "预算20万左右")
     assert "确认购车信息" in reply
     assert session.cxt.current_node_code == "u_confirm"
-    assert session.cxt.filled_slots["budget"] == "预算20万左右"
+    assert session.cxt.filled_slots["budget"] == "比亚迪"
 
-    # 第 4 轮：终节点，next_node 为空保持不动
-    reply = chat_once(pattern, sessions, "好的，没问题")
-    assert "确认购车信息" in reply
-    assert session.cxt.current_node_code == "u_confirm"
-
-    # 槽位贯穿始终；统一阶段观测元数据写入
+    # 槽位贯穿始终（brand 在静默分发轮被首节点用整句消化）；统一阶段观测元数据写入
     assert session.cxt.filled_slots == {
-        "brand": "比亚迪",
-        "budget": "预算20万左右",
+        "brand": "我想买车，看看有什么车型",
+        "budget": "比亚迪",
     }
     assert session.cxt.metadata["unified"]["triggered"] is True
     assert "reply" in session.cxt.metadata["unified"]
@@ -198,9 +200,10 @@ def test_chitchat_stays_route_root(pattern, sessions):
     assert session.cxt.current_module_code == "unified_root"
     assert session.cxt.current_node_code == "u_route_root"
 
-    # 下一轮仍可路由到购车子模块
-    reply = chat_once(pattern, sessions, "我想买车")
+    # 下一轮仍可路由到购车子模块（静默分发：2 次调用，FSM 首节点同轮消化）
+    reply = chat_once(pattern, sessions, "我想买车", expect_calls=2)
     assert session.cxt.current_module_code == "unified_buy"
+    assert session.cxt.current_node_code == "u_ask_budget"
 
 
 # ============================================================================
@@ -229,9 +232,12 @@ def test_parse_failure_retry_recovers(pattern, sessions):
 
     reply = chat(sessions, "s1", "解析失败重试 买车")
 
-    assert FakeProvider.call_count - before == 2  # 失败 + 重试
+    # 失败 + 重试（route 统一阶段）+ FSM 首节点失败 + 重试 = 4 次
+    # （query 仍含「解析失败重试」，重入的 FSM 首节点同样先失败再重试）
+    assert FakeProvider.call_count - before == 4
     assert session.cxt.current_module_code == "unified_buy"
-    assert "购车菜单" in reply
+    assert session.cxt.current_node_code == "u_ask_budget"
+    assert "询问预算" in reply
 
 
 def test_parse_failure_exhausted_falls_back(pattern, sessions):
@@ -332,16 +338,15 @@ def test_unified_with_clarify_off_topic_turn(pattern, sessions):
     try:
         session = launch(pattern, sessions)
 
-        # 第 1 轮：路由进入购车子模块
-        chat_once(pattern, sessions, "我想买车")
+        # 第 1 轮：路由命中 → 静默分发，FSM 首节点 u_ask_brand 同轮消化该句
+        # （route 统一阶段 + FSM 统一阶段 = 2 次调用），推进到 u_ask_budget
+        chat_once(pattern, sessions, "我想买车", expect_calls=2)
         assert session.cxt.current_module_code == "unified_buy"
-
-        # 第 2 轮：品牌 → 询问预算节点（正常轮 1 次调用）
-        chat_once(pattern, sessions, "比亚迪")
         assert session.cxt.current_node_code == "u_ask_budget"
+        assert session.cxt.filled_slots.get("brand") == "我想买车"
 
-        # 第 3 轮：偏题（应问预算时反问收费）→ 统一阶段发 clarify 信号，
-        # ClarifyStage 覆写回复为 kb 应答 + 拉回
+        # 第 2 轮：偏题（应问预算时反问收费）→ 统一阶段发 clarify 信号，
+        # ClarifyStage 覆写回复为 kb 应答 + 拉回（统一 + 澄清生成 = 2 次调用）
         before = FakeProvider.call_count
         reply = chat(sessions, "s1", "还要收别的钱吗")
         assert FakeProvider.call_count - before == 2  # 统一 + 澄清生成
@@ -353,9 +358,9 @@ def test_unified_with_clarify_off_topic_turn(pattern, sessions):
         assert "预算" in reply  # 拉回主线
         assert session.cxt.current_node_code == "u_ask_budget"  # 节点不动
         assert "topic" not in session.cxt.filled_slots  # 澄清槽位未污染
-        assert session.cxt.filled_slots.get("brand") == "比亚迪"  # 业务槽位保留
+        assert session.cxt.filled_slots.get("brand") == "我想买车"  # 业务槽位保留
 
-        # 第 4 轮：恢复正常（回答预算）→ 澄清元数据重置，流程继续推进
+        # 第 3 轮：恢复正常（回答预算）→ 澄清元数据重置，流程继续推进
         reply = chat_once(pattern, sessions, "20万左右")
         assert session.cxt.metadata["clarify"]["triggered"] is False
         assert session.cxt.current_node_code == "u_confirm"

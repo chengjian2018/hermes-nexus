@@ -124,3 +124,6 @@ def test_force_close_route_returns_nonempty_reply():
     assert isinstance(reply, str) and reply, f"force_close 后回复不应为空: {reply!r}"
     assert reply == "购车咨询由我来介绍吧"
     assert sessions["sr"].cxt.current_module_code == "router"
+    # force_close 跳过 dispatch 但仍重置回 root：菜单节点无 sub_nodes，
+    # 若留在 menu_buy，下一轮 RouteNLU 候选为空 → 路由卡死
+    assert sessions["sr"].cxt.current_node_code == "route_root"

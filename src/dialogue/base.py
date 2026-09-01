@@ -83,7 +83,7 @@ class DialogueContext:
     #   dispatch_graph       : Dict[str, Set[str]]  合法转移边（chat 启动时注入）
     #   dispatch_log         : List[Dict]           本轮转移链（每轮开头清空）
     #   handoff_context      : Dict                 最近一次转移的承接信息
-    #   served_by_projection : str                  A 借投影答轮的来源域
+    #   served_by_projection : Dict{module, source}  A 借投影答轮：借方模块与来源域
     """
 
     session_id: str

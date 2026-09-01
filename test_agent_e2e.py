@@ -38,8 +38,8 @@ def main() -> None:
 
     # 场景 1（inject）：前台借工单工具直接答
     print("== 场景1 inject ==")
-    print("用户:", r1 := chat("帮我看下京A12345的工单进度", "e2e", sessions))
-    print("助手:", r1)
+    print("用户: 帮我看下京A12345的工单进度")
+    print("助手:", chat("帮我看下京A12345的工单进度", "e2e", sessions))
     # 场景 2（transfer）：深入售后流程 → 前台移交，售后同轮接话
     print("== 场景2 transfer ==")
     print("用户: 保养预约想改期，顺便保险理赔有纠纷")

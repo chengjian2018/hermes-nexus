@@ -69,3 +69,12 @@ def test_max_hops_default_and_override():
     a = AgentModule(module_code="a")
     assert _mk_pattern([a]).max_hops == 2
     assert _mk_pattern([a], max_hops=1).max_hops == 1
+
+
+def test_route_jump_module_self_loop_raises():
+    """M-1：jump_module 指向自身模块 → 注册期自环 fail fast。"""
+    menu = BaseNode(node_code="menu_self", node_name="m", jump_module="rt")
+    root = BaseNode(node_code="root2", node_name="r", sub_nodes=["menu_self"])
+    route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
+    with pytest.raises(ValueError, match="自环"):
+        _mk_pattern([route_mod])

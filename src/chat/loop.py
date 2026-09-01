@@ -54,13 +54,19 @@ def conversation(
     return result.reply or ""
 
 
-def run_agent(session: Session, module, llm_config: Dict[str, Any]) -> TurnResult:
+def run_agent(
+    session: Session,
+    module,
+    llm_config: Dict[str, Any],
+    force_close: bool = False,
+) -> TurnResult:
     """执行单个 AGENT 模块一轮：inject 直接答 / transfer 立即返回（spec §3.3）。
 
     Args:
         session: current session
         module: current module object (AgentModule)
         llm_config: LLM config dict with code, model, temperature, etc.
+        force_close: 强制收尾（max_hops 耗尽）：追加"勿再移交"提示且不注入 transfer 工具
 
     Returns:
         TurnResult: reply 与 dispatch_event 互斥。
@@ -69,6 +75,8 @@ def run_agent(session: Session, module, llm_config: Dict[str, Any]) -> TurnResul
     provider = build_provider(llm_config)
 
     system_prompt = _build_system_prompt(module, cxt)
+    if force_close:
+        system_prompt = (system_prompt + "\n请直接回应用户，勿再移交。").strip()
     if len(system_prompt) > _PROMPT_LENGTH_WARN:
         logger.warning(
             "Agent system_prompt 过长 (%d 字符): session=%s, module=%s（投影膨胀观测）",
@@ -77,7 +85,7 @@ def run_agent(session: Session, module, llm_config: Dict[str, Any]) -> TurnResul
 
     own_tools = _resolve_tools(module, session.pattern)
     lent_schemas, lent_by = _resolve_lent_tools(module, session.pattern)
-    transfer_tools = build_transfer_tools(module, cxt.module_map)
+    transfer_tools = [] if force_close else build_transfer_tools(module, cxt.module_map)
     tools = own_tools + lent_schemas + transfer_tools
 
     messages = _build_messages(system_prompt, cxt)

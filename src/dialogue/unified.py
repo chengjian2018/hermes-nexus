@@ -20,6 +20,13 @@ Unified stage —— 单次调用 + structured output：一次 LLM 调用同时�
     FSMModule(nlu_stage=FSMUnifiedNLU(), nlg_stage=PassThroughNLG())
     RouteModule(nlu_stage=RouteUnifiedNLU(), nlg_stage=PassThroughNLG())
 
+与双轨澄清组合（enable_clarify=True 的 FSM 模块）：
+    管线装配为 [统一阶段, ClarifyStage, PassThroughNLG]。
+    统一阶段按模板中的偏题特例输出 next_node="clarify"（合法集放行），
+    ClarifyStage 覆写 nlg_result 生成澄清回复，PassThroughNLG 放行；
+    澄清轮共 2 次 LLM 调用（统一 + 澄清生成），与两阶段+澄清持平，
+    正常轮仍为 1 次。
+
 ROUTE 模块下统一阶段生成的回复已依据所选菜单节点的回答范式，
 管线中随后的 route_advance / jump_module 分发逻辑不受影响。
 """
@@ -111,8 +118,17 @@ class _UnifiedBaseNLU(BaseNLU):
         return list(node.sub_nodes) if node is not None else []
 
     def _valid_next_values(self, cxt: DialogueContext) -> set:
-        """next_node 的合法取值集合：候选节点编码 + 空串（保持当前节点）。"""
-        return set(self._candidate_node_codes(cxt)) | {""}
+        """next_node 的合法取值集合：候选节点编码 + 空串（保持当前节点）。
+
+        模块开启双轨澄清（enable_clarify=True）时额外放行 "clarify"：
+        触发后由 ClarifyStage 覆写 nlg_result 生成澄清回复，
+        节点跳转守卫按 metadata["clarify"] 跳过，不会真的跳到不存在的节点。
+        """
+        valid = set(self._candidate_node_codes(cxt)) | {""}
+        module = cxt.get_current_module()
+        if module is not None and getattr(module, "enable_clarify", False):
+            valid.add("clarify")
+        return valid
 
     def _format_valid_values(self, cxt: DialogueContext) -> str:
         """合法取值列表的 prompt 文本（嵌入模板的 next_node 合法取值段）。"""
@@ -216,7 +232,9 @@ class _UnifiedBaseNLU(BaseNLU):
             valid_values = self._valid_next_values(ctx)
 
             if next_node not in valid_values:
-                # 硬 guard：非法转移边 → 保持当前节点，回复保留（仍基于所选风格生成）
+                # 硬 guard：非法转移边 → 保持当前节点。
+                # 被拒的若为 clarify 信号（模块未开双轨澄清），模型的 reply 多为
+                # "帮您确认一下"类承接承诺，而后续没有澄清环节兑现 —— 回复一并替换为兜底。
                 logger.warning(
                     "统一阶段 next_node '%s' 不在合法转移边 %s 中，保持当前节点: %s",
                     next_node,
@@ -227,6 +245,8 @@ class _UnifiedBaseNLU(BaseNLU):
                 next_node = ""
 
             reply = str(parsed.get("reply", "") or "").strip() or self.fallback_reply
+            if unified_meta.get("invalid_next_node") == "clarify":
+                reply = self.fallback_reply
             ctx.nlu_result = {
                 "next_node": next_node,
                 "slots": parsed.get("slots", {}) or {},

@@ -141,6 +141,27 @@ def _unified(node_name: str, query: str, retry: bool) -> str:
             },
             ensure_ascii=False,
         )
+    if "硬造澄清意图" in query:
+        # 模拟未开澄清的模块输出了 clarify 信号，供合法集硬 guard 测试
+        return json.dumps(
+            {
+                "reply": "统一回复: 硬造澄清",
+                "next_node": "clarify",
+                "slots": {"topic": "费用", "keywords": ["硬造"]},
+            },
+            ensure_ascii=False,
+        )
+
+    # 偏题输入 → 澄清意图（固定槽位 topic/keywords，reply 简短承接）
+    if any(k in query for k in ("收别的钱", "其他收费", "额外收费")):
+        return json.dumps(
+            {
+                "reply": "统一承接: 这个问题我帮您确认一下",
+                "next_node": "clarify",
+                "slots": {"topic": "费用", "keywords": ["额外收费"]},
+            },
+            ensure_ascii=False,
+        )
 
     # 路由根节点：意图分类到菜单
     if node_name == "统一路由根节点":

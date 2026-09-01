@@ -7,6 +7,8 @@
 4. 非法 next_node 代码级硬 guard（保持当前节点，回复保留）
 5. 解析失败重试成功 / 重试耗尽兜底不崩溃
 6. PassThroughNLG 保留已生成回复
+7. 双轨澄清组合：偏题轮 clarify 信号 → kb 应答 + 拉回（澄清轮 2 次调用，
+   正常轮仍 1 次）；未开澄清模块的 clarify 信号被合法集硬 guard 拒绝
 """
 
 import logging
@@ -264,3 +266,100 @@ def test_pass_through_nlg_keeps_existing_result():
     ctx_empty = DialogueContext(session_id="s-2", user_query="q")
     ctx_empty = stage.execute(ctx_empty)
     assert ctx_empty.nlg_result == {"content": ""}
+
+
+# ============================================================================
+# 双轨澄清组合测试（enable_clarify=True 的 FSM 模块）
+# ============================================================================
+
+def test_clarify_next_node_rejected_when_disabled(pattern, sessions):
+    """未开澄清的模块输出 clarify 信号：合法集硬 guard 回落为保持当前节点。
+
+    模型 reply 是"帮您确认"类承接承诺，但模块未装配澄清环节不会兑现，
+    因此回复一并替换为兜底话术（避免空承诺）。
+    """
+    from src.dialogue.unified import FSMUnifiedNLU
+
+    session = launch(pattern, sessions)
+
+    reply = chat_once(pattern, sessions, "硬造澄清意图")
+
+    assert session.cxt.current_module_code == "unified_root"
+    assert session.cxt.current_node_code == "u_route_root"
+    assert session.cxt.nlu_result["next_node"] == ""
+    assert session.cxt.metadata["unified"]["invalid_next_node"] == "clarify"
+    assert reply == FSMUnifiedNLU.fallback_reply  # 空承诺回复被兜底替换
+    assert "clarify" not in session.cxt.metadata
+
+
+def test_unified_with_clarify_off_topic_turn(pattern, sessions):
+    """统一阶段 + 双轨澄清：偏题轮 kb 应答 + 拉回，节点不动、槽位不污染。
+
+    管线为 [FSMUnifiedNLU, ClarifyStage, PassThroughNLG]：
+    澄清轮 = 统一调用 + 澄清生成共 2 次 LLM 调用（与两阶段+澄清持平），
+    正常轮仍为 1 次。
+    """
+    from src.clarify import ClarifyRouteRule, ClarifyStage
+    from src.dialogue.recaller import (
+        KeywordRecallPath,
+        MultiPathRecaller,
+        ScoreThresholdFilter,
+        WeightedScoreFusion,
+    )
+
+    kb_docs = [
+        {
+            "id": "fee_policy",
+            "content": "除车价外仅收取上牌费与服务费，无其他收费",
+            "metadata": {"keywords": ["收费", "服务费", "上牌费"]},
+        },
+    ]
+
+    # 测试注入：给购车子模块开澄清（测完恢复，不污染同文件其他用例）
+    buy = pattern.module_map["unified_buy"]
+    saved_flag = getattr(buy, "enable_clarify", False)
+    saved_stage = getattr(buy, "clarify_stage", None)
+    buy.enable_clarify = True
+    buy.clarify_stage = ClarifyStage(
+        recaller=MultiPathRecaller(
+            recall_paths=[KeywordRecallPath(name="kb", documents=kb_docs)],
+            filters=[ScoreThresholdFilter(threshold=0.1)],
+            fusion=WeightedScoreFusion(),
+        ),
+        rule=ClarifyRouteRule(),
+    )
+
+    try:
+        session = launch(pattern, sessions)
+
+        # 第 1 轮：路由进入购车子模块
+        chat_once(pattern, sessions, "我想买车")
+        assert session.cxt.current_module_code == "unified_buy"
+
+        # 第 2 轮：品牌 → 询问预算节点（正常轮 1 次调用）
+        chat_once(pattern, sessions, "比亚迪")
+        assert session.cxt.current_node_code == "u_ask_budget"
+
+        # 第 3 轮：偏题（应问预算时反问收费）→ 统一阶段发 clarify 信号，
+        # ClarifyStage 覆写回复为 kb 应答 + 拉回
+        before = FakeProvider.call_count
+        reply = chat(sessions, "s1", "还要收别的钱吗")
+        assert FakeProvider.call_count - before == 2  # 统一 + 澄清生成
+
+        clarify_info = session.cxt.metadata["clarify"]
+        assert clarify_info["triggered"] is True
+        assert clarify_info["mode"] == "kb"
+        assert "上牌费与服务费" in reply  # kb 应答
+        assert "预算" in reply  # 拉回主线
+        assert session.cxt.current_node_code == "u_ask_budget"  # 节点不动
+        assert "topic" not in session.cxt.filled_slots  # 澄清槽位未污染
+        assert session.cxt.filled_slots.get("brand") == "比亚迪"  # 业务槽位保留
+
+        # 第 4 轮：恢复正常（回答预算）→ 澄清元数据重置，流程继续推进
+        reply = chat_once(pattern, sessions, "20万左右")
+        assert session.cxt.metadata["clarify"]["triggered"] is False
+        assert session.cxt.current_node_code == "u_confirm"
+        assert session.cxt.filled_slots["budget"] == "20万左右"
+    finally:
+        buy.enable_clarify = saved_flag
+        buy.clarify_stage = saved_stage

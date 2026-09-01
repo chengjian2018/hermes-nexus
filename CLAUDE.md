@@ -7,7 +7,7 @@
 | 层 | 位置 | 改动纪律 |
 |---|---|---|
 | **框架内核** | `src/dialogue/base.py` `module.py` `node.py` `pattern.py` `register.py`、`src/chat/session.py` `loop.py`、`src/llm/*`、`src/tools/register.py` | **串行做**：先出 implementation plan，人工审完再动手；小步 commit；改完跑全量 pytest；同步更新 ARCHITECTURE.md |
-| **框架扩展** | `src/dialogue/nlu.py` `nlg.py` `query.py` `recaller.py`、`src/clarify/*` | 半并行：新加 stage 类较自由；改基类签名算内核改动 |
+| **框架扩展** | `src/dialogue/nlu.py` `nlg.py` `unified.py` `query.py` `recaller.py`、`src/clarify/*` | 半并行：新加 stage 类较自由；改基类签名算内核改动 |
 | **应用层** | `src/dialogue/car_sales_route.py` 等业务 pattern、`src/tools/*_tool.py`、`src/prompt.py` | **可自由并行**（建议 git worktree 隔离） |
 
 约定：

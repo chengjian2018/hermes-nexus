@@ -13,6 +13,7 @@ flowchart TB
     chat --> base["dialogue/base.py<br/>PipelineStage<br/>DialogueContext<br/>SessionMessage"]
     chat --> nlu["dialogue/nlu.py<br/>FSMNLU · RouteNLU"]
     chat --> nlg["dialogue/nlg.py"]
+    chat --> uni["dialogue/unified.py<br/>统一阶段(单次调用 NLU+NLG)<br/>FSMUnifiedNLU · RouteUnifiedNLU · PassThroughNLG"]
     chat --> loop2["chat/loop.py<br/>Agent ReAct 循环"]
 
     preg --> pattern["dialogue/pattern.py"]
@@ -20,6 +21,7 @@ flowchart TB
 
     nlu --> resolve["llm/resolve.py<br/>build_provider()"]
     nlg --> resolve
+    uni --> resolve
     loop2 --> resolve
     loop2 --> treg
 
@@ -28,10 +30,12 @@ flowchart TB
 
     subgraph 应用层
         carsales["dialogue/car_sales_route.py<br/>(示例 pattern)"]
+        carsalesuni["dialogue/car_sales_unified_route.py<br/>(统一阶段示例 pattern)"]
         tools["tools/calculator_tool.py<br/>weather_tool.py"]
         clarify["src/clarify/<br/>偏题澄清"]
     end
     carsales -.-> preg
+    carsalesuni -.-> preg
     tools -.-> treg
 ```
 
@@ -43,6 +47,7 @@ flowchart TB
 - **Module**：三种类型 `ROUTE`（菜单分发）/ `FSM`（状态机）/ `AGENT`（自由对话+工具）
 - **Node**：FSM/ROUTE 内的状态节点；`sub_nodes` 构成转移图；节点级 NLU/NLG 可覆盖模块级
 - **PipelineStage**：可插拔管线步骤，`execute(ctx) -> ctx`；ctx 即 `DialogueContext` 全程数据载体
+- **统一阶段（unified.py）**：单次调用 + structured output 的 NLU+NLG 合一形态——一次 LLM 调用产出 `{"reply","next_node","slots"}`，拆写 `ctx.nlu_result`/`ctx.nlg_result`；`next_node` 由代码按合法转移边硬校验。module 级注入（`nlu_stage=FSMUnifiedNLU()/RouteUnifiedNLU(), nlg_stage=PassThroughNLG()`），替换默认两阶段（每轮 2 次调用 → 1 次）
 - **Session**：持有 `cxt`（DialogueContext）；每轮更新 `user_query`，轮末回写状态
 
 ## 公共契约（改动需走内核流程）
@@ -61,6 +66,7 @@ flowchart TB
 - 新工具 → `src/tools/<name>_tool.py`，自动被 AST 发现
 - 新 LLM provider → `src/llm/<name>_provider.py`
 - 新管线阶段 → `src/dialogue/<stage>.py` 继承 `PipelineStage`
+- 模块要单次调用（NLU+NLG 合一）→ module 上配 `nlu_stage=FSMUnifiedNLU()/RouteUnifiedNLU()` + `nlg_stage=PassThroughNLG()`（见 `car_sales_unified_route.py` 示例；候选节点需声明 `answer_examples`）
 - 全局 prompt 模板 → `src/prompt.py`（node/module 可覆盖）
 
 ## 测试

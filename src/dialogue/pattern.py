@@ -66,6 +66,11 @@ class Pattern:
                                 f"悬空转移边: 节点 {node.node_code}.jump_module "
                                 f"→ {jump_target} 不存在"
                             )
+                        if jump_target == module.module_code:
+                            raise ValueError(
+                                f"自环转移边: 节点 {node.node_code}.jump_module "
+                                f"→ {jump_target}（模块自环）"
+                            )
                         edges.add(jump_target)
                 if edges:
                     self.dispatch_graph[module.module_code] = edges

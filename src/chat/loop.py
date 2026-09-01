@@ -126,20 +126,27 @@ def run_agent(
             None,
         )
         if transfer_call is not None:
-            if not _execute_transfer(session, transfer_call):
-                # dispatch 被拒（目标不邻接/同轮回弹）：错误回填 tool result，
+            ok, transfer_reason = _execute_transfer(session, transfer_call)
+            if not ok:
+                # dispatch 被拒（目标不邻接/同轮回弹）：对本轮全部 tool_calls
+                # 逐个回填（真实 OpenAI 兼容 API 要求每个 tool_call_id 有应答），
                 # 继续 tool loop 让 LLM 自行换路（spec §5）
                 messages.append({"role": "assistant", "content": content or None,
                                  "tool_calls": tool_calls})
                 err = json.dumps(
                     {"error": "转移被拒绝: 目标不邻接或同轮回弹，请直接回应用户"},
                     ensure_ascii=False)
-                cxt.add_message("tool", err, stage="agent",
-                                metadata={"tool_name":
-                                          transfer_call.get("function", {}).get("name", "")})
-                messages.append({"role": "tool",
-                                 "tool_call_id": transfer_call.get("id", ""),
-                                 "content": err})
+                for tc in tool_calls:
+                    name = tc.get("function", {}).get("name", "")
+                    if name.startswith(TRANSFER_TOOL_PREFIX):
+                        result_content = err
+                    else:
+                        result_content = _execute_tool(name, _parse_args(tc))
+                    cxt.add_message("tool", result_content, stage="agent",
+                                    metadata={"tool_name": name})
+                    messages.append({"role": "tool",
+                                     "tool_call_id": tc.get("id", ""),
+                                     "content": result_content})
                 continue
             # dispatch 成功：A 的 content 不出口但保留进 history（spec §3.3）
             if content:
@@ -149,8 +156,7 @@ def run_agent(
             return TurnResult(dispatch_event=ModuleDispatch(
                 target_module_code=transfer_call["function"]["name"][
                     len(TRANSFER_TOOL_PREFIX):],
-                reason=_parse_args(transfer_call).get("reason", "")
-                if isinstance(_parse_args(transfer_call), dict) else "",
+                reason=transfer_reason,
                 source="handoff_tool",
             ))
 
@@ -163,7 +169,9 @@ def run_agent(
             tool_result = _execute_tool(name, args)
             source = lent_by.get(name)
             if source:
-                cxt.metadata["served_by_projection"] = source
+                cxt.metadata["served_by_projection"] = {
+                    "module": module.module_code, "source": source,
+                }
             metadata = {"tool_name": name}
             if source:
                 metadata["lent_by"] = source
@@ -238,9 +246,13 @@ def _build_system_prompt(module, cxt: DialogueContext) -> str:
     if module.base_prompt:
         parts.append(module.base_prompt)
 
-    projection = build_projection_block(module, cxt.module_map)
-    if projection:
-        parts.append(projection)
+    # 团队规则：只要存在 sub_modules 边（会生成 transfer 工具）就注入，
+    # 不依赖投影块非空——否则 lend_knowledge=False 的模块拿到 transfer 工具
+    # 却没有"transfer 轮不对用户说话"等规则
+    if module.sub_modules:
+        projection = build_projection_block(module, cxt.module_map)
+        if projection:
+            parts.append(projection)
         parts.append(AGENT_TEAM_RULES_PROMPT)
 
     handoff = cxt.metadata.get("handoff_context")
@@ -250,10 +262,11 @@ def _build_system_prompt(module, cxt: DialogueContext) -> str:
             "reason": handoff.get("reason", "") or "（无补充信息）",
         }))
 
+    # 回看块：仅当前模块就是当初的借方时注入，避免跨模块泄漏
     served = cxt.metadata.get("served_by_projection")
-    if served:
+    if isinstance(served, dict) and served.get("module") == module.module_code:
         parts.append(fill_prompt_template(AGENT_PROJECTION_RECALL_PROMPT, {
-            "projection_source": served,
+            "projection_source": served.get("source", ""),
         }))
 
     task_info = cxt.metadata.get("task_info", {})
@@ -342,6 +355,15 @@ def _resolve_lent_tools(module, pattern):
         if target is None:
             continue
         allowed = set(target.use_tools or []) & set(link.lend_tools)
+        # 二次过滤：借出路径同样受 pattern 级工具 ACL 约束（deny-by-default），
+        # 以借方（target 模块）为 ACL 名义主体——不架空 get_allowed_tools_for_pattern
+        if not allowed:
+            continue
+        if pattern is not None:
+            allowed &= tool_registry.get_allowed_tools_for_pattern(
+                pattern.code, link.target)
+        else:
+            allowed = set()
         for schema in tool_registry.get_definitions(allowed):
             name = schema["function"]["name"]
             schemas.append(schema)
@@ -395,8 +417,12 @@ def _execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
 # Transfer handling
 # ---------------------------------------------------------------------------
 
-def _execute_transfer(session: Session, transfer_call) -> bool:
-    """解析 transfer 工具调用并执行 dispatch()（含 reason）。返回 dispatch 成败。"""
+def _execute_transfer(session: Session, transfer_call) -> tuple:
+    """解析 transfer 工具调用并执行 dispatch()（含 reason）。
+
+    Returns:
+        (ok, reason)：ok 为 dispatch 成败；reason 为调用参数中的移交上下文。
+    """
     cxt = session.cxt
     name = transfer_call.get("function", {}).get("name", "")
     target = name[len(TRANSFER_TOOL_PREFIX):]
@@ -407,4 +433,4 @@ def _execute_transfer(session: Session, transfer_call) -> bool:
     if not ok:
         logger.warning("[transfer] 目标 %s 转移失败（不邻接/回弹），错误回填继续 loop",
                        target)
-    return ok
+    return ok, reason

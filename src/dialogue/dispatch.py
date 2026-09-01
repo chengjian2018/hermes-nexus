@@ -1,6 +1,6 @@
 """Module dispatch —— 全 pattern 通用的唯一模块转移原语（spec §3）。
 
-三种跳转源（agent transfer 工具 / ROUTE jump_module / 兼容 [jump] 标签）
+三种跳转源（agent transfer 工具 / ROUTE jump_module 菜单分发）
 都构造 ModuleDispatch 走本函数；它只做纯状态转移 + 记账，
 不决定轮次边界（same-turn 重入由 chat() 层消费 dispatch 事件实现）。
 """
@@ -15,9 +15,6 @@ if TYPE_CHECKING:
     from src.dialogue.base import DialogueContext
 
 logger = logging.getLogger(__name__)
-
-# 同轮回弹上限：A→B 后同轮 B 转回 A 视为移交环，拒绝
-_MAX_BOUNCE_BACK = 1
 
 
 @dataclass
@@ -46,11 +43,12 @@ def dispatch(ctx: "DialogueContext", event: ModuleDispatch) -> bool:
         )
         return False
 
-    # 防环：同轮 A→B→A 回弹拒绝（dispatch_log 为本轮累积，chat() 每轮开头清空）
+    # 防环：同轮 A→B→A 回弹拒绝（dispatch_log 为本轮累积，chat() 每轮开头清空；
+    # 跨轮 dispatch_log 已清，返回原模块合法——sticky 逃生语义 spec §5）
     log = ctx.metadata.setdefault("dispatch_log", [])
     if log:
         first_from = log[0].get("from")
-        if target == first_from and len(log) >= _MAX_BOUNCE_BACK:
+        if target == first_from:
             logger.warning("[dispatch] 同轮回弹 %s → %s，拒绝（移交环）",
                            ctx.current_module_code, target)
             return False
@@ -61,6 +59,10 @@ def dispatch(ctx: "DialogueContext", event: ModuleDispatch) -> bool:
         "source": event.source,
         "reason": event.reason,
     })
+    # 离开借答方时清除回看记账（回看块仅在借方自身轮次有效，防跨模块泄漏）
+    served = ctx.metadata.get("served_by_projection")
+    if isinstance(served, dict) and served.get("module") != target:
+        ctx.metadata.pop("served_by_projection", None)
     ctx.metadata["handoff_context"] = {
         "from": ctx.current_module_code,
         "reason": event.reason,

@@ -70,3 +70,57 @@ def test_max_hops_exceeded_force_close():
     with patch("src.chat.loop.build_provider", return_value=provider):
         reply = _chat(sessions, "s1", "帮我处理售后")
     assert reply == "好的，我来处理您的售后问题。"
+
+
+def test_force_close_route_returns_nonempty_reply():
+    """I-4：max_hops=1，agent transfer 进 ROUTE 后强制收尾——跳过 dispatch
+    （含 jump_module 命中），消费 NLG 回复，不产生空回复。"""
+    from src.dialogue.module import RouteModule
+    from src.dialogue.node import BaseNode
+    from src.dialogue.base import PipelineStage
+
+    class _FakeRouteNLU(PipelineStage):
+        stage_name = "fake_route_nlu"
+
+        def execute(self, ctx):
+            ctx.nlu_result = {"next_node": "menu_buy", "slots": {}}
+            return ctx
+
+    class _FakeRouteNLG(PipelineStage):
+        stage_name = "fake_route_nlg"
+
+        def execute(self, ctx):
+            ctx.nlg_result = {"content": "购车咨询由我来介绍吧"}
+            return ctx
+
+    root = BaseNode(node_code="route_root", node_name="路由根",
+                    sub_nodes=["menu_buy"])
+    menu = BaseNode(node_code="menu_buy", node_name="购车咨询菜单",
+                    jump_module="buy_agent")
+    router = RouteModule(
+        module_code="router", module_name="路由",
+        module_nodes=[root, menu], sub_modules=["buy_agent"],
+        nlu_stage=_FakeRouteNLU(), nlg_stage=_FakeRouteNLG())
+    reception = AgentModule(
+        module_code="reception", module_name="前台", module_description="接待",
+        sub_modules=[ModuleLink(target="router")])
+    buy_agent = AgentModule(
+        module_code="buy_agent", module_name="购车专员", module_description="购车")
+    pattern = Pattern(code="p_route", name="t", description="t",
+                      entry_module_code="reception",
+                      modules=[reception, router, buy_agent], max_hops=1)
+
+    sessions = {}
+    _launch(pattern, sessions, sid="sr")
+    provider = ScriptedProvider([
+        # hop 0：前台 transfer 进 ROUTE 路由模块（同轮重入）
+        {"content": "转接中", "tool_calls": [{"id": "c1", "function": {
+            "name": "transfer_to_router",
+            "arguments": '{"reason": "购车"}'}}]},
+    ])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        reply = _chat(sessions, "sr", "我想买车")
+    # force_close 落在 ROUTE：不重跑 dispatch（否则 menu_buy 命中 buy_agent → 空回复）
+    assert isinstance(reply, str) and reply, f"force_close 后回复不应为空: {reply!r}"
+    assert reply == "购车咨询由我来介绍吧"
+    assert sessions["sr"].cxt.current_module_code == "router"

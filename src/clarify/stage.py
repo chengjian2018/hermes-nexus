@@ -141,9 +141,13 @@ class ClarifyStage(PipelineStage):
 
         # 3~6. 检索 + 门控（异常降级 fallback，永不阻塞主管线）
         recall_results = self._do_recall(ctx, search_query)
-        mode, adjusted = self.rule.route(
-            recall_results, open_slots["topic"], open_slots["keywords"]
-        )
+        try:
+            mode, adjusted = self.rule.route(
+                recall_results, open_slots["topic"], open_slots["keywords"]
+            )
+        except Exception as e:
+            logger.warning("澄清门控异常，降级 fallback: %s", e, exc_info=True)
+            mode, adjusted = "fallback", recall_results
         logger.info(
             "澄清门控: session=%s, mode=%s, top_score=%s, query=%r",
             ctx.session_id, mode,
@@ -154,10 +158,7 @@ class ClarifyStage(PipelineStage):
         # 7. 按 mode 生成（本轮唯一的 NLG 调用）
         prompt = self._build_prompt(ctx, mode, open_slots, adjusted)
         try:
-            if ctx.llm_config is not None:
-                content = self._generate(prompt, ctx.llm_config).strip()
-            else:
-                content = self._generate(prompt).strip()
+            content = self._generate(prompt, ctx.llm_config).strip()
         except Exception as e:
             logger.warning("澄清生成异常，使用兜底话术: %s", e, exc_info=True)
             content = "抱歉，这个问题我需要确认一下。我们继续刚才的任务好吗？"

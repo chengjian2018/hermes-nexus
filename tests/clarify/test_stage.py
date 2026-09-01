@@ -48,7 +48,7 @@ def make_stage(kb_docs=None, rule=None):
 def make_gen_stage(mode_to_return, captured):
     """LLM 生成 mock：记录收到的 prompt，返回带模式标记的回复。"""
 
-    def fake_generate(prompt: str) -> str:
+    def fake_generate(prompt: str, *args, **kwargs) -> str:
         captured.append(prompt)
         return f"[clarify:{mode_to_return}] 回复内容"
 
@@ -130,7 +130,7 @@ class TestRecallAndRoute:
         stage = ClarifyStage(
             recaller=MultiPathRecaller(recall_paths=[BoomPath(name="kb")]),
         )
-        stage._generate = lambda prompt: "[clarify:fallback] 兜底"
+        stage._generate = lambda prompt, *a, **k: "[clarify:fallback] 兜底"
         stage.execute(ctx)
         assert ctx.metadata["clarify"]["mode"] == "fallback"
         assert ctx.nlg_result["content"] == "[clarify:fallback] 兜底"
@@ -161,6 +161,6 @@ class TestQueryBuild:
         stage = ClarifyStage(
             recaller=MultiPathRecaller(recall_paths=[SpyPath(name="kb")]),
         )
-        stage._generate = lambda p: "ok"
+        stage._generate = lambda p, *a, **k: "ok"
         stage.execute(ctx)
         assert seen_queries == ["还要收别的钱吗 费用 额外收费"]

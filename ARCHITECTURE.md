@@ -14,6 +14,7 @@ flowchart TB
     chat --> nlu["dialogue/nlu.py<br/>FSMNLU · RouteNLU"]
     chat --> nlg["dialogue/nlg.py"]
     chat --> loop2["chat/loop.py<br/>Agent ReAct 循环"]
+    chat --> store["chat/store.py<br/>SessionStore(SQLite)"]
 
     preg --> pattern["dialogue/pattern.py"]
     pattern --> base
@@ -44,6 +45,8 @@ flowchart TB
 - **Node**：FSM/ROUTE 内的状态节点；`sub_nodes` 构成转移图；节点级 NLU/NLG 可覆盖模块级
 - **PipelineStage**：可插拔管线步骤，`execute(ctx) -> ctx`；ctx 即 `DialogueContext` 全程数据载体
 - **Session**：持有 `cxt`（DialogueContext）；每轮更新 `user_query`，轮末回写状态
+- **SessionStore**：SQLite write-through 审计流水（sessions 快照 + messages 行级消息），
+  兼重启恢复数据源；治理仍在内存，DB 非事实源（`chat/store.py`）
 
 ## 公共契约（改动需走内核流程）
 
@@ -54,6 +57,7 @@ flowchart TB
 | `registry.register()` 自注册 | `dialogue/register.py` `tools/register.py` `llm/register.py` | 应用层接入框架的唯一方式（AST 扫描发现） |
 | `build_provider(llm_config)` | `llm/resolve.py` | 所有 LLM 调用的统一入口 |
 | `conversation(session, module, llm_config)` | `chat/loop.py` | Agent 模块对话循环入口 |
+| `SessionStore` | `chat/store.py` | launch/轮末落盘、startup 恢复、审计查询；实例由 main.py 注入，非全局单例 |
 
 ## 什么代码放哪
 

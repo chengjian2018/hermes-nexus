@@ -157,3 +157,35 @@ def test_takeover_block_injected_for_target():
         result = run_agent(s, s.cxt.module_map["after_sales"], s.cxt.llm_config)
     assert "reception" in provider.seen[0]["messages"][0]["content"]
     assert "售后投诉" in provider.seen[0]["messages"][0]["content"]
+
+
+def test_run_agent_transfer_rejected_backfills_error_and_continues():
+    """transfer 被 dispatch 拒绝（非法目标）→ 错误回填 tool result，继续 loop 普通回复。"""
+    from src.chat.loop import run_agent
+    s = _mk_session()
+    s.cxt.add_message("user", "我要办个神奇业务", stage="chat")
+    provider = ScriptedProvider([
+        {"content": "尝试移交", "tool_calls": [{
+            "id": "c1", "function": {"name": "transfer_to_ghost",
+                                     "arguments": '{"reason": "不存在"}'}}]},
+        {"content": "好的，我直接为您处理。", "tool_calls": []},
+    ])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.llm_config)
+    assert result.reply == "好的，我直接为您处理。"
+    assert result.dispatch_event is None
+    # 状态未变
+    assert s.cxt.current_module_code == "reception"
+    # 错误回填 tool 消息落 history
+    tool_msgs = [m for m in s.cxt.history if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0].metadata.get("tool_name") == "transfer_to_ghost"
+    assert "转移被拒绝" in tool_msgs[0].content
+    # LLM 第二轮收到了回填的 tool 结果
+    second = provider.seen[1]["messages"]
+    assert second[-1]["role"] == "tool"
+    assert "转移被拒绝" in second[-1]["content"]
+    # 失败路径 content 不 suppress
+    assistant_msgs = [m for m in s.cxt.history
+                      if m.role == "assistant" and m.metadata.get("suppressed")]
+    assert not assistant_msgs

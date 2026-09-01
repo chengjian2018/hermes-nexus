@@ -126,11 +126,25 @@ def run_agent(
             None,
         )
         if transfer_call is not None:
-            # A 的 content 不出口但保留进 history（spec §3.3）
+            if not _execute_transfer(session, transfer_call):
+                # dispatch 被拒（目标不邻接/同轮回弹）：错误回填 tool result，
+                # 继续 tool loop 让 LLM 自行换路（spec §5）
+                messages.append({"role": "assistant", "content": content or None,
+                                 "tool_calls": tool_calls})
+                err = json.dumps(
+                    {"error": "转移被拒绝: 目标不邻接或同轮回弹，请直接回应用户"},
+                    ensure_ascii=False)
+                cxt.add_message("tool", err, stage="agent",
+                                metadata={"tool_name":
+                                          transfer_call.get("function", {}).get("name", "")})
+                messages.append({"role": "tool",
+                                 "tool_call_id": transfer_call.get("id", ""),
+                                 "content": err})
+                continue
+            # dispatch 成功：A 的 content 不出口但保留进 history（spec §3.3）
             if content:
                 cxt.add_message("assistant", content, stage="agent",
                                 metadata={"suppressed": True})
-            _execute_transfer(session, transfer_call)
             # 状态已由 _execute_transfer 内 dispatch() 转移；event 供 chat 层消费
             return TurnResult(dispatch_event=ModuleDispatch(
                 target_module_code=transfer_call["function"]["name"][
@@ -381,8 +395,8 @@ def _execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
 # Transfer handling
 # ---------------------------------------------------------------------------
 
-def _execute_transfer(session: Session, transfer_call) -> None:
-    """解析 transfer 工具调用并执行 dispatch()（含 reason）。"""
+def _execute_transfer(session: Session, transfer_call) -> bool:
+    """解析 transfer 工具调用并执行 dispatch()（含 reason）。返回 dispatch 成败。"""
     cxt = session.cxt
     name = transfer_call.get("function", {}).get("name", "")
     target = name[len(TRANSFER_TOOL_PREFIX):]
@@ -391,4 +405,6 @@ def _execute_transfer(session: Session, transfer_call) -> None:
     ok = dispatch(cxt, ModuleDispatch(target_module_code=target,
                                       reason=reason, source="handoff_tool"))
     if not ok:
-        logger.warning("[transfer] 目标 %s 转移失败（不邻接/回弹），本轮继续", target)
+        logger.warning("[transfer] 目标 %s 转移失败（不邻接/回弹），错误回填继续 loop",
+                       target)
+    return ok

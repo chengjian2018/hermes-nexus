@@ -204,9 +204,44 @@ def _unified(node_name: str, query: str, retry: bool) -> str:
     )
 
 
+def _extract_xianyu_section(prompt: str, marker: str) -> str:
+    """从闲鱼 NLG prompt 的指定段落（### 开头）提取首行内容。"""
+    idx = prompt.find(marker)
+    if idx == -1:
+        return ""
+    segment = prompt[idx + len(marker):]
+    lines = [l.strip() for l in segment.split("\n") if l.strip()]
+    return lines[0] if lines else ""
+
+
+def _xianyu_nlg(prompt: str) -> str:
+    """闲鱼意图 NLG prompt（XIANYU_*_NLG_PROMPT，含「买家消息」段落）。
+
+    回复带上任务描述的意图人设关键词，便于断言命中的菜单节点模板。
+    """
+    task = ""
+    for line in prompt.split("\n"):
+        line = line.strip()
+        if line.startswith("## 任务描述"):
+            idx = prompt.find(line)
+            after = prompt[idx + len(line):].lstrip("\n").split("\n", 1)
+            task = after[0].strip() if after else ""
+            break
+    if "议价" in task:
+        return "闲鱼回复: 议价"
+    if "技术" in task:
+        return "闲鱼回复: 技术"
+    return "闲鱼回复: 通用"
+
+
 def scripted_response(prompt: str) -> str:
     """按 prompt 类型返回脚本化 LLM 输出。"""
     node_name = _extract_node_name(prompt)
+
+    # 闲鱼意图 NLG prompt：无「节点名称」（走 node.base_nlg_prompt 意图模板），
+    # 以「### 买家消息」段落标识（先于通用 NLG 兜底判定）
+    if "### 买家消息" in prompt:
+        return _xianyu_nlg(prompt)
 
     # NLU 重试修正 prompt（含「修正要求」段落）→ 按协议返回正确格式
     if "修正要求" in prompt:

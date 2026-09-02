@@ -164,7 +164,11 @@ def _ptk_import():
 
 
 def select_from_menu(title: str, entries: List[Dict[str, str]]) -> Optional[str]:
-    """prompt_toolkit radiolist 方向键选择；不可用/非 TTY/取消时降级数字输入。
+    """内联方向键选择器；不可用/非 TTY/取消时降级数字输入。
+
+    不用 radiolist_dialog：其全屏对话框里 Enter 只标记选中，还需 Tab 到
+    Ok 按钮再 Enter 才关闭——首按 Enter "卡住不动" 的体验即源于此。
+    自建 Application：↑↓ 移动、Enter 直接返回选中 value、Esc/中断取消。
 
     entries: [{value, label, hint}]，返回 value 或 None（取消）。
     """
@@ -173,17 +177,62 @@ def select_from_menu(title: str, entries: List[Dict[str, str]]) -> Optional[str]
         return _select_by_number(title, entries)
     PtkPromptSession, _, _, HTML = mods
 
-    from prompt_toolkit.shortcuts import radiolist_dialog
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.formatted_text import HTML, to_formatted_text
 
-    choices = [(e["value"], e["label"]) for e in entries]
-    result = radiolist_dialog(
-        title=title,
-        text="↑↓ 选择，回车确认，Esc 取消",
-        values=choices,
-    ).run()
-    if result is None:
-        return None
-    return str(result)
+    state = {"index": 0}
+
+    def _render():
+        parts = [f"<b>{title}</b>\n",
+                 "<ansibrightblack>↑↓ 选择，Enter 确认，Esc 取消</ansibrightblack>\n"]
+        for i, e in enumerate(entries):
+            mark = "›" if i == state["index"] else " "
+            hint = (f"  <ansibrightblack>{e['hint']}</ansibrightblack>"
+                    if e.get("hint") else "")
+            line = f"{mark} {i + 1}. {e['label']}{hint}"
+            if i == state["index"]:
+                line = f"<ansicyan><b>{line}</b></ansicyan>"
+            parts.append(line + "\n")
+        # FormattedTextControl callable 需返回扁平 fragments：整体转一次
+        return to_formatted_text(HTML("".join(parts)))
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        state["index"] = max(0, state["index"] - 1)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        state["index"] = min(len(entries) - 1, state["index"] + 1)
+
+    @kb.add("enter")
+    def _accept(event):
+        event.app.exit(result=entries[state["index"]]["value"])
+
+    @kb.add("escape")
+    @kb.add("q")
+    @kb.add("c-c")
+    def _cancel(event):
+        event.app.exit(result=None)
+
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    # 动态重渲染：FormattedTextControl 的 text 支持 callable
+    body = FormattedTextControl(lambda: _render())
+    app = Application(
+        layout=Layout(HSplit([Window(content=body, dont_extend_height=True,
+                                     wrap_lines=True)])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+    result = app.run()
+    return result
 
 
 def _select_by_number(title: str, entries: List[Dict[str, str]]) -> Optional[str]:

@@ -56,8 +56,8 @@ def test_engine_ops_holds_callables():
 
 def test_fake_spec_satisfies_protocol():
     """FakeChannel 结构上满足 ChannelSpec 协议（runtime_checkable）。"""
-    from typing import runtime_checkable  # noqa: F401 -- 协议声明处已 @runtime_checkable
     spec = FakeChannel()
+    assert isinstance(spec, ChannelSpec)
     assert spec.name == "fake"
     msg = spec.parse(_FakePayload(user_id="u1", text="hi"))
     assert msg.session_key == "u1" and msg.text == "hi"

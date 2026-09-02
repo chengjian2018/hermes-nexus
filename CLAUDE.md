@@ -14,7 +14,7 @@
 - 新功能/新工具/新 pattern **一律走注册机制**（`registry.register()` 模块级自注册 + AST 自动发现），不许绕过注册表硬连线
 - 新 stage 继承 `PipelineStage`，通过 `DialogueContext` 传数据，不改基类签名
 - prompt 模板三级优先：node > module > class default
-- 不引入新的全局单例；现有单例只有 pattern/tool/llm 三个 registry
+- 不引入新的全局单例；现有单例只有 pattern/tool/llm/channel 四个 registry
 
 ## 环境
 

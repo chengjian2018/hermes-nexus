@@ -10,7 +10,6 @@
   取这三个键，误带会把调试信息发给买家
 """
 
-import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -18,8 +17,6 @@ from pydantic import BaseModel
 
 from src.channel.base import InboundMessage
 from src.channel.register import registry
-
-logger = logging.getLogger(__name__)
 
 # msg_time 的尽力解析格式（对方未承诺格式：可能是毫秒时间戳或常见日期字符串）
 _DT_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S")

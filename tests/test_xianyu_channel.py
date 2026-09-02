@@ -84,6 +84,8 @@ class ChannelHarness:
     def post(self, path, json=None, params=None):
         """带 env 注入的 POST：请求期间设置环境变量，结束还原。"""
         saved = {k: os.environ.get(k) for k in self._env}
+        # 防御：token 为 None 时清掉外部环境可能 export 的 token，避免污染 403
+        token_saved = os.environ.pop("XIANYU_CHANNEL_TOKEN", None)
         try:
             os.environ.update(self._env)
             return self.client.post(path, json=json, params=params)
@@ -93,6 +95,8 @@ class ChannelHarness:
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+            if token_saved is not None:
+                os.environ["XIANYU_CHANNEL_TOKEN"] = token_saved
 
 
 def inbound(**overrides):

@@ -242,6 +242,67 @@ def test_generate_all_layers_empty_falls_to_builtin():
     assert ran == [("builtin", "fsm_nlu"), ("builtin", "fsm_nlg")]
 
 
+def test_generate_builtin_route_executes_route_stages():
+    """ROUTE builtin 冒烟：三层全空时执行 RouteNLU/RouteNLG（打桩免 LLM）。"""
+    from src.dialogue.nlu import RouteNLU
+    from src.dialogue.nlg import RouteNLG
+    orig_nlu = RouteNLU.execute
+    orig_nlg = RouteNLG.execute
+    RouteNLU.execute = lambda self, ctx: ran.append(("builtin", "route_nlu")) or ctx
+    RouteNLG.execute = lambda self, ctx: ran.append(("builtin", "route_nlg")) or ctx
+    try:
+        ctx = _ctx(node_code="root", module_code="r1")
+        ctx.node_map["root"] = BaseNode(node_code="root", node_name="根")
+        module = _route_module()
+        ctx.module_map = {"r1": module}
+        module.module_nodes = [ctx.node_map["root"]]
+        for part in resolve_stage(GenerateSlot(), ctx, module, None):
+            part.execute(ctx)
+    finally:
+        RouteNLU.execute = orig_nlu
+        RouteNLG.execute = orig_nlg
+    assert ran == [("builtin", "route_nlu"), ("builtin", "route_nlg")]
+
+
+def test_generate_single_same_stage_at_root_and_menu_runs_once():
+    """single 守卫（同对象）：root 与菜单层解析到同一 single stage → 只执行一次。"""
+    unified = _Marker("shared_unified")
+    ctx = _ctx(node_code="root")
+    ctx.node_map["root"] = BaseNode(node_code="root", node_name="根",
+                                    generate=unified)
+    ctx.node_map["menu_a"] = BaseNode(node_code="menu_a", node_name="菜单A",
+                                      generate=unified)
+    module = _route_module()
+    ctx.module_map = {"m1": module}
+
+    for part in resolve_stage(GenerateSlot(), ctx, module, None):
+        part.execute(ctx)
+
+    assert ran == [("root", "shared_unified")]
+
+
+def test_generate_single_menu_stage_reruns_in_nlg_part():
+    """single 守卫（异对象）：root 层 single 在 nlu 部件执行后 advance 切菜单，
+    菜单层是另一个 single stage → nlg 部件补执行（菜单版当轮生效）。"""
+    ctx = _ctx(node_code="root", module_code="r1")
+    ctx.node_map["root"] = BaseNode(
+        node_code="root", node_name="根",
+        generate={"nlu": _Marker("root_nlu"), "nlg": _Marker("root_nlg")})
+    ctx.node_map["menu_a"] = BaseNode(node_code="menu_a", node_name="菜单A",
+                                      generate=_Marker("menu_unified"))
+    module = _route_module()
+    ctx.module_map = {"r1": module}
+    ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
+    module.module_nodes = [ctx.node_map["root"], ctx.node_map["menu_a"]]
+
+    for part in resolve_stage(GenerateSlot(), ctx, module, None):
+        part.execute(ctx)
+
+    # root dict nlu 在 nlu 部件；advance 切菜单后 nlg 部件补执行菜单 single
+    assert ran == [("root", "root_nlu"), ("menu_a", "menu_unified")]
+    assert ctx.current_node_code == "menu_a"
+
+
 def test_generate_pattern_layer_used_when_node_module_unset():
     pattern = _pattern(generate=_Marker("pat_unified"))
     ctx = _ctx()

@@ -307,10 +307,13 @@ def get_llm_config(pattern_code: str = "", module_code: str = "",
             logging.getLogger(__name__).warning(
                 "override 路径加载配置失败，连接层降级为空: %s", code or None)
             cfg = {}
-        if not code:
-            default_code = (cfg.get("llm_default") or {}).get("code", "")
-            if default_code:
-                merged["code"] = default_code
+        default = cfg.get("llm_default") or {}
+        if not code and default.get("code"):
+            merged["code"] = default["code"]
+        if not merged.get("model") and default.get("model"):
+            # CLI 选「维持 config 配置」时 override 只带 code，缺 model 会导致
+            # run_agent 取 llm_config["model"] KeyError，同 code 一样兜底
+            merged["model"] = default["model"]
         return _merge_connection(merged, cfg.get("llm_providers", {}))
     cfg = load_config(config_path)
     return _merge_connection(

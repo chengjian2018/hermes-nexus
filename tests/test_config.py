@@ -278,3 +278,11 @@ def test_override_without_code_falls_back_to_llm_default(tmp_path):
     cfg = get_llm_config(override=ov, config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg["code"] == "openai"
     assert cfg["model"] == "override-model"
+
+
+def test_override_with_code_but_no_model_falls_back(tmp_path):
+    """override 只给 code 不给 model：model 从 llm_default 兜底，防 run_agent KeyError。"""
+    ov = {"code": "openai"}
+    cfg = get_llm_config(override=ov, config_path=_write(tmp_path, _NEW_STRUCT))
+    assert cfg["code"] == "openai"
+    assert cfg["model"] == "qwen3.8-max"

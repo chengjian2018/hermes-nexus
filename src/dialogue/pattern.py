@@ -9,6 +9,10 @@ class Pattern:
                  entry_module_code,
                  modules: Optional[list[Any]] = None,
                  stages: Optional[list[Any]] = None,
+                 generate: Optional[Any] = None,
+                 pre_recall: Optional[Any] = None,
+                 query: Optional[Any] = None,
+                 post_recall: Optional[Any] = None,
                  **kwargs):
         self.code = code
         self.name = name
@@ -16,6 +20,12 @@ class Pattern:
         self.modules = modules
         self.stages = stages
         self.entry_module_code = entry_module_code
+
+        # 管线槽位三层默认（node > module > pattern 中的 pattern 层）
+        self.generate = generate
+        self.pre_recall = pre_recall
+        self.query = query
+        self.post_recall = post_recall
 
         self.node_map = dict()
         self.module_map = dict()

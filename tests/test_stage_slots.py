@@ -290,3 +290,26 @@ def test_non_slot_stage_passthrough():
 def test_slot_direct_execute_raises():
     with pytest.raises(NotImplementedError):
         GenerateSlot().execute(_ctx())
+
+
+# ============================================================================
+# 数据层属性：node / module / pattern 三层四槽位
+# ============================================================================
+
+def test_data_layer_slot_attributes():
+    from src.dialogue.pattern import Pattern
+
+    gen = {"nlu": _Marker("nlu"), "nlg": _Marker("nlg")}
+    node = BaseNode(node_code="n1", generate=gen, query=_Marker("q"))
+    module = _fsm_module(generate=gen, pre_recall=_Marker("pre"))
+    pattern = Pattern(code="p1", name="t", description="t",
+                      entry_module_code="m1",
+                      modules=[_fsm_module()], generate=_Marker("pat_gen"),
+                      post_recall=_Marker("pat_post"))
+
+    assert node.generate is gen
+    assert node.query.stage_name == "q"
+    assert module.generate is gen
+    assert module.pre_recall.stage_name == "pre"
+    assert pattern.generate.stage_name == "pat_gen"
+    assert pattern.post_recall.stage_name == "pat_post"

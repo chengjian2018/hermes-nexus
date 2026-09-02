@@ -74,6 +74,7 @@ class BaseModule:
         nlu_stage: module-level NLU stage instance (optional, default when unset).
         nlg_stage: module-level NLG stage instance (optional, default when unset).
         agent_stage: module-level Agent stage instance (optional, default when unset).
+        generate/pre_recall/query/post_recall: 管线槽位配置（node 级最高优先级）。
         enable_clarify: dual-track clarify switch; when True the FSM module
             integrates ClarifyStage (see src/clarify/).
     """
@@ -92,6 +93,10 @@ class BaseModule:
         base_prompt: Optional[str] = None,
         base_nlu_prompt: Optional[str] = None,
         base_nlg_prompt: Optional[str] = None,
+        generate: Optional[Any] = None,
+        pre_recall: Optional[Any] = None,
+        query: Optional[Any] = None,
+        post_recall: Optional[Any] = None,
         nlu_stage: Optional[Any] = None,
         nlg_stage: Optional[Any] = None,
         agent_stage: Optional[Any] = None,
@@ -109,6 +114,15 @@ class BaseModule:
         self.base_prompt = base_prompt
         self.base_nlu_prompt = base_nlu_prompt
         self.base_nlg_prompt = base_nlg_prompt
+
+        # 管线槽位配置（三层优先级 node > module > pattern，执行期由
+        # stage_slots.resolve_stage 延迟解析；generate 支持单 stage 或
+        # {"nlu":…, "nlg":…} dict）
+        self.generate = generate
+        self.pre_recall = pre_recall
+        self.query = query
+        self.post_recall = post_recall
+
         self.sub_modules = _normalize_links(sub_modules)
         self.answer_examples = answer_examples or []
 

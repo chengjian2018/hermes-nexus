@@ -25,8 +25,7 @@ class BaseNode:
         sub_nodes: list of sub-nodes (forms the state-machine transition graph).
         base_nlu_prompt: node-level NLU prompt template string.
         base_nlg_prompt: node-level NLG prompt template string.
-        nlu_stage: node-level NLU stage instance (optional, highest priority).
-        nlg_stage: node-level NLG stage instance (optional, highest priority).
+        generate/pre_recall/query/post_recall: 管线槽位配置（node 级最高优先级）。
     """
 
     def __init__(
@@ -38,6 +37,10 @@ class BaseNode:
         sub_nodes: Optional[List[str]] = None,
         node_slots: Optional[dict[str, str]] = None,
         answer_examples: Optional[List[str]] = None,
+        generate: Optional[Any] = None,
+        pre_recall: Optional[Any] = None,
+        query: Optional[Any] = None,
+        post_recall: Optional[Any] = None,
         base_nlu_prompt: Optional[str] = None,
         base_nlg_prompt: Optional[str] = None,
         nlu_stage: Optional[Any] = None,
@@ -53,6 +56,15 @@ class BaseNode:
         self.base_nlu_prompt = base_nlu_prompt
         self.base_nlg_prompt = base_nlg_prompt
         self.answer_examples = answer_examples
+
+        # 管线槽位配置（三层优先级 node > module > pattern，执行期由
+        # stage_slots.resolve_stage 延迟解析；generate 支持单 stage 或
+        # {"nlu":…, "nlg":…} dict）
+        self.generate = generate
+        self.pre_recall = pre_recall
+        self.query = query
+        self.post_recall = post_recall
+
         self.node_slots = node_slots
 
         # Node-level stage instances (priority: node > module > default)

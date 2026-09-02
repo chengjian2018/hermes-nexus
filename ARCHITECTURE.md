@@ -9,7 +9,7 @@ flowchart TB
     main["main.py<br/>FastAPI 入口<br/>会话治理(TTL/LRU)"] --> chat["src/chat<br/>chat() 主循环<br/>Session · loop"]
     main --> preg["dialogue/register.py<br/>Pattern 注册中心"]
     main --> treg["tools/register.py<br/>Tool 注册中心"]
-    main --> chan["channel/xianyu.py<br/>闲鱼外挂决策口适配<br/>(router 工厂 · 操作注入)"]
+    main --> chan["channel/xianyu.py<br/>闲鱼外挂决策口适配<br/>(声明式 ChannelSpec · 通用 handler)"]
 
     chat --> base["dialogue/base.py<br/>PipelineStage<br/>DialogueContext<br/>SessionMessage"]
     chat --> nlu["dialogue/nlu.py<br/>FSMNLU · RouteNLU"]
@@ -58,10 +58,14 @@ flowchart TB
 - **Session**：持有 `cxt`（DialogueContext）；每轮更新 `user_query`，轮末回写状态
 - **SessionStore**：SQLite write-through 审计流水（sessions 快照 + messages 行级消息），
   兼重启恢复数据源；治理仍在内存，DB 非事实源（`chat/store.py`）
-- **Channel**：外部消息源适配层（`src/channel/`）。router 工厂 + main.py 注入引擎操作
-  （get/launch/run_turn），channel 模块不感知会话治理与 LLM；闲鱼适配把
-  `(account_id, chat_id)` 派生为稳定 session_id 并对不存在会话自动 launch
-  （get-or-create），错误一律非 200（对方 parse 契约：非 200 不发送）
+- **Channel**：外部消息源适配层（`src/channel/`，webhook 回调型）。声明式
+  ChannelSpec（载荷 schema/session 派生/task_info 映射/成功响应契约，`base.py`）
+  + 第 4 个 registry（AST 自动发现，`register.py`）+ 通用 handler
+  （token 校验/过期过滤/get-or-create/session 前缀/错误码固定契约，
+  `webhooks.py`，结构上不可绕过）；引擎操作经 EngineOps 由 main.py 注入，
+  channel 模块不感知会话治理与 LLM。闲鱼适配把 `(account_id, chat_id)`
+  派生为稳定 session_id 并对不存在会话自动 launch（get-or-create），
+  错误一律非 200（对方 parse 契约：非 200 不发送）
 - **xianyu_agent pattern**：闲鱼卖家客服流程（`dialogue/xianyu_agent_route.py`），
   复刻 xianyu-auto-reply 的 agent 对话管理：单 RouteModule 内 XianyuIntentNLU
   （本地关键词意图检测 price/tech/default，零 LLM，模块级 nlu_stage）+ 意图级
@@ -80,14 +84,14 @@ flowchart TB
 | `build_provider(llm_config)` | `llm/resolve.py` | 所有 LLM 调用的统一入口 |
 | `run_agent(session, module, llm_config)` | `chat/loop.py` | Agent 模块对话循环入口（返回 TurnResult）；`conversation()` 为兼容 wrapper |
 | `SessionStore` | `chat/store.py` | launch/轮末落盘、startup 恢复、审计查询；实例由 main.py 注入，非全局单例 |
-| `build_xianyu_router(...)` | `channel/xianyu.py` | 外部消息源适配 endpoint 的唯一工厂形态：引擎操作（`_get_session`/`_launch_session_core`/`_run_chat_turn_core`）由 main.py 注入后 include_router；成功响应只含 `reply`/`session_id` 键 |
+| `ChannelSpec` 协议 + `build_channel_router(spec, ops)` | `channel/base.py` `channel/webhooks.py` | 外部消息源适配的唯一形态：渠道声明差异 + 通用 handler 共性流程；`registry.register()` 自注册（AST 发现），main.py `discover_builtin_channels()` + `build_channel_routers(EngineOps(...))` 接线 |
 
 ## 什么代码放哪
 
 - 新业务对话流程 → `src/dialogue/<name>_route.py`，模块级 `registry.register()`
 - 新工具 → `src/tools/<name>_tool.py`，自动被 AST 发现
 - 新 LLM provider → `src/llm/<name>_provider.py`
-- 新外部消息渠道（channel）→ `src/channel/<name>.py`，router 工厂（操作注入，不引全局单例），main.py include_router 接线；默认 pattern/token 走环境变量（如 `XIANYU_CHANNEL_PATTERN`）
+- 新外部消息渠道（channel）→ `src/channel/<name>.py`，实现 ChannelSpec（`payload_model`/`parse`/`build_reply` + 环境变量声明）并模块级 `registry.register()`，AST 自动发现，main.py 无需改动；默认 pattern/token 走环境变量（如 `XIANYU_CHANNEL_PATTERN`）
 - 新管线阶段 → `src/dialogue/<stage>.py` 继承 `PipelineStage`
 - 模块要单次调用（NLU+NLG 合一）→ module 上配 `nlu_stage=FSMUnifiedNLU()/RouteUnifiedNLU()` + `nlg_stage=PassThroughNLG()`（见 `car_sales_unified_route.py` 示例；候选节点需声明 `answer_examples`）
 - 全局 prompt 模板 → `src/prompt.py`（node/module 可覆盖）

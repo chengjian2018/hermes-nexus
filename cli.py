@@ -148,6 +148,29 @@ def parse_slash_command(line: str) -> Optional[Dict[str, Any]]:
 
 _SLASH_COMMANDS = ("help", "exit", "reset", "slots", "new", "llm")
 
+# provider/model 菜单的「维持 config 配置」固定项（spec §4.1：空 override =
+# 完全按 yaml 三层编排解析）
+KEEP_CONFIG = "__keep_config__"
+
+
+def _keep_config_entry() -> Dict[str, str]:
+    return {"value": KEEP_CONFIG, "label": "（维持 config 配置）",
+            "hint": "不手动指定，按 yaml pattern/module/node 配置解析"}
+
+
+def _patch_select(picked: str):
+    """测试钩子：固定 select_from_menu 返回值。"""
+    from unittest.mock import patch as _patch
+    return _patch(__name__ + ".select_from_menu", return_value=picked)
+
+
+def _provider_menu_entries() -> List[Dict[str, str]]:
+    return [_keep_config_entry()] + [
+        {"value": p.code, "label": f"{p.code} — {p.name}",
+         "hint": getattr(p, "description", "")}
+        for p in llm_registry.list_providers()
+    ]
+
 
 # ============================================================================
 # prompt_toolkit 交互：方向键菜单 + 主输入行
@@ -291,7 +314,7 @@ def build_session(session_id: str, pattern_code: str,
                   llm_overrides: Optional[Dict[str, Any]] = None) -> Session:
     """创建 Session 并完成 pattern/llm 绑定。
 
-    llm_overrides 非空时预置 cxt.llm_config（chat.py:80 条件注入不会覆盖）；
+    llm_overrides 非空时预置 metadata.llm_override（逐轮刷新下仍优先生效）；
     model 必填（各 stage 以 llm_config["model"] 下标访问）。
     """
     pattern = pattern_registry.get(pattern_code)
@@ -307,7 +330,7 @@ def build_session(session_id: str, pattern_code: str,
     if llm_overrides:
         cfg = dict(get_llm_config())
         cfg.update({k: v for k, v in llm_overrides.items() if v})
-        session.cxt.llm_config = cfg
+        session.cxt.metadata["llm_override"] = cfg
 
     return session
 
@@ -328,14 +351,10 @@ def resolve_llm_choice(llm: str, model: str,
             code = ""
         if code:
             return {"code": "", "model": ""}  # 空 override = 完全用 yaml 默认
-        providers = llm_registry.list_providers()
-        providers = llm_registry.list_providers()
-        if providers:
-            picked = select_from_menu(
-                "选择 LLM provider",
-                [{"value": p.code, "label": f"{p.code} — {p.name}",
-                  "hint": getattr(p, "description", "")} for p in providers],
-            )
+        if llm_registry.list_providers():
+            picked = select_from_menu("选择 LLM provider", _provider_menu_entries())
+            if picked == KEEP_CONFIG:
+                return {"code": "", "model": ""}
             code = picked or ""
 
     resolved_model = model or ""
@@ -343,13 +362,18 @@ def resolve_llm_choice(llm: str, model: str,
         entry = llm_registry.get(code)
         models = list(getattr(entry, "models", None) or [])
         if models:
-            resolved_model = select_from_menu(
-                f"选择 model（{code}）",
-                [{"value": m, "label": m} for m in models],
-            ) or ""
+            entries = [_keep_config_entry()] + [
+                {"value": m, "label": m} for m in models]
+            picked = select_from_menu(f"选择 model（{code}）", entries) or ""
+            if picked == KEEP_CONFIG:
+                resolved_model = ""
+            else:
+                resolved_model = picked
         else:
             hint = f"（回车用 {getattr(entry, 'default_model', '') or '默认'}）"
             resolved_model = input(f"输入 model 名 {hint}: ").strip()
+            if resolved_model == KEEP_CONFIG:
+                resolved_model = ""
 
     return {"code": code, "model": resolved_model}
 
@@ -421,7 +445,7 @@ def _find_or_create(session_id: str, pattern_code: str,
                 restored.cxt.module_map = pattern.module_map
                 restored.cxt.node_map = pattern.node_map
                 if llm_overrides:
-                    restored.cxt.llm_config = {
+                    restored.cxt.metadata["llm_override"] = {
                         **get_llm_config(), **{k: v for k, v in
                                                llm_overrides.items() if v}}
                 print(green(f"已恢复会话 {session_id} "
@@ -523,9 +547,10 @@ def repl_loop(pattern_code: str, session_id: str, llm_overrides: Dict[str, Any],
 
 def _do_reset(session: Session, sessions: Dict[str, Session], store, verbose: int):
     """/reset：同 pattern 重开新会话（沿用原 session_id 与 llm 配置）。"""
-    llm_cfg = session.cxt.llm_config
+    llm_override = session.cxt.metadata.get("llm_override")
     new_session = build_session(session.session_id, session.pattern_code)
-    new_session.cxt.llm_config = llm_cfg
+    if llm_override:
+        new_session.cxt.metadata["llm_override"] = llm_override
     sessions[session.session_id] = new_session
     if store is not None:
         store.create_session(new_session)  # 同 id 视为新一代（launch_epoch+1）
@@ -557,10 +582,10 @@ def _do_new(arg: str, sessions: Dict[str, Session], store, llm_overrides, verbos
 def _do_llm(session: Session, arg: str) -> None:
     """/llm [code]：切换后续轮次的 provider/model。"""
     overrides = resolve_llm_choice(arg.strip(), "", interactive=True)
-    if not overrides["code"]:
+    if not overrides["code"] and not overrides["model"]:
         print(yellow("未选择，保持当前 LLM"))
         return
-    session.cxt.llm_config = {**get_llm_config(), **overrides}
+    session.cxt.metadata["llm_override"] = {**get_llm_config(), **overrides}
     print(green(f"LLM 已切换: {overrides['code']} / {overrides['model'] or '默认model'}"))
 
 

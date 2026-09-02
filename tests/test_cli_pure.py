@@ -3,6 +3,8 @@
 不触网络、不触 LLM；REPL 交互与 fire 分发另行手动验收。
 """
 
+import unittest.mock
+
 import pytest
 
 import cli
@@ -188,3 +190,48 @@ class TestRenderVerboseFull:
             pass
         out = cli.render_verbose_full(_FakeCxt(agent=Weird()))
         assert "agent_result" in out  # 不抛异常即通过
+
+
+# ============================================================================
+# KEEP_CONFIG 菜单 + llm_override 接线
+# ============================================================================
+
+class TestKeepConfigMenu:
+    def test_provider_menu_includes_keep_config(self):
+        """provider 菜单含「维持 config 配置」固定项，置首。"""
+        entries = cli._provider_menu_entries()
+        assert entries[0]["value"] == cli.KEEP_CONFIG
+        assert "维持" in entries[0]["label"]
+
+    def test_pick_keep_config_in_provider_menu_returns_empty(self):
+        with cli._patch_select(cli.KEEP_CONFIG):
+            assert cli.resolve_llm_choice("", "") == {"code": "", "model": ""}
+
+    def test_pick_keep_config_in_model_menu_keeps_code(self):
+        """model 菜单选「维持」：保留已选 code，model 留空（回落全局默认）。"""
+        from fake_provider import FAKE_PROVIDER_CODE, register_fake_provider
+
+        register_fake_provider()
+        # fake provider 未声明 models 列表 → 走 input() 手输分支，键入「维持」
+        with unittest.mock.patch("builtins.input", return_value=cli.KEEP_CONFIG):
+            result = cli.resolve_llm_choice(FAKE_PROVIDER_CODE, "")
+        assert result == {"code": FAKE_PROVIDER_CODE, "model": ""}
+
+
+class TestBuildSessionOverride:
+    def test_build_session_writes_override_not_llm_config(self, monkeypatch):
+        """--llm/--model 预置写 metadata.llm_override，不再直接写 llm_config。"""
+        from fake_provider import fake_llm_config, register_fake_provider
+
+        register_fake_provider()
+        monkeypatch.setattr(cli, "get_llm_config", lambda *a, **k: fake_llm_config())
+        from src.dialogue.register import discover_builtin_patterns
+
+        discover_builtin_patterns()
+
+        session = cli.build_session(
+            "t1", "car_sales_route",
+            llm_overrides={"code": "fake_test_provider", "model": "fake-model"},
+        )
+        assert session.cxt.metadata["llm_override"]["model"] == "fake-model"
+        assert session.cxt.llm_config is None

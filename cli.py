@@ -394,8 +394,9 @@ def run_turn(session: Session, query: str, sessions: Dict[str, Session],
     return reply
 
 
-def _open_store(persist: bool) -> Optional[SessionStore]:
-    if not persist:
+def _open_store(persist) -> Optional[SessionStore]:
+    # fire 把 --persist=false 解析成字符串 'false'（truthy！），归一化：
+    if persist in (False, "false", "False", "0", 0, None):
         return None
     try:
         return SessionStore(get_session_db_path())
@@ -450,10 +451,17 @@ HELP_TEXT = """\
 """
 
 
-def _prompt_text(session: Session) -> str:
+def _prompt_text(session: Session):
+    """REPL 提示符。prompt_toolkit 路径返回 formatted_text（自带着色，
+    不解析裸 ANSI 码——传 str 会把 \\033[... 原样显示成乱码）；
+    input() 降级路径返回带 ANSI 码的 str。"""
     cfg = session.cxt.llm_config or {}
     model = cfg.get("model") or "默认model"
-    return bold(cyan(f"你 ({session.pattern_code}/{model})> "))
+    text = f"你 ({session.pattern_code}/{model})> "
+    if _COLOR_OK:
+        from prompt_toolkit.formatted_text import HTML
+        return HTML(f"<b><ansicyan>{text}</ansicyan></b>")
+    return text
 
 
 def repl_loop(pattern_code: str, session_id: str, llm_overrides: Dict[str, Any],
@@ -601,12 +609,30 @@ def chat(pattern: str = "", session_id: str = "cli", llm: str = "", model: str =
         persist: 落盘 data/dialogue.db（默认开）
     """
     _ensure_discovery()
-    pattern_code = pattern or _pick_pattern()
+    # 恢复优先序：显式 --pattern 新起会话；否则显式 --session-id 命中库中
+    # 未过期会话则直接恢复（不弹菜单）；两者都没有才弹菜单选择。
+    # fire 的默认参数值与用户显式传值不可区分，用 argv 检测显式传参。
+    sid_specified = any(a == "--session-id" or a.startswith("--session-id=")
+                        for a in sys.argv)
+    restored_code = ""
+    if not pattern and sid_specified:
+        store = _open_store(persist)
+        if store is not None:
+            try:
+                for restored, _ in store.load_active_sessions(7 * 24 * 3600):
+                    if restored.session_id == session_id:
+                        restored_code = restored.pattern_code
+                        break
+            finally:
+                store.close()
+    pattern_code = pattern or restored_code or _pick_pattern()
     if not pattern_code:
         print(yellow("未选择 pattern，退出"))
         return
     llm_overrides = resolve_llm_choice(llm, model, interactive=True)
-    repl_loop(pattern_code, session_id, llm_overrides, persist, verbose)
+    # 默认 session-id 拼进程号：避免命中库中任意旧会话把刚选的 pattern 换掉
+    sid = session_id if (sid_specified or pattern) else f"{session_id}-{os.getpid()}"
+    repl_loop(pattern_code, sid, llm_overrides, persist, verbose)
 
 
 def ask(query: str, pattern: str = "", session_id: str = "cli-ask", llm: str = "",
@@ -616,14 +642,13 @@ def ask(query: str, pattern: str = "", session_id: str = "cli-ask", llm: str = "
     pattern_code = pattern
     if not pattern_code:
         # one-shot 不出菜单：恢复已有会话时 pattern 从库中来；否则要求显式 --pattern
-        if persist:
-            store = _open_store(persist)
-            if store is not None:
-                for restored, _ in store.load_active_sessions(7 * 24 * 3600):
-                    if restored.session_id == session_id:
-                        pattern_code = restored.pattern_code
-                        break
-                store.close()
+        store = _open_store(persist)
+        if store is not None:
+            for restored, _ in store.load_active_sessions(7 * 24 * 3600):
+                if restored.session_id == session_id:
+                    pattern_code = restored.pattern_code
+                    break
+            store.close()
         if not pattern_code:
             raise SystemExit(red("ask 需要显式 --pattern，或 --session-id 命中已有会话"))
     llm_overrides = resolve_llm_choice(llm, model, interactive=False)

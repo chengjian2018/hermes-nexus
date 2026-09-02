@@ -278,9 +278,9 @@ class FixedNLG(BaseNLG):
         3. 意图菜单节点     → 节点 base_nlg_prompt（XIANYU_*_NLG_PROMPT）
            + 议价上下文（price 意图）+ 买家消息 → 单次 LLM + 违禁词过滤
 
-    注意框架的 ROUTE 默认管线是「root 时刻构建 stages、NLU 后才切节点」，
-    菜单节点的 nlg_stage 不会自动生效 —— 故本 stage 不依赖节点级注入，
-    而是作为模块级 stage 统一处理（_RouteNodeAdvance 已先切好节点）。
+    挂在模块级 generate dict 的 nlg 位（node 无覆盖时生效；_RouteNodeAdvance
+    已先切好节点，本 stage 读到的当前节点即命中菜单）。节点级 generate 的
+    nlg 优先于本 stage（node > module，stage_slots.py 三层解析）。
     """
 
     stage_name = "fixed_nlg"
@@ -455,10 +455,12 @@ xianyu_root = RouteModule(
     module_todo_description="对每条买家消息做意图检测，分发到议价/技术/通用菜单节点生成回复",
     module_nodes=[xy_route_root, xy_menu_price, xy_menu_price_refuse,
                   xy_menu_tech, xy_menu_default],
-    nlu_stage=XianyuIntentNLU(),
-    # 模块级 NLG：no_reply/拒绝节点零 LLM 短路，其余菜单节点按
-    # node.base_nlg_prompt 意图模板生成（温度/长度按意图调优）
-    nlg_stage=FixedNLG(),
+    generate={
+        "nlu": XianyuIntentNLU(),
+        # 模块级 NLG：no_reply/拒绝节点零 LLM 短路，其余菜单节点按
+        # node.base_nlg_prompt 意图模板生成（温度/长度按意图调优）
+        "nlg": FixedNLG(),
+    },
 )
 
 

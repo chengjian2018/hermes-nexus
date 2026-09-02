@@ -109,13 +109,15 @@ def test_pattern_auto_discovered_and_structure(pattern):
     assert pattern.node_map["xy_menu_default"].base_nlg_prompt
 
 
-def test_nlu_stage_wired_at_module_level(pattern):
-    """XianyuIntentNLU 挂在模块级，FixedNLG 同样模块级注入。"""
+def test_generate_wired_at_module_level(pattern):
+    """XianyuIntentNLU / FixedNLG 挂在模块级 generate dict（nlu/nlg 位）。"""
     from src.dialogue.xianyu_agent_route import FixedNLG, XianyuIntentNLU
 
     root = pattern.module_map["xianyu_root"]
-    assert isinstance(root.nlu_stage, XianyuIntentNLU)
-    assert isinstance(root.nlg_stage, FixedNLG)
+    generate = root.generate
+    assert isinstance(generate, dict)
+    assert isinstance(generate["nlu"], XianyuIntentNLU)
+    assert isinstance(generate["nlg"], FixedNLG)
 
 
 # ============================================================================

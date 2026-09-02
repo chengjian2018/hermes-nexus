@@ -2,10 +2,17 @@
 
 import pytest
 
-from src.chat.chat import _build_default_stages, _handle_node_transition
+from src.chat.chat import _default_skeleton, _handle_node_transition
 from src.dialogue.base import DialogueContext
 from src.dialogue.module import FSMModule, RouteModule
 from src.dialogue.nlg import FSMNLG
+from src.dialogue.stage_slots import (
+    GenerateSlot,
+    PostRecallSlot,
+    PreRecallSlot,
+    QuerySlot,
+    resolve_stage,
+)
 
 
 def make_fsm_module(enable_clarify):
@@ -19,26 +26,44 @@ def make_fsm_module(enable_clarify):
 
 class TestBuildStages:
 
-    def test_disabled_module_no_clarify_stage(self):
-        stages = _build_default_stages(
-            make_fsm_module(False).module_nodes[0], make_fsm_module(False))
-        names = [type(s).__name__ for s in stages]
-        assert "ClarifyStage" not in names
+    def test_default_skeleton_is_four_slots(self):
+        stages = _default_skeleton(make_fsm_module(False))
+        assert [type(s).__name__ for s in stages] == [
+            "PreRecallSlot", "QuerySlot", "PostRecallSlot", "GenerateSlot",
+        ]
 
-    def test_enabled_module_has_clarify_stage_between_nlu_nlg(self):
+    def test_enabled_module_clarify_inserted_between_generate_parts(self):
+        class _Clarify:
+            stage_name = "my_clarify"
+
+            def execute(self, ctx):
+                return ctx
+
         module = make_fsm_module(True)
-        stages = _build_default_stages(module.module_nodes[0], module)
-        assert len(stages) == 3
-        assert type(stages[0]).__name__ == "FSMNLU"
-        assert type(stages[1]).__name__ == "ClarifyStage"
-        assert type(stages[2]).__name__ == "FSMNLG"
+        module.clarify_stage = _Clarify()
+        ctx = DialogueContext(session_id="t", user_query="q")
+        ctx.current_module_code = "m_fsm"
+        ctx.current_node_code = "n1"
+        ctx.node_map = {"n1": module.module_nodes[0]}
+
+        names = [s.stage_name for s in
+                 resolve_stage(GenerateSlot(), ctx, module, None)]
+
+        assert names == ["generate_nlu_part", "my_clarify",
+                         "generate_nlg_part"]
 
     def test_route_module_never_has_clarify_stage(self):
         route = RouteModule(module_code="m_route")
-        node = type("N", (), {"node_code": "n1", "nlu_stage": None,
-                              "nlg_stage": None})()
-        stages = _build_default_stages(node, route)
-        assert all(type(s).__name__ != "ClarifyStage" for s in stages)
+        ctx = DialogueContext(session_id="t", user_query="q")
+        ctx.current_module_code = "m_route"
+        ctx.current_node_code = "n1"
+        ctx.node_map = {"n1": type("N", (), {"node_code": "n1"})()}
+
+        names = [s.stage_name for s in
+                 resolve_stage(GenerateSlot(), ctx, route, None)]
+
+        assert names == ["generate_nlu_part", "route_advance",
+                         "generate_nlg_part"]
 
 
 class TestNlgSkipGuard:

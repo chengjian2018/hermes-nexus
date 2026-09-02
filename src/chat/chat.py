@@ -17,11 +17,15 @@ from typing import Dict
 
 from src.chat.session import Session
 from src.chat.loop import TurnResult, run_agent  # noqa: F401 (run_agent 供外部引用)
-from src.dialogue.base import PipelineStage
 from src.dialogue.dispatch import ModuleDispatch, dispatch
 from src.dialogue.module import ModuleType
-from src.dialogue.nlu import FSMNLU, RouteNLU
-from src.dialogue.nlg import FSMNLG, RouteNLG
+from src.dialogue.stage_slots import (
+    GenerateSlot,
+    PostRecallSlot,
+    PreRecallSlot,
+    QuerySlot,
+    resolve_stage,
+)
 from config.config import get_llm_config
 
 logger = logging.getLogger(__name__)
@@ -203,8 +207,9 @@ def _run_pipeline(session: Session, module,
                   force_close: bool = False) -> TurnResult:
     """Invoke pattern-registered stages for pipeline processing.
 
-    Prefer the stages list registered on the pattern; if unset, build the
-    default NLU → NLG two-stage pipeline by module type.
+    Prefer the skeleton registered on the pattern (concrete stages run
+    verbatim; slots resolve lazily by node > module > pattern); if unset,
+    build the default four-slot skeleton (see stage_slots.py).
 
     Node transition after processing:
     - FSM type: jump according to next_node in the NLU result
@@ -250,12 +255,11 @@ def _run_pipeline(session: Session, module,
                         node_code=cxt.current_node_code)
 
     # ------------------------------------------------------------------
-    # Get pipeline stages: prefer pattern-registered stages, else build default
+    # Get pipeline stages: pattern skeleton or module-type default skeleton.
+    # 槽位（stage_slots.py 四槽位）在执行期按 node > module > pattern 延迟解析；
+    # generate 展开为 nlg/nlu 惰性子部件（ROUTE 下 nlg 于菜单节点切换后解析）。
     # ------------------------------------------------------------------
-    stages = pattern.stages
-    if not stages:
-        # No registered stages: build default NLU → NLG two-stage pipeline by module type
-        stages = _build_default_stages(cur_node, module)
+    stages = pattern.stages or _default_skeleton(module)
 
     logger.info(
         "Pipeline 开始: session=%s, module=%s, node=%s, stages=%s",
@@ -265,16 +269,19 @@ def _run_pipeline(session: Session, module,
         [s.stage_name for s in stages],
     )
 
-    # Execute each stage in order
+    # Execute each stage in order; slots resolve against the *current* node
+    # at execution time
     for stage in stages:
-        try:
-            cxt = stage.execute(cxt)
-            logger.debug("Stage '%s' 执行完成", stage.stage_name)
-        except Exception as e:
-            logger.error(
-                "Stage '%s' 执行异常: %s", stage.stage_name, e, exc_info=True
-            )
-            raise
+        for concrete in resolve_stage(stage, cxt, module, pattern):
+            try:
+                cxt = concrete.execute(cxt)
+                logger.debug("Stage '%s' 执行完成", concrete.stage_name)
+            except Exception as e:
+                logger.error(
+                    "Stage '%s' 执行异常: %s", concrete.stage_name, e,
+                    exc_info=True
+                )
+                raise
 
     # ------------------------------------------------------------------
     # 4. ROUTE silent dispatch: menu node with jump_module → dispatch
@@ -321,115 +328,14 @@ def _run_pipeline(session: Session, module,
 # Default pipeline construction
 # ---------------------------------------------------------------------------
 
-class _RouteNodeAdvance(PipelineStage):
-    """ROUTE-only stage: advance to the intent-menu node selected by RouteNLU.
+def _default_skeleton(module) -> list:
+    """默认管线骨架（槽位延迟解析，不绑定节点）。
 
-    Runs between NLU and NLG so the reply is generated from the selected menu
-    node's answer examples instead of the root node. The selection is validated
-    against the route module's own node list; invalid selections keep the
-    current node (root) unchanged.
+    [PreRecallSlot, QuerySlot, PostRecallSlot, GenerateSlot]；
+    FSM/ROUTE 的差异（advance / clarify 插入）由 GenerateSlot 展开处理
+    （stage_slots.resolve_stage），骨架本身全模块类型同形。
     """
-
-    stage_name = "route_advance"
-
-    def execute(self, ctx):
-        module = (
-            ctx.module_map.get(ctx.current_module_code)
-            if ctx.current_module_code
-            else None
-        )
-        if module is None or getattr(module, "type", None) != ModuleType.ROUTE:
-            return ctx
-
-        next_node_code = (ctx.nlu_result or {}).get("next_node", "")
-        if next_node_code and any(
-            n.node_code == next_node_code for n in module.module_nodes
-        ):
-            logger.info(
-                "ROUTE 命中菜单节点: %s → %s",
-                ctx.current_node_code,
-                next_node_code,
-            )
-            ctx.current_node_code = next_node_code
-            # R4：菜单节点 node 级 LLM 配置当轮生效（spec §4；pattern_code
-            # 取 R1 写入的 metadata，ROUTE 每轮从 root 出发永不定居菜单节点）
-            _refresh_llm_config_from_ctx(ctx)
-
-        return ctx
-
-
-def _default_clarify_stage():
-    """构建默认 ClarifyStage：内存关键词召回 + 默认门控。
-
-    生产环境应在 pattern 定义中显式配置 module.clarify_stage
-    （挂 ES 召回路径）；默认实例保证开箱可用。
-    """
-    from src.clarify import ClarifyRouteRule, ClarifyStage
-    from src.dialogue.recaller import (
-        KeywordRecallPath,
-        MultiPathRecaller,
-        ScoreThresholdFilter,
-        WeightedScoreFusion,
-    )
-
-    return ClarifyStage(
-        recaller=MultiPathRecaller(
-            recall_paths=[],
-            filters=[ScoreThresholdFilter(threshold=0.1)],
-            fusion=WeightedScoreFusion(),
-        ),
-        rule=ClarifyRouteRule(),
-    )
-
-
-def _build_default_stages(cur_node, module) -> list:
-    """Build the default pipeline by module type and node config.
-
-    Priority (node > module > default):
-    - NLU: node's nlu_stage > module's nlu_stage > default (FSMNLU / RouteNLU)
-    - NLG: node's nlg_stage > module's nlg_stage > default (FSMNLG / RouteNLG)
-
-    ROUTE modules additionally insert a ``_RouteNodeAdvance`` stage between
-    NLU and NLG so the selected intent-menu node drives reply generation.
-
-    Args:
-        cur_node: current node object
-        module: current module object
-
-    Returns:
-        list: [NLU_stage, (route_advance), NLG_stage]
-    """
-    # Resolve NLU stage
-    if cur_node.nlu_stage is not None:
-        nlu_stage = cur_node.nlu_stage
-    elif module.nlu_stage is not None:
-        nlu_stage = module.nlu_stage
-    elif module.type == ModuleType.ROUTE:
-        nlu_stage = RouteNLU()
-    else:
-        nlu_stage = FSMNLU()
-
-    # Resolve NLG stage
-    if cur_node.nlg_stage is not None:
-        nlg_stage = cur_node.nlg_stage
-    elif module.nlg_stage is not None:
-        nlg_stage = module.nlg_stage
-    elif module.type == ModuleType.ROUTE:
-        nlg_stage = RouteNLG()
-    else:
-        nlg_stage = FSMNLG()
-
-    if module.type == ModuleType.ROUTE:
-        return [nlu_stage, _RouteNodeAdvance(), nlg_stage]
-
-    # FSM 模块：启用双轨澄清时插入 ClarifyStage（NLU 之后、NLG 之前）
-    if getattr(module, "enable_clarify", False):
-        from src.clarify.stage import ClarifyStage  # 局部 import 防循环依赖
-
-        clarify_stage = getattr(module, "clarify_stage", None) or _default_clarify_stage()
-        return [nlu_stage, clarify_stage, nlg_stage]
-
-    return [nlu_stage, nlg_stage]
+    return [PreRecallSlot(), QuerySlot(), PostRecallSlot(), GenerateSlot()]
 
 
 # ---------------------------------------------------------------------------
@@ -488,3 +394,7 @@ def _handle_node_transition(cxt, module) -> None:
         next_node_code,
     )
     cxt.current_node_code = next_node_code
+
+# _RouteNodeAdvance 已迁入 stage_slots（dialogue 层自洽，chat 不再被反向依赖）；
+# 此处 re-export 保持 chat_mod._RouteNodeAdvance 既有引用（test_llm_refresh R4）
+from src.dialogue.stage_slots import _RouteNodeAdvance  # noqa: E402, F401

@@ -130,9 +130,14 @@ def test_r4_route_menu_node_takes_effect_same_turn():
             ctx.nlg_result = {"content": "ok"}
             return ctx
     import src.chat.chat as chat_mod
+    import src.dialogue.stage_slots as stage_slots_mod
     pattern.stages = [_StubNLU(), chat_mod._RouteNodeAdvance(), _StubNLG()]
+    # _RouteNodeAdvance 已迁入 stage_slots（R4 刷新直连 config.config），
+    # 双命名空间打 spy：chat（R1-R3）+ stage_slots（R4）
     with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)):
+         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)), \
+         patch.object(stage_slots_mod, "get_llm_config",
+                      side_effect=_record_calls(calls)):
         _chat(sessions, "s2", "选A")
     r4 = [c for c in calls if c["node_code"] == "menu_a"]
     assert r4, f"R4 应在菜单命中后按 node=menu_a 刷新，实际调用: {calls}"

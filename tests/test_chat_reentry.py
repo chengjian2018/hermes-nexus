@@ -100,7 +100,7 @@ def test_force_close_route_returns_nonempty_reply():
     router = RouteModule(
         module_code="router", module_name="路由",
         module_nodes=[root, menu], sub_modules=["buy_agent"],
-        nlu_stage=_FakeRouteNLU(), nlg_stage=_FakeRouteNLG())
+        generate={"nlu": _FakeRouteNLU(), "nlg": _FakeRouteNLG()})
     reception = AgentModule(
         module_code="reception", module_name="前台", module_description="接待",
         sub_modules=[ModuleLink(target="router")])

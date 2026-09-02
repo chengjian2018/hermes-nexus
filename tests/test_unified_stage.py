@@ -96,11 +96,7 @@ def chat_once(pattern, sessions, query, expect_calls=1):
 def test_pattern_discovered_and_stage_wiring(pattern):
     """Pattern 可被 AST 自动发现；ROUTE/FSM 模块均注入统一阶段。"""
     from src.dialogue.module import ModuleType
-    from src.dialogue.unified import (
-        FSMUnifiedNLU,
-        PassThroughNLG,
-        RouteUnifiedNLU,
-    )
+    from src.dialogue.unified import FSMUnifiedNLU, RouteUnifiedNLU
 
     assert pattern.code == "car_sales_unified"
     assert pattern.entry_module_code == "unified_root"
@@ -110,11 +106,9 @@ def test_pattern_discovered_and_stage_wiring(pattern):
     assert root_module.type == ModuleType.ROUTE
     assert buy_module.type == ModuleType.FSM
 
-    # module 级统一阶段注入（node > module > default 优先级中的 module 层）
-    assert isinstance(root_module.nlu_stage, RouteUnifiedNLU)
-    assert isinstance(root_module.nlg_stage, PassThroughNLG)
-    assert isinstance(buy_module.nlu_stage, FSMUnifiedNLU)
-    assert isinstance(buy_module.nlg_stage, PassThroughNLG)
+    # module 级统一阶段注入（generate 单 stage 形态，经 GenerateSlot 解析命中）
+    assert isinstance(root_module.generate, RouteUnifiedNLU)
+    assert isinstance(buy_module.generate, FSMUnifiedNLU)
 
     # 路由结构与菜单分发
     assert pattern.node_map["u_route_root"].sub_nodes == [

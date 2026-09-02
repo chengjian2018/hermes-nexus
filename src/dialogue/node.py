@@ -9,7 +9,10 @@ Nodes define the sub-node graph via sub_nodes to enable state-machine transition
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class BaseNode:
@@ -43,8 +46,6 @@ class BaseNode:
         post_recall: Optional[Any] = None,
         base_nlu_prompt: Optional[str] = None,
         base_nlg_prompt: Optional[str] = None,
-        nlu_stage: Optional[Any] = None,
-        nlg_stage: Optional[Any] = None,
         is_end: Optional[bool] = False,
         **kwargs,
     ):
@@ -67,10 +68,15 @@ class BaseNode:
 
         self.node_slots = node_slots
 
-        # Node-level stage instances (priority: node > module > default)
-        self.nlu_stage = nlu_stage
-        self.nlg_stage = nlg_stage
         self.is_end = is_end
+
+        for legacy in ("nlu_stage", "nlg_stage"):
+            if legacy in (kwargs or {}):
+                logger.warning(
+                    "[node] %s=%r 已废弃：槽位配置请改用 generate="
+                    "{'nlu':…, 'nlg':…} 或单 stage（stage_slots.py）",
+                    legacy, kwargs[legacy],
+                )
 
         for key, value in (kwargs or {}).items():
             setattr(self, key, value)

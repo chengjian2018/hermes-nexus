@@ -313,3 +313,114 @@ def test_data_layer_slot_attributes():
     assert module.pre_recall.stage_name == "pre"
     assert pattern.generate.stage_name == "pat_gen"
     assert pattern.post_recall.stage_name == "pat_post"
+
+
+# ============================================================================
+# e2e：经 chat() 的默认骨架与 pattern.stages 骨架
+# ============================================================================
+
+from unittest.mock import patch
+
+from src.chat.session import Session
+from src.dialogue.pattern import Pattern
+
+
+def _launch(pattern, sessions, sid="s1"):
+    session = Session(session_id=sid, pattern_code=pattern.code)
+    session.pattern = pattern
+    session.cxt.module_map = pattern.module_map
+    session.cxt.node_map = pattern.node_map
+    session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
+    session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
+    sessions[sid] = session
+    return session
+
+
+def _chat(sessions, sid, query):
+    from src.chat.chat import chat as chat_fn
+    return chat_fn(query=query, session_id=sid, all_sessions=sessions)
+
+
+def test_fsm_node_level_generate_via_default_skeleton():
+    """默认骨架下 node 级 generate dict 生效（FSM）。"""
+    n1 = BaseNode(node_code="f1", node_name="节点一",
+                  generate={"nlu": _Marker("f1_nlu"), "nlg": _Marker("f1_nlg")})
+    m = FSMModule(module_code="m1", module_name="m1", module_description="d",
+                  module_todo_description="t", sub_modules=[], module_nodes=[n1])
+    pattern = Pattern(code="pf", name="t", description="t",
+                      entry_module_code="m1", modules=[m])
+    sessions = {}
+    _launch(pattern, sessions)
+    with patch("src.chat.loop.build_provider"):
+        _chat(sessions, "s1", "你好")
+
+    assert ran == [("f1", "f1_nlu"), ("f1", "f1_nlg")]
+
+
+def test_route_menu_node_generate_nlg_same_turn_e2e():
+    """ROUTE e2e：菜单节点级 nlg 在 advance 切换后当轮生效（时机修复）。
+
+    旧实现 stages 在 root 时刻构建，菜单节点 nlg 永不生效（ran 为空）。
+    """
+    class _SelectingNLU(_Marker):
+        """root 层 nlu：记录执行并写出指向菜单节点的 nlu_result
+        （advance 按 next_node 切节点，与 test_llm_refresh._StubNLU 同构）。"""
+
+        def execute(self, ctx):
+            super().execute(ctx)
+            ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
+            return ctx
+
+    menu = BaseNode(node_code="menu_a", node_name="菜单A", jump_module="m1",
+                    generate={"nlu": _Marker("menu_nlu"),
+                              "nlg": _Marker("menu_nlg")})
+    root = BaseNode(node_code="root", node_name="根",
+                    generate={"nlu": _SelectingNLU("root_nlu"),
+                              "nlg": _Marker("root_nlg")},
+                    sub_nodes=["menu_a"])
+    route = RouteModule(module_code="r1", module_name="r",
+                        module_description="d", module_todo_description="t",
+                        sub_modules=["m1"], module_nodes=[root, menu])
+    f1 = BaseNode(node_code="f1", node_name="节点一",
+                  generate={"nlu": _Marker("f1_nlu"), "nlg": _Marker("f1_nlg")})
+    fsm = FSMModule(module_code="m1", module_name="m1",
+                    module_description="d", module_todo_description="t",
+                    sub_modules=[], module_nodes=[f1])
+    pattern = Pattern(code="pr", name="t", description="t",
+                      entry_module_code="r1", modules=[route, fsm])
+    sessions = {}
+    _launch(pattern, sessions)
+    with patch("src.chat.loop.build_provider"):
+        _chat(sessions, "s1", "选A")
+
+    # root 轮：nlu 用 root 层、advance 切 menu_a 后 nlg 用 menu 层（本轮修复点）
+    # 随后静默分发 → m1 同轮重入：f1 的 nlu/nlg
+    assert ran == [("root", "root_nlu"), ("menu_a", "menu_nlg"),
+                   ("f1", "f1_nlu"), ("f1", "f1_nlg")]
+
+
+def test_pattern_stages_verbatim_and_mixed_slots():
+    """pattern.stages 具体 stage 原样执行；GenerateSlot 仍三层解析（node 级命中）。"""
+    class _Fixed:
+        def __init__(self, name):
+            self.stage_name = name
+
+        def execute(self, ctx):
+            ran.append((ctx.current_node_code, self.stage_name))
+            if self.stage_name == "pre":
+                ctx.nlu_result = {"next_node": "", "slots": {}}
+            return ctx
+
+    n1 = BaseNode(node_code="f1", node_name="节点一",
+                  generate=_Marker("node_gen"))
+    m = FSMModule(module_code="m1", module_name="m1", module_description="d",
+                  module_todo_description="t", sub_modules=[], module_nodes=[n1])
+    pattern = Pattern(code="pm", name="t", description="t",
+                      entry_module_code="m1", modules=[m])
+    pattern.stages = [_Fixed("pre"), GenerateSlot()]
+    sessions = {}
+    _launch(pattern, sessions)
+    with patch("src.chat.loop.build_provider"):
+        reply = _chat(sessions, "s1", "你好")
+
+    assert ran == [("f1", "pre"), ("f1", "node_gen")]

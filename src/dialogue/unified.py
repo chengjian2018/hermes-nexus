@@ -16,9 +16,11 @@ Unified stage —— 单次调用 + structured output：一次 LLM 调用同时�
 - ctx.nlg_result = {"content": reply}          —— 下游回复提取零改动
 - ctx.metadata["unified"] = 观测信息（invalid_next_node / parse_failed 等）
 
-接入方式（module 级注入，无需改装配代码）：
-    FSMModule(nlu_stage=FSMUnifiedNLU(), nlg_stage=PassThroughNLG())
-    RouteModule(nlu_stage=RouteUnifiedNLU(), nlg_stage=PassThroughNLG())
+接入方式（module 级 generate 注入，经默认骨架 GenerateSlot 解析命中）：
+    FSMModule(generate=FSMUnifiedNLU())
+    RouteModule(generate=RouteUnifiedNLU())
+（node 级 generate 优先于 module 级，见 stage_slots.py；PassThroughNLG
+保留为独立工具类，generate 单 stage 形态下不再需要占位 NLG）
 
 与双轨澄清组合（enable_clarify=True 的 FSM 模块）：
     管线装配为 [统一阶段, ClarifyStage, PassThroughNLG]。

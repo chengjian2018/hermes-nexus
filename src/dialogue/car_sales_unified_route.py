@@ -14,9 +14,9 @@ Pattern 结构（Pattern → Module → Node）：
     └── unified_buy (FSMModule, 统一阶段)
         └── u_ask_brand → u_ask_budget → u_confirm(is_end)
 
-接入方式（module 级注入，走 _build_default_stages 的 node > module > default 优先级）：
-    RouteModule(nlu_stage=RouteUnifiedNLU(), nlg_stage=PassThroughNLG())
-    FSMModule(nlu_stage=FSMUnifiedNLU(), nlg_stage=PassThroughNLG())
+接入方式（module 级 generate 注入，经默认骨架 GenerateSlot 槽位解析命中）：
+    RouteModule(generate=RouteUnifiedNLU())
+    FSMModule(generate=FSMUnifiedNLU())
 
 候选节点的 answer_examples 在统一阶段会被拼进 prompt（next_node_pattern 槽位），
 模型据此在选定节点的话术风格内直接生成回复 —— 因此本 pattern 的每个节点
@@ -32,7 +32,6 @@ from src.dialogue.pattern import Pattern
 from src.dialogue.register import registry
 from src.dialogue.unified import (
     FSMUnifiedNLU,
-    PassThroughNLG,
     RouteUnifiedNLU,
 )
 
@@ -78,8 +77,7 @@ unified_root = RouteModule(
         ),
     ],
     # 统一阶段注入：一次调用完成意图分类与菜单回复生成
-    nlu_stage=RouteUnifiedNLU(),
-    nlg_stage=PassThroughNLG(),
+    generate=RouteUnifiedNLU(),
 )
 
 
@@ -129,8 +127,7 @@ unified_buy = FSMModule(
         ),
     ],
     # 统一阶段注入：一次调用完成意图/槽位抽取与回复生成
-    nlu_stage=FSMUnifiedNLU(),
-    nlg_stage=PassThroughNLG(),
+    generate=FSMUnifiedNLU(),
 )
 
 

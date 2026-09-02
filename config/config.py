@@ -37,6 +37,24 @@ _LLM_ALL_FIELDS = _LLM_REQUIRED_FIELDS | _LLM_OPTIONAL_FIELDS
 
 
 # ============================================================================
+# Pattern 级 LLM 配置（spec 2026-09-02）：provider 连接 / 模型编排分离
+# ============================================================================
+
+# 编排字段：llm_default 与 pattern_llm 各层条目允许的字段
+_ORCHESTRATION_FIELDS = {
+    "code", "model", "temperature", "max_tokens",
+    "timeout", "max_retries", "enable_thinking",
+}
+
+# 连接字段：llm_providers 各段允许的字段（legacy llm: 节点按此拆分）
+_CONNECTION_FIELDS = {
+    "api_base", "api_key", "api_key_env", "timeout", "max_retries",
+}
+
+_PATTERN_LLM_SUBKEYS = {"modules", "nodes"}
+
+
+# ============================================================================
 # 会话持久化配置
 # ============================================================================
 
@@ -97,6 +115,47 @@ def _validate_llm_config(llm_config: Dict[str, Any]) -> None:
         )
 
 
+def _convert_legacy_llm(llm_cfg: Dict[str, Any]):
+    """legacy 顶层 llm: 节点 → (llm_providers, llm_default)（spec §6）。"""
+    conn = {
+        k: llm_cfg[k] for k in _CONNECTION_FIELDS
+        if llm_cfg.get(k) not in (None, "")
+    }
+    orch = {k: v for k, v in llm_cfg.items() if k not in _CONNECTION_FIELDS}
+    providers = {llm_cfg["code"]: conn} if conn else {}
+    return providers, orch
+
+
+def _validate_pattern_llm(pattern_llm: Dict[str, Any]) -> None:
+    """pattern_llm 词表与嵌套校验：未知字段 warning 后剔除，modules/nodes 内
+    再嵌套 modules/nodes 视为非法嵌套，warning 后置空。"""
+    for pcode, pcfg in pattern_llm.items():
+        if not isinstance(pcfg, dict):
+            raise ValueError(f"pattern_llm.{pcode} 应为字典，实际为: {type(pcfg).__name__}")
+        for key in list(pcfg.keys()):
+            if key in _PATTERN_LLM_SUBKEYS:
+                for sub_code, sub_cfg in (pcfg[key] or {}).items():
+                    if not isinstance(sub_cfg, dict):
+                        raise ValueError(
+                            f"pattern_llm.{pcode}.{key}.{sub_code} 应为字典")
+                    bad = set(sub_cfg.keys()) & _PATTERN_LLM_SUBKEYS
+                    unknown = set(sub_cfg.keys()) - _ORCHESTRATION_FIELDS
+                    if bad or unknown:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "pattern_llm.%s.%s.%s 含非法嵌套/未知字段 %s，已忽略",
+                            pcode, key, sub_code, sorted(bad | unknown))
+                        pattern_llm[pcode][key][sub_code] = {
+                            k: v for k, v in sub_cfg.items()
+                            if k in _ORCHESTRATION_FIELDS
+                        }
+            elif key not in _ORCHESTRATION_FIELDS:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "pattern_llm.%s 含未知字段 '%s'，已忽略", pcode, key)
+                pattern_llm[pcode].pop(key)
+
+
 def load_config(config_path: str = "") -> Dict[str, Any]:
     """从 local_config.yaml 读取本地配置并返回。
 
@@ -105,7 +164,9 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
                      ``config/local_config.yaml``。
 
     Returns:
-        配置字典，至少包含 ``llm`` 键，其值为 LLM 配置子字典。
+        配置字典，包含 ``llm_providers`` / ``llm_default`` / ``pattern_llm``
+        / ``session_db_path`` 键。legacy ``llm:`` 节点在加载期自动转换为
+        ``llm_providers`` + ``llm_default``。
 
     Raises:
         FileNotFoundError: 配置文件不存在时。
@@ -113,7 +174,7 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
 
     Example:
         >>> config = load_config()
-        >>> llm_cfg = config["llm"]
+        >>> llm_cfg = config["llm_default"]
         >>> print(llm_cfg["code"])   # "openai"
         >>> print(llm_cfg["model"])  # "qwen3.8-max"
     """
@@ -137,17 +198,39 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
             f"配置文件顶层应为字典，实际为: {type(raw).__name__}"
         )
 
-    # 提取 llm 配置
-    llm_config = raw.get("llm")
-    if llm_config is None:
+    # 提取 LLM 配置：新结构（llm_providers/llm_default/pattern_llm）或 legacy llm 节点
+    has_legacy = raw.get("llm") is not None
+    has_new = raw.get("llm_providers") is not None or raw.get("llm_default") is not None
+    if has_legacy and has_new:
         raise ValueError(
-            f"配置文件中缺少 'llm' 节点，请在 {path} 中添加 llm 配置"
+            f"配置文件 {path} 中旧 'llm:' 节点与 'llm_providers:'/'llm_default:' "
+            f"并存，请改写为新结构（spec 2026-09-02 §6）"
         )
-
-    _validate_llm_config(llm_config)
+    if has_legacy:
+        llm_cfg = raw["llm"]
+        _validate_llm_config(llm_cfg)  # 旧节点沿用旧校验（code/model 必填）
+        llm_providers, llm_default = _convert_legacy_llm(llm_cfg)
+    elif raw.get("llm_default") is not None:
+        llm_default = raw["llm_default"]
+        if not isinstance(llm_default, dict):
+            raise ValueError("llm_default 应为字典")
+        _validate_llm_config(llm_default)  # code/model 必填
+        llm_providers = raw.get("llm_providers") or {}
+    else:
+        raise ValueError(
+            f"配置文件 {path} 缺少 'llm_default'（或旧式 'llm'）节点"
+        )
+    if not isinstance(llm_providers, dict):
+        raise ValueError("llm_providers 应为字典")
+    pattern_llm = raw.get("pattern_llm") or {}
+    if not isinstance(pattern_llm, dict):
+        raise ValueError("pattern_llm 应为字典")
+    _validate_pattern_llm(pattern_llm)
 
     return {
-        "llm": llm_config,
+        "llm_providers": llm_providers,
+        "llm_default": llm_default,
+        "pattern_llm": pattern_llm,
         # 会话持久化 SQLite 路径（可选，缺省 data/dialogue.db）
         "session_db_path": raw.get("session_db_path", DEFAULT_SESSION_DB_PATH),
         # 后续可扩展其他节点，如: "dialogue", "logging", "storage" 等
@@ -155,11 +238,11 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
 
 
 def get_llm_config(config_path: str = "") -> Dict[str, Any]:
-    """便捷方法：直接返回 llm 配置子字典。
-
-    Equivalent to ``load_config(config_path)["llm"]``.
-    """
-    return load_config(config_path)["llm"]
+    """便捷方法：返回全局默认 llm 配置（连接字段 ⊕ llm_default）。"""
+    cfg = load_config(config_path)
+    providers = cfg["llm_providers"]
+    merged = dict(cfg["llm_default"])
+    return {**providers.get(merged.get("code", ""), {}), **merged}
 
 
 def get_session_db_path(config_path: str = "") -> str:

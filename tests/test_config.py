@@ -199,6 +199,49 @@ def test_override_skips_layers(tmp_path):
     assert cfg["model"] == "fake-model" and cfg["temperature"] == 0.1
 
 
+# ============================================================================
+# main startup 交叉校验（spec 2026-09-02 §5）：未知 code 仅 warning 不阻断
+# ============================================================================
+
+def test_cross_check_warns_unknown_codes(tmp_path, caplog):
+    """pattern_llm 的未知 pattern/module/node code 仅 warning 不抛。"""
+    import main
+    text = _NEW_STRUCT + """\
+  no_such_pattern:
+    model: m
+"""
+    # 未注册 pattern 的 modules/nodes 分支不可达（continue），故 module/node
+    # 未知分支挂在已注册的 car_sales_route 下单独验证
+    text = text.replace("buy_confirm: {code: deepseek, model: deepseek-chat}",
+                        "no_such_node: {code: deepseek, model: deepseek-chat}")
+    text = text.replace("car_sales_buy: {model: qwen3.8-max}",
+                        "no_such_module: {model: qwen3.8-max}")
+    with caplog.at_level("WARNING"):
+        main._cross_check_pattern_llm(config_path=_write(tmp_path, text))
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "no_such_pattern" in msgs
+    assert "no_such_module" in msgs
+    assert "no_such_node" in msgs
+
+
+def test_cross_check_skips_on_load_failure(tmp_path, caplog):
+    """load_config 失败时仅 exception 日志，不抛。"""
+    import main
+    with caplog.at_level("WARNING"):
+        main._cross_check_pattern_llm(config_path="/no/such/file.yaml")
+    assert not any("未注册" in r.message for r in caplog.records)
+
+
+def test_cross_check_registered_codes_no_warning(tmp_path, caplog):
+    """已注册的 pattern/module/node 不产生 warning。"""
+    import main
+    pattern = main.pattern_registry.list_codes()
+    assert pattern  # discover 在 import main 时已跑
+    with caplog.at_level("WARNING"):
+        main._cross_check_pattern_llm(config_path=_write(tmp_path, _NEW_STRUCT))
+    assert not any("未注册" in r.message for r in caplog.records)
+
+
 def test_override_survives_missing_yaml(tmp_path, caplog):
     """yaml 不存在时 override 路径静默降级（离线测试封闭性）。"""
     ov = {"code": "x", "model": "m"}

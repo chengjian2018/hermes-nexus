@@ -151,14 +151,40 @@ def _restore_sessions() -> int:
     return restored
 
 
+def _cross_check_pattern_llm(config_path: str = "") -> None:
+    """交叉校验 pattern_llm 的 code 存在性（spec §5）：未知仅 warning 不阻断。"""
+    from config.config import load_config
+    try:
+        pattern_llm = load_config(config_path).get("pattern_llm", {})
+    except Exception:
+        logger.exception("加载配置失败，跳过 pattern_llm 交叉校验")
+        return
+    for pcode, pcfg in pattern_llm.items():
+        pattern = pattern_registry.get(pcode)
+        if pattern is None:
+            logger.warning("pattern_llm 配置了未注册的 pattern '%s'", pcode)
+            continue
+        for mcode in (pcfg.get("modules") or {}):
+            if mcode not in pattern.module_map:
+                logger.warning(
+                    "pattern '%s' 的 pattern_llm.modules 配置了未注册 module '%s'",
+                    pcode, mcode)
+        for ncode in (pcfg.get("nodes") or {}):
+            if ncode not in pattern.node_map:
+                logger.warning(
+                    "pattern '%s' 的 pattern_llm.nodes 配置了未注册 node '%s'",
+                    pcode, ncode)
+
+
 @app.on_event("startup")
 def _startup_persistence() -> None:
-    """服务启动：初始化会话存储 + 恢复未过期会话。"""
+    """服务启动：初始化会话存储 + 恢复未过期会话 + 交叉校验 pattern_llm。"""
     _init_store()
     try:
         _restore_sessions()
     except Exception:
         logger.exception("重启恢复失败，跳过恢复")
+    _cross_check_pattern_llm()
 
 
 # # check aleady registried patterns and tools

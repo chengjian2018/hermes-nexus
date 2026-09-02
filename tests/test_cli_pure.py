@@ -194,6 +194,82 @@ class TestRenderVerboseFull:
 
 
 # ============================================================================
+# parse_task_info / prompt_task_info
+# ============================================================================
+
+class TestParseTaskInfo:
+    def test_empty_returns_none(self):
+        assert cli.parse_task_info("") is None
+        assert cli.parse_task_info("   ") is None
+        assert cli.parse_task_info(None) is None
+
+    def test_valid_json_object(self):
+        out = cli.parse_task_info('{"channel": "xianyu", "item_id": "123"}')
+        assert out == {"channel": "xianyu", "item_id": "123"}
+
+    def test_values_coerced_to_str(self):
+        out = cli.parse_task_info('{"price": 9900, "count": 2}')
+        assert out == {"price": "9900", "count": "2"}
+        assert all(isinstance(v, str) for v in out.values())
+
+    def test_invalid_json_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            cli.parse_task_info("{not json")
+
+    def test_non_object_rejected(self):
+        with pytest.raises(SystemExit):
+            cli.parse_task_info('["a", "b"]')
+        with pytest.raises(SystemExit):
+            cli.parse_task_info('"str"')
+
+
+class TestPromptTaskInfo:
+    def test_preset_parsed_without_prompt(self):
+        with unittest.mock.patch("builtins.input") as inp:
+            out = cli.prompt_task_info("p1", '{"k": "v"}')
+        assert out == {"k": "v"}
+        inp.assert_not_called()
+
+    def test_enter_skips(self):
+        with unittest.mock.patch("builtins.input", return_value=""):
+            assert cli.prompt_task_info("p1") is None
+
+    def test_typed_json_parsed(self):
+        with unittest.mock.patch("builtins.input",
+                                 return_value='{"item_id": "9"}'):
+            assert cli.prompt_task_info("p1") == {"item_id": "9"}
+
+    def test_eof_returns_none(self):
+        with unittest.mock.patch("builtins.input", side_effect=EOFError):
+            assert cli.prompt_task_info("p1") is None
+
+
+class TestBuildSessionTaskInfo:
+    def test_build_session_writes_task_info_both_places(self, monkeypatch):
+        """task_info 双写对齐 main._launch_session_core：
+        session.task_info（落盘）+ metadata（prompt 槽位）。"""
+        from src.dialogue.register import discover_builtin_patterns
+
+        discover_builtin_patterns()
+        session = cli.build_session(
+            "t-task", "car_sales_route",
+            task_info={"channel": "xianyu", "item_id": "1"},
+        )
+        assert session.task_info == {"channel": "xianyu", "item_id": "1"}
+        assert session.cxt.metadata["task_info"] == {"channel": "xianyu",
+                                                    "item_id": "1"}
+        assert "item_id: 1" in session.cxt.format_task_info()
+
+    def test_build_session_without_task_info_no_metadata_key(self, monkeypatch):
+        from src.dialogue.register import discover_builtin_patterns
+
+        discover_builtin_patterns()
+        session = cli.build_session("t-no-task", "car_sales_route")
+        assert session.task_info == {}
+        assert "task_info" not in session.cxt.metadata
+
+
+# ============================================================================
 # KEEP_CONFIG 菜单 + llm_override 接线
 # ============================================================================
 

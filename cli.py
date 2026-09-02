@@ -7,7 +7,8 @@
     cli.py sessions              列出 data/dialogue.db 中的会话
 
 选择交互: 不带 --pattern/--llm 启动时出 prompt_toolkit 方向键菜单
-(pattern 单级; llm 两级 provider → models)。调试输出: -v 简要 / -vv 完整。
+(pattern 单级; llm 两级 provider → models)。选定 pattern 后可输入
+task_info JSON（回车跳过；--task-info 直接传）。调试输出: -v 简要 / -vv 完整。
 
 用法示例:
     .venv/bin/python cli.py chat --pattern car_sales_route -vv
@@ -311,11 +312,14 @@ class SlashCompleter:
 # ============================================================================
 
 def build_session(session_id: str, pattern_code: str,
-                  llm_overrides: Optional[Dict[str, Any]] = None) -> Session:
+                  llm_overrides: Optional[Dict[str, Any]] = None,
+                  task_info: Optional[Dict[str, str]] = None) -> Session:
     """创建 Session 并完成 pattern/llm 绑定。
 
     llm_overrides 非空时预置 metadata.llm_override（逐轮刷新下仍优先生效）；
     model 必填（各 stage 以 llm_config["model"] 下标访问）。
+    task_info 复刻 main.py _launch_session_core 的双写：session.task_info
+    （落盘用）+ cxt.metadata["task_info"]（prompt 槽位 {__task_info__} 用）。
     """
     pattern = pattern_registry.get(pattern_code)
     if pattern is None:
@@ -324,8 +328,11 @@ def build_session(session_id: str, pattern_code: str,
 
     session = Session(session_id=session_id, pattern_code=pattern_code)
     session.pattern = pattern
+    session.task_info = task_info or {}
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
+    if task_info:
+        session.cxt.metadata["task_info"] = task_info
 
     if llm_overrides:
         # 只写用户显式选择的 truthy 字段；空 override（如「维持 config 配置」）
@@ -381,6 +388,44 @@ def resolve_llm_choice(llm: str, model: str,
     return {"code": code, "model": resolved_model}
 
 
+def parse_task_info(raw: Any) -> Optional[Dict[str, str]]:
+    """把 --task-info / 输入框的 task_info 解析为 dict。
+
+    输入既可能是 JSON 字符串（input() 输入框），也可能是 dict —— fire 对
+    --task-info '{...}' 会自动字面量求值成 Python dict。
+    空输入 → None（未设置）；非法 JSON / 非 dict → SystemExit。
+    值统一转 str（launch 契约是 Dict[str, str]，xianyu channel 映射出来的也是 str）。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(red(f"task_info 不是合法 JSON: {e}"))
+    if not isinstance(data, dict):
+        raise SystemExit(red(f"task_info 必须是 JSON object，得到: {type(data).__name__}"))
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def prompt_task_info(pattern_code: str, preset: str = "") -> Optional[Dict[str, str]]:
+    """选完 pattern 后的 task_info 输入框；回车跳过。
+
+    preset 非空（--task-info flag）则只做解析不再询问。
+    """
+    if preset:
+        return parse_task_info(preset)
+    try:
+        raw = input(dim(f"task_info JSON（回车跳过）[{pattern_code}]: ")).strip()
+    except EOFError:
+        return None
+    return parse_task_info(raw)
+
+
 # ============================================================================
 # 轮次执行 + 持久化（SessionStore 与 web 服务共用同一 db）
 # ============================================================================
@@ -433,8 +478,10 @@ def _open_store(persist) -> Optional[SessionStore]:
 
 
 def _find_or_create(session_id: str, pattern_code: str,
-                    llm_overrides: Dict[str, Any], store: Optional[SessionStore],
-                    sessions: Dict[str, Session]) -> Session:
+                    llm_overrides: Dict[str, Any],
+                    store: Optional[SessionStore],
+                    sessions: Dict[str, Session],
+                    task_info: Optional[Dict[str, str]] = None) -> Session:
     """--session-id 命中库中未过期会话则恢复续聊，否则新建并落盘。"""
     if store is not None:
         for restored, _ in store.load_active_sessions(ttl_seconds=7 * 24 * 3600):
@@ -456,7 +503,7 @@ def _find_or_create(session_id: str, pattern_code: str,
                 sessions[session_id] = restored
                 return restored
 
-    session = build_session(session_id, pattern_code, llm_overrides)
+    session = build_session(session_id, pattern_code, llm_overrides, task_info)
     sessions[session_id] = session
     if store is not None:
         store.create_session(session)
@@ -492,13 +539,14 @@ def _prompt_text(session: Session):
 
 
 def repl_loop(pattern_code: str, session_id: str, llm_overrides: Dict[str, Any],
-              persist: bool, verbose: int) -> None:
+              persist: bool, verbose: int,
+              task_info: Optional[Dict[str, str]] = None) -> None:
     """交互聊天主循环。"""
     sessions: Dict[str, Session] = {}
     store = _open_store(persist)
 
     session = _find_or_create(session_id, pattern_code, llm_overrides,
-                              store, sessions)
+                              store, sessions, task_info)
 
     PtkPromptSession = _ptk_import()[0]
     ptk_session = PtkPromptSession() if PtkPromptSession else None
@@ -549,9 +597,10 @@ def repl_loop(pattern_code: str, session_id: str, llm_overrides: Dict[str, Any],
 
 
 def _do_reset(session: Session, sessions: Dict[str, Session], store, verbose: int):
-    """/reset：同 pattern 重开新会话（沿用原 session_id 与 llm 配置）。"""
+    """/reset：同 pattern 重开新会话（沿用原 session_id、llm 配置与 task_info）。"""
     llm_override = session.cxt.metadata.get("llm_override")
-    new_session = build_session(session.session_id, session.pattern_code)
+    new_session = build_session(session.session_id, session.pattern_code,
+                                task_info=session.task_info)
     if llm_override:
         new_session.cxt.metadata["llm_override"] = llm_override
     sessions[session.session_id] = new_session
@@ -574,7 +623,8 @@ def _do_new(arg: str, sessions: Dict[str, Session], store, llm_overrides, verbos
     new_id = f"{code}-{os.getpid()}" if store is not None else "cli"
     if new_id in sessions:
         new_id = f"{new_id}-{len(sessions)}"
-    new_session = build_session(new_id, code, llm_overrides)
+    task_info = prompt_task_info(code)
+    new_session = build_session(new_id, code, llm_overrides, task_info)
     sessions[new_id] = new_session
     if store is not None:
         store.create_session(new_session)
@@ -630,7 +680,7 @@ def _ensure_discovery() -> None:
 
 
 def chat(pattern: str = "", session_id: str = "cli", llm: str = "", model: str = "",
-         verbose: int = 0, persist: bool = True) -> None:
+         task_info: str = "", verbose: int = 0, persist: bool = True) -> None:
     """交互 REPL 测试模板对话。
 
     Args:
@@ -638,6 +688,7 @@ def chat(pattern: str = "", session_id: str = "cli", llm: str = "", model: str =
         session_id: 会话 id；带持久化时命中库中未过期会话则续聊
         llm: provider code（缺省出选择菜单）
         model: model 名（缺省且选了 provider 时出 model 菜单）
+        task_info: JSON 字符串（缺省则在选定 pattern 后出输入框，回车跳过）
         verbose: 调试层级 0/1/2（命令行 -v/-vv 自动展开）
         persist: 落盘 data/dialogue.db（默认开）
     """
@@ -662,14 +713,16 @@ def chat(pattern: str = "", session_id: str = "cli", llm: str = "", model: str =
     if not pattern_code:
         print(yellow("未选择 pattern，退出"))
         return
+    task_info_dict = prompt_task_info(pattern_code, task_info)
     llm_overrides = resolve_llm_choice(llm, model, interactive=True)
     # 默认 session-id 拼进程号：避免命中库中任意旧会话把刚选的 pattern 换掉
     sid = session_id if (sid_specified or pattern) else f"{session_id}-{os.getpid()}"
-    repl_loop(pattern_code, sid, llm_overrides, persist, verbose)
+    repl_loop(pattern_code, sid, llm_overrides, persist, verbose, task_info_dict)
 
 
 def ask(query: str, pattern: str = "", session_id: str = "cli-ask", llm: str = "",
-        model: str = "", verbose: int = 0, persist: bool = True) -> None:
+        model: str = "", task_info: str = "", verbose: int = 0,
+        persist: bool = True) -> None:
     """单问单答（--session-id 可续聊库中会话）。"""
     _ensure_discovery()
     pattern_code = pattern
@@ -684,11 +737,13 @@ def ask(query: str, pattern: str = "", session_id: str = "cli-ask", llm: str = "
             store.close()
         if not pattern_code:
             raise SystemExit(red("ask 需要显式 --pattern，或 --session-id 命中已有会话"))
+    # one-shot 不再追加询问：--task-info 显式传则解析，否则无 task_info
+    task_info_dict = parse_task_info(task_info)
     llm_overrides = resolve_llm_choice(llm, model, interactive=False)
     sessions: Dict[str, Session] = {}
     store = _open_store(persist)
     session = _find_or_create(session_id, pattern_code, llm_overrides,
-                              store, sessions)
+                              store, sessions, task_info_dict)
     reply = run_turn(session, query, sessions, store, verbose)
     print(reply)
     if store is not None:

@@ -3,7 +3,7 @@
 import pytest
 
 from config.config import DEFAULT_SESSION_DB_PATH, get_session_db_path
-from config.config import load_config
+from config.config import get_llm_config, load_config
 
 _LLM_MIN = """\
 llm:
@@ -124,3 +124,85 @@ def test_nested_modules_rejected_with_warning(tmp_path, caplog):
         cfg = load_config(_write(tmp_path, text))
     assert cfg["pattern_llm"]["car_sales_route"]["modules"]["car_sales_buy"] == {}
     assert any("嵌套" in r.message for r in caplog.records)
+
+
+# ============================================================================
+# get_llm_config 三层合并（spec 2026-09-02 §3.2/§3.3）
+# ============================================================================
+
+def test_layered_merge_priority(tmp_path):
+    """node > module > pattern > 全局，逐层浅合并。"""
+    path = _write(tmp_path, _NEW_STRUCT + """\
+  car_sales_route2:
+    model: qwen3.8-max
+    modules:
+      m1: {model: m-flash}
+      m2: {temperature: 0.2}
+    nodes:
+      n1: {code: deepseek, model: deepseek-chat}
+""")
+    cfg = get_llm_config(pattern_code="car_sales_route2",
+                         module_code="m2", node_code="n1", config_path=path)
+    # n1 换 code → 连接层切到 deepseek 段（无该段则空）；temperature 继承 m2
+    assert cfg["code"] == "deepseek"
+    assert cfg["model"] == "deepseek-chat"
+    assert cfg["temperature"] == 0.2
+    assert cfg.get("api_base", "") == ""  # deepseek 未配 provider 段 → 空
+
+
+def test_cross_provider_connection_switch(tmp_path):
+    """node 换 code 时连接字段来自新 code 的 provider 段，不串台。"""
+    text = """\
+llm_providers:
+  openai:
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+  deepseek:
+    api_base: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+llm_default:
+  code: openai
+  model: qwen3.8-max
+pattern_llm:
+  p:
+    nodes:
+      n: {code: deepseek, model: deepseek-chat}
+"""
+    cfg = get_llm_config(pattern_code="p", node_code="n",
+                         config_path=_write(tmp_path, text))
+    assert cfg["api_base"] == "https://api.deepseek.com/v1"
+    assert cfg["api_key_env"] == "DEEPSEEK_API_KEY"
+
+
+def test_unknown_codes_fallback_to_shallow_layer(tmp_path, caplog):
+    cfg = get_llm_config(pattern_code="no_such_pattern", config_path=_write(tmp_path, _NEW_STRUCT))
+    assert cfg["model"] == "qwen3.8-max"  # 回退全局
+    cfg2 = get_llm_config(pattern_code="car_sales_route", module_code="no_such_module",
+                          config_path=_write(tmp_path, _NEW_STRUCT))
+    assert cfg2["model"] == "qwen-flash"  # 回退 pattern 层
+    with caplog.at_level("WARNING"):
+        get_llm_config(pattern_code="no_such_pattern", config_path=_write(tmp_path, _NEW_STRUCT))
+    assert any("no_such_pattern" in r.message for r in caplog.records)
+
+
+def test_no_args_returns_global(tmp_path):
+    cfg = get_llm_config(config_path=_write(tmp_path, _NEW_STRUCT))
+    assert cfg["code"] == "openai"
+    assert cfg["model"] == "qwen3.8-max"
+    assert cfg["api_key_env"] == "DASHSCOPE_API_KEY"  # 连接层并入
+
+
+def test_override_skips_layers(tmp_path):
+    ov = {"code": "fake_test_provider", "model": "fake-model", "temperature": 0.1}
+    cfg = get_llm_config(pattern_code="car_sales_route", node_code="buy_confirm",
+                         override=ov, config_path=_write(tmp_path, _NEW_STRUCT))
+    assert cfg["model"] == "fake-model" and cfg["temperature"] == 0.1
+
+
+def test_override_survives_missing_yaml(tmp_path, caplog):
+    """yaml 不存在时 override 路径静默降级（离线测试封闭性）。"""
+    ov = {"code": "x", "model": "m"}
+    with caplog.at_level("WARNING"):
+        cfg = get_llm_config(override=ov,
+                             config_path=str(tmp_path / "nope.yaml"))
+    assert cfg == {"code": "x", "model": "m"}

@@ -6,9 +6,10 @@ LLM 配置项来源：``src/llm/provider.py`` 中的 ``ProviderEntry`` 和
 ``OpenAICompatibleProvider``。
 """
 
+import logging
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -134,7 +135,11 @@ def _validate_pattern_llm(pattern_llm: Dict[str, Any]) -> None:
             raise ValueError(f"pattern_llm.{pcode} 应为字典，实际为: {type(pcfg).__name__}")
         for key in list(pcfg.keys()):
             if key in _PATTERN_LLM_SUBKEYS:
-                for sub_code, sub_cfg in (pcfg[key] or {}).items():
+                if not isinstance(pcfg[key], dict):
+                    raise ValueError(
+                        f"pattern_llm.{pcode}.{key} 应为字典，"
+                        f"实际为: {type(pcfg[key]).__name__}")
+                for sub_code, sub_cfg in pcfg[key].items():
                     if not isinstance(sub_cfg, dict):
                         raise ValueError(
                             f"pattern_llm.{pcode}.{key}.{sub_code} 应为字典")
@@ -237,12 +242,61 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
     }
 
 
-def get_llm_config(config_path: str = "") -> Dict[str, Any]:
-    """便捷方法：返回全局默认 llm 配置（连接字段 ⊕ llm_default）。"""
-    cfg = load_config(config_path)
-    providers = cfg["llm_providers"]
+def _merge_connection(orch: Dict[str, Any], providers: Dict[str, Any]) -> Dict[str, Any]:
+    """编排结果 ⊕ 其 code 对应的 provider 连接段（无段则空，回落 registry 默认）。"""
+    return {**providers.get(orch.get("code", ""), {}), **orch}
+
+
+def _resolve_layered(cfg: Dict[str, Any], pattern_code: str,
+                     module_code: str, node_code: str) -> Dict[str, Any]:
+    """llm_default ⊕ pattern ⊕ module ⊕ node 逐层浅合并（spec §3.2）。
+
+    未配置/未知的 code 静默回退更浅层并 warning。
+    """
     merged = dict(cfg["llm_default"])
-    return {**providers.get(merged.get("code", ""), {}), **merged}
+    pcfg = cfg.get("pattern_llm", {}).get(pattern_code) if pattern_code else None
+    if pattern_code and pcfg is None:
+        logging.getLogger(__name__).warning(
+            "pattern_llm 未配置 pattern '%s'，回退全局默认", pattern_code)
+    if pcfg:
+        merged.update({k: v for k, v in pcfg.items() if k not in _PATTERN_LLM_SUBKEYS})
+        for sub_key, code, label in (
+            ("modules", module_code, "module"),
+            ("nodes", node_code, "node"),
+        ):
+            if not code:
+                continue
+            sub_cfg = (pcfg.get(sub_key) or {}).get(code)
+            if sub_cfg is None:
+                logging.getLogger(__name__).warning(
+                    "pattern '%s' 未配置 %s '%s'，回退更浅层", pattern_code, label, code)
+                continue
+            merged.update(sub_cfg)
+    return merged
+
+
+def get_llm_config(pattern_code: str = "", module_code: str = "",
+                   node_code: str = "", override: Optional[Dict[str, Any]] = None,
+                   config_path: str = "") -> Dict[str, Any]:
+    """按当前位置解析 LLM 配置（spec §3.3 / §4.1）。
+
+    override 非 None：跳过三层解析，仅尝试并入 llm_providers[override.code]
+    连接段；yaml 加载失败静默降级为空连接段（保离线测试封闭）。
+    其余情况：三层合并后并入连接层；yaml 加载失败照常抛出。
+    """
+    if override is not None:
+        try:
+            providers = load_config(config_path).get("llm_providers", {})
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "override 路径加载配置失败，连接层降级为空: %s", override.get("code"))
+            providers = {}
+        return _merge_connection(dict(override), providers)
+    cfg = load_config(config_path)
+    return _merge_connection(
+        _resolve_layered(cfg, pattern_code, module_code, node_code),
+        cfg.get("llm_providers", {}),
+    )
 
 
 def get_session_db_path(config_path: str = "") -> str:

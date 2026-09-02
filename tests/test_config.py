@@ -180,9 +180,14 @@ def test_unknown_codes_fallback_to_shallow_layer(tmp_path, caplog):
     cfg2 = get_llm_config(pattern_code="car_sales_route", module_code="no_such_module",
                           config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg2["model"] == "qwen-flash"  # 回退 pattern 层
-    with caplog.at_level("WARNING"):
+    # pattern 未配置为常态，降为 debug；module 未命中仍是 warning
+    with caplog.at_level("DEBUG"):
         get_llm_config(pattern_code="no_such_pattern", config_path=_write(tmp_path, _NEW_STRUCT))
     assert any("no_such_pattern" in r.message for r in caplog.records)
+    with caplog.at_level("WARNING"):
+        get_llm_config(pattern_code="car_sales_route", module_code="no_such_module",
+                       config_path=_write(tmp_path, _NEW_STRUCT))
+    assert any("no_such_module" in r.message for r in caplog.records)
 
 
 def test_no_args_returns_global(tmp_path):
@@ -249,3 +254,27 @@ def test_override_survives_missing_yaml(tmp_path, caplog):
         cfg = get_llm_config(override=ov,
                              config_path=str(tmp_path / "nope.yaml"))
     assert cfg == {"code": "x", "model": "m"}
+
+
+# ============================================================================
+# 终审修复回归（Final review I1 / I3）
+# ============================================================================
+
+def test_llm_providers_unknown_field_warns_and_stripped(tmp_path, caplog):
+    """llm_providers 段未知字段（如手误 api_key_evn）warning 后剔除。"""
+    text = _NEW_STRUCT.replace(
+        "  openai:\n    api_base:",
+        "  openai:\n    api_key_evn: WRONG_ENV\n    api_base:")
+    with caplog.at_level("WARNING"):
+        cfg = load_config(_write(tmp_path, text))
+    assert "api_key_evn" not in cfg["llm_providers"]["openai"]
+    assert cfg["llm_providers"]["openai"]["api_key_env"] == "DASHSCOPE_API_KEY"
+    assert any("api_key_evn" in r.message for r in caplog.records)
+
+
+def test_override_without_code_falls_back_to_llm_default(tmp_path):
+    """override 只写 model（无 code）→ 解析结果补 llm_default 的 code。"""
+    ov = {"model": "override-model"}
+    cfg = get_llm_config(override=ov, config_path=_write(tmp_path, _NEW_STRUCT))
+    assert cfg["code"] == "openai"
+    assert cfg["model"] == "override-model"

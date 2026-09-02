@@ -328,9 +328,12 @@ def build_session(session_id: str, pattern_code: str,
     session.cxt.node_map = pattern.node_map
 
     if llm_overrides:
-        cfg = dict(get_llm_config())
-        cfg.update({k: v for k, v in llm_overrides.items() if v})
-        session.cxt.metadata["llm_override"] = cfg
+        # 只写用户显式选择的 truthy 字段；空 override（如「维持 config 配置」）
+        # 不写 llm_override —— 否则空 dict 仍为 truthy，会 pin 全局快照，
+        # 三层覆盖 + 热生效全部失效（spec §4.1：空 override = 按 yaml 解析）
+        picked = {k: v for k, v in llm_overrides.items() if v}
+        if picked:
+            session.cxt.metadata["llm_override"] = picked
 
     return session
 
@@ -445,9 +448,9 @@ def _find_or_create(session_id: str, pattern_code: str,
                 restored.cxt.module_map = pattern.module_map
                 restored.cxt.node_map = pattern.node_map
                 if llm_overrides:
-                    restored.cxt.metadata["llm_override"] = {
-                        **get_llm_config(), **{k: v for k, v in
-                                               llm_overrides.items() if v}}
+                    picked = {k: v for k, v in llm_overrides.items() if v}
+                    if picked:
+                        restored.cxt.metadata["llm_override"] = picked
                 print(green(f"已恢复会话 {session_id} "
                             f"({restored.pattern_code})，继续对话"))
                 sessions[session_id] = restored
@@ -582,10 +585,15 @@ def _do_new(arg: str, sessions: Dict[str, Session], store, llm_overrides, verbos
 def _do_llm(session: Session, arg: str) -> None:
     """/llm [code]：切换后续轮次的 provider/model。"""
     overrides = resolve_llm_choice(arg.strip(), "", interactive=True)
-    if not overrides["code"] and not overrides["model"]:
-        print(yellow("未选择，保持当前 LLM"))
+    picked = {k: v for k, v in overrides.items() if v}
+    if not picked:
+        # 「维持 config 配置」：删除 override，后续轮次按 yaml 三层解析
+        session.cxt.metadata.pop("llm_override", None)
+        print(green("LLM 已切回 config 配置"))
         return
-    session.cxt.metadata["llm_override"] = {**get_llm_config(), **overrides}
+    # 只写显式选择字段；连接字段（api_base 等）一律由解析时的
+    # llm_providers[code] 段提供，不得铺入全量快照（防跨 provider 串台）
+    session.cxt.metadata["llm_override"] = picked
     print(green(f"LLM 已切换: {overrides['code']} / {overrides['model'] or '默认model'}"))
 
 

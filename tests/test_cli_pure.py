@@ -4,6 +4,7 @@
 """
 
 import unittest.mock
+from pathlib import Path
 
 import pytest
 
@@ -235,3 +236,100 @@ class TestBuildSessionOverride:
         )
         assert session.cxt.metadata["llm_override"]["model"] == "fake-model"
         assert session.cxt.llm_config is None
+
+
+# ============================================================================
+# 终审修复回归（Final review C1 / C2）
+# ============================================================================
+
+_YAML = """\
+llm_providers:
+  openai:
+    api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+  deepseek:
+    api_base: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+llm_default:
+  code: openai
+  model: qwen3.8-max
+pattern_llm:
+  p_cli_test:
+    model: pattern-layer-model
+"""
+
+
+def _minimal_pattern(code):
+    from src.dialogue.module import FSMModule
+    from src.dialogue.node import BaseNode
+    from src.dialogue.pattern import Pattern
+
+    n1 = BaseNode(node_code="f1", node_name="节点一")
+    m = FSMModule(module_code="m1", module_name="m1", module_description="d",
+                  module_todo_description="t", sub_modules=[],
+                  module_nodes=[n1])
+    return Pattern(code=code, name="t", description="t",
+                   entry_module_code="m1", modules=[m])
+
+
+def _run_chat_turn(tmp_path, session):
+    """经 chat() 跑一轮：get_llm_config 打桩到 tmp yaml 的真实三层解析。"""
+    from unittest.mock import patch as _patch
+    import config.config as cfg_mod
+    import src.chat.chat as chat_mod
+    from src.chat.chat import chat as chat_fn
+
+    config_path = str(tmp_path / "local_config.yaml")
+    Path(config_path).write_text(_YAML, encoding="utf-8")
+    real = cfg_mod.get_llm_config
+
+    def spy(**kw):
+        kw.setdefault("config_path", config_path)
+        return real(**kw)
+
+    sessions = {session.session_id: session}
+    with _patch("src.chat.loop.build_provider"), \
+         _patch.object(chat_mod, "get_llm_config", side_effect=spy):
+        chat_fn(query="你好", session_id=session.session_id,
+                all_sessions=sessions)
+
+
+class TestEmptyOverrideNotPinned:
+    def test_empty_override_skips_metadata_and_layered_resolution(
+            self, tmp_path, monkeypatch):
+        """空 override 经 build_session 不写 llm_override；
+        后续轮次走三层解析，model 取 pattern 层值（C1 回归）。"""
+        from src.chat.session import Session
+
+        pattern = _minimal_pattern("p_cli_test")
+        monkeypatch.setattr(cli, "pattern_registry",
+                            type("R", (), {"get": staticmethod(
+                                lambda c: pattern if c == "p_cli_test" else None),
+                                "list_codes": staticmethod(lambda: ["p_cli_test"])})())
+
+        s = cli.build_session("t-empty", "p_cli_test",
+                              llm_overrides={"code": "", "model": ""})
+        assert "llm_override" not in s.cxt.metadata
+
+        # 端到端：无 override → 解析走三层，pattern 层 model 生效
+        _run_chat_turn(tmp_path, s)
+        assert s.cxt.llm_config["model"] == "pattern-layer-model"
+
+    def test_cross_provider_override_connection_from_providers_section(
+            self, tmp_path):
+        """/llm 切 provider：override 只含显式字段；连接字段来自
+        llm_providers.deepseek 段，不串台 openai 连接（C2 回归）。"""
+        from src.chat.session import Session
+
+        pattern = _minimal_pattern("p_cli_test")
+        session = Session(session_id="t-cross", pattern_code="p_cli_test")
+        session.pattern = pattern
+        session.cxt.module_map = pattern.module_map
+        session.cxt.node_map = pattern.node_map
+        # 模拟 _do_llm 写入语义：只写显式选择字段
+        session.cxt.metadata["llm_override"] = {"code": "deepseek",
+                                                "model": "deepseek-chat"}
+        _run_chat_turn(tmp_path, session)
+        assert session.cxt.llm_config["model"] == "deepseek-chat"
+        assert session.cxt.llm_config["api_base"] == "https://api.deepseek.com/v1"
+        assert session.cxt.llm_config["api_key_env"] == "DEEPSEEK_API_KEY"

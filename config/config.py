@@ -146,7 +146,6 @@ def _validate_pattern_llm(pattern_llm: Dict[str, Any]) -> None:
                     bad = set(sub_cfg.keys()) & _PATTERN_LLM_SUBKEYS
                     unknown = set(sub_cfg.keys()) - _ORCHESTRATION_FIELDS
                     if bad or unknown:
-                        import logging
                         logging.getLogger(__name__).warning(
                             "pattern_llm.%s.%s.%s 含非法嵌套/未知字段 %s，已忽略",
                             pcode, key, sub_code, sorted(bad | unknown))
@@ -155,10 +154,22 @@ def _validate_pattern_llm(pattern_llm: Dict[str, Any]) -> None:
                             if k in _ORCHESTRATION_FIELDS
                         }
             elif key not in _ORCHESTRATION_FIELDS:
-                import logging
                 logging.getLogger(__name__).warning(
                     "pattern_llm.%s 含未知字段 '%s'，已忽略", pcode, key)
                 pattern_llm[pcode].pop(key)
+
+
+def _validate_llm_providers(providers: Dict[str, Any]) -> None:
+    """llm_providers 各段字段超出连接词表 → warning 后剔除（spec §3.4）。"""
+    for code, conn in providers.items():
+        if not isinstance(conn, dict):
+            raise ValueError(f"llm_providers.{code} 应为字典")
+        unknown = set(conn.keys()) - _CONNECTION_FIELDS
+        if unknown:
+            logging.getLogger(__name__).warning(
+                "llm_providers.%s 含未知连接字段 %s，已忽略", code, sorted(unknown))
+            providers[code] = {k: v for k, v in conn.items()
+                               if k in _CONNECTION_FIELDS}
 
 
 def load_config(config_path: str = "") -> Dict[str, Any]:
@@ -227,6 +238,7 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
         )
     if not isinstance(llm_providers, dict):
         raise ValueError("llm_providers 应为字典")
+    _validate_llm_providers(llm_providers)
     pattern_llm = raw.get("pattern_llm") or {}
     if not isinstance(pattern_llm, dict):
         raise ValueError("pattern_llm 应为字典")
@@ -256,7 +268,7 @@ def _resolve_layered(cfg: Dict[str, Any], pattern_code: str,
     merged = dict(cfg["llm_default"])
     pcfg = cfg.get("pattern_llm", {}).get(pattern_code) if pattern_code else None
     if pattern_code and pcfg is None:
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__).debug(
             "pattern_llm 未配置 pattern '%s'，回退全局默认", pattern_code)
     if pcfg:
         merged.update({k: v for k, v in pcfg.items() if k not in _PATTERN_LLM_SUBKEYS})
@@ -285,13 +297,21 @@ def get_llm_config(pattern_code: str = "", module_code: str = "",
     其余情况：三层合并后并入连接层；yaml 加载失败照常抛出。
     """
     if override is not None:
+        # override 只携带用户显式字段（code/model 可能缺一），缺 code 时
+        # 从 llm_default 并入兜底（build_provider 依赖 llm_config["code"]）
+        merged = dict(override)
+        code = merged.get("code") or ""
         try:
-            providers = load_config(config_path).get("llm_providers", {})
+            cfg = load_config(config_path)
         except Exception:
             logging.getLogger(__name__).warning(
-                "override 路径加载配置失败，连接层降级为空: %s", override.get("code"))
-            providers = {}
-        return _merge_connection(dict(override), providers)
+                "override 路径加载配置失败，连接层降级为空: %s", code or None)
+            cfg = {}
+        if not code:
+            default_code = (cfg.get("llm_default") or {}).get("code", "")
+            if default_code:
+                merged["code"] = default_code
+        return _merge_connection(merged, cfg.get("llm_providers", {}))
     cfg = load_config(config_path)
     return _merge_connection(
         _resolve_layered(cfg, pattern_code, module_code, node_code),

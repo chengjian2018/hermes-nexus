@@ -42,7 +42,7 @@ from src.dialogue.base import (
     PipelineStage,
     fill_prompt_template,
 )
-from src.dialogue.nlu import BaseNLU
+from src.dialogue.nlu.nlu import BaseNLU
 from src.prompt import (
     FSM_UNIFIED_DEFAULT_PROMPT,
     ROUTE_UNIFIED_DEFAULT_PROMPT,

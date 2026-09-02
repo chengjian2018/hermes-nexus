@@ -108,7 +108,7 @@ def test_call_llm_with_none_config_uses_loaded_config(monkeypatch):
 def test_call_llm_with_none_config_loads_real_yaml(monkeypatch):
     """回退路径读取真实 local_config.yaml 时能构建出配置生效的 provider。"""
     from src.dialogue.nlg import FSMNLG
-    import src.dialogue.nlg as nlg_module
+    import src.dialogue.nlg.nlg as nlg_module
 
     built = {}
 

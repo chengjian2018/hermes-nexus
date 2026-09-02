@@ -12,8 +12,8 @@ flowchart TB
     main --> chan["channel/xianyu.py<br/>闲鱼外挂决策口适配<br/>(声明式 ChannelSpec · 通用 handler)"]
 
     chat --> base["dialogue/base.py<br/>PipelineStage<br/>DialogueContext<br/>SessionMessage"]
-    chat --> nlu["dialogue/nlu.py<br/>FSMNLU · RouteNLU"]
-    chat --> nlg["dialogue/nlg.py"]
+    chat --> nlu["dialogue/nlu/nlu.py<br/>FSMNLU · RouteNLU"]
+    chat --> nlg["dialogue/nlg/nlg.py"]
     chat --> uni["dialogue/unified.py<br/>统一阶段(单次调用 NLU+NLG)<br/>FSMUnifiedNLU · RouteUnifiedNLU · PassThroughNLG"]
     chat --> disp["dialogue/dispatch.py<br/>模块分发原语 dispatch()<br/>同轮移交 · 回弹拒绝"]
     chat --> loop2["chat/loop.py<br/>Agent ReAct 循环<br/>工具授权过滤 · 借出工具解析"]

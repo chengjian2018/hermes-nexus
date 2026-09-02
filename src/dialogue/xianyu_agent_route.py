@@ -35,7 +35,7 @@ Pattern 结构（对齐 car_sales_route 的 ROUTE 模式）：
 
 from src.dialogue.base import PipelineStage
 from src.dialogue.module import RouteModule
-from src.dialogue.nlg import BaseNLG, RouteNLG
+from src.dialogue.nlg.nlg import BaseNLG, RouteNLG
 from src.dialogue.node import BaseNode
 from src.dialogue.pattern import Pattern
 from src.dialogue.register import registry

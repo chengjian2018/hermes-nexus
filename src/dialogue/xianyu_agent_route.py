@@ -162,7 +162,7 @@ class XianyuIntentNLU(BaseNLU):
     """闲鱼意图分类 stage —— 复刻 IntentRouter 规则层 + ClassifyAgent 兜底。
 
     契约与框架 NLU 一致（execute(ctx) -> ctx，写 ctx.nlu_result），
-    挂在 RouteModule 模块级 nlu_stage（node 无覆盖时生效）。
+    挂在 RouteModule 模块级 generate dict 的 nlu 位（node 无覆盖时生效）。
 
     路由层级（复刻 IntentRouter.detect 的三级策略，技术优先）：
         1. 本地 tech 关键词/正则（detect_intent，零 LLM）

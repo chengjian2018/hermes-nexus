@@ -61,7 +61,7 @@ flowchart TB
   惰性子部件，各自在执行时刻解析（ROUTE：`[nlu, _RouteNodeAdvance, nlg]`；FSM+enable_clarify：
   `[nlu, ClarifyStage, nlg]`）
 - **PipelineStage**：可插拔管线步骤，`execute(ctx) -> ctx`；ctx 即 `DialogueContext` 全程数据载体
-- **统一阶段（unified.py）**：单次调用 + structured output 的 NLU+NLG 合一形态——一次 LLM 调用产出 `{"reply","next_node","slots"}`，拆写 `ctx.nlu_result`/`ctx.nlg_result`；`next_node` 由代码按合法转移边硬校验（开启 `enable_clarify` 的模块放行 `"clarify"`，与 ClarifyStage 组合成 `[统一, 澄清, PassThroughNLG]` 管线）。module 级注入（`nlu_stage=FSMUnifiedNLU()/RouteUnifiedNLU(), nlg_stage=PassThroughNLG()`），替换默认两阶段（每轮 2 次调用 → 1 次；澄清轮 2 次，与两阶段+澄清持平）
+- **统一阶段（unified.py）**：单次调用 + structured output 的 NLU+NLG 合一形态——一次 LLM 调用产出 `{"reply","next_node","slots"}`，拆写 `ctx.nlu_result`/`ctx.nlg_result`；`next_node` 由代码按合法转移边硬校验（开启 `enable_clarify` 的模块放行 `"clarify"`，ClarifyStage 在 generate 展开的 nlu/nlg 部件之间执行）。module 级注入（`generate=FSMUnifiedNLU()/RouteUnifiedNLU()`，generate 单 stage 形态，nlu 部件执行、nlg 部件守卫 no-op），替换默认两阶段（每轮 2 次调用 → 1 次；澄清轮 2 次，与两阶段+澄清持平）
 - **Session**：持有 `cxt`（DialogueContext）；每轮更新 `user_query`，轮末回写状态
 - **SessionStore**：SQLite write-through 审计流水（sessions 快照 + messages 行级消息），
   兼重启恢复数据源；治理仍在内存，DB 非事实源（`chat/store.py`）
@@ -75,7 +75,7 @@ flowchart TB
   错误一律非 200（对方 parse 契约：非 200 不发送）
 - **xianyu_agent pattern**：闲鱼卖家客服流程（`dialogue/xianyu_agent_route.py`），
   复刻 xianyu-auto-reply 的 agent 对话管理：单 RouteModule 内 XianyuIntentNLU
-  （本地关键词意图检测 price/tech/default，零 LLM，模块级 nlu_stage）+ 意图级
+  （本地关键词意图检测 price/tech/default，零 LLM，模块级 generate dict 的 nlu 位）+ 意图级
   节点 `base_nlg_prompt`（议价/技术/通用三套模板）+ 议价轮数控制（user 消息
   metadata 回标 intent 计数，达上限切拒绝节点走 FixedNLG 固定话术，零 LLM）。
   ROUTE 轮末回 root 与原实现"每条消息独立检测"同构；议价设置经

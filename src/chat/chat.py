@@ -47,16 +47,6 @@ def _refresh_llm_config(session: Session, module_code: str = "",
     )
 
 
-def _refresh_llm_config_from_ctx(cxt) -> None:
-    """stage 内版本：pattern/module code 取自 cxt（R4 专用）。"""
-    cxt.llm_config = get_llm_config(
-        pattern_code=cxt.metadata.get("pattern_code", ""),
-        module_code=cxt.current_module_code or "",
-        node_code=cxt.current_node_code or "",
-        override=cxt.metadata.get("llm_override"),
-    )
-
-
 def chat(query: str, session_id: str, all_sessions: Dict[str, Session]) -> str:
     """Handle a user dialogue request.
 

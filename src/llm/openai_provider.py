@@ -204,7 +204,7 @@ registry.register(
     description="OpenAI and OpenAI-compatible API provider",
     provider_class=OpenAICompatibleProvider,
     default_model="qwen3.8-max",
-    models=["qwen3.7-plus", "qwen3.8-max"],
+    models=["qwen3.7-plus", "qwen3.8-max", "qwen3.8-flash"],
     api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
     api_key_env="DASHSCOPE_API_KEY",
 )

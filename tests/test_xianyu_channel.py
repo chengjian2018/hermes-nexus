@@ -5,6 +5,7 @@ launch、过期消息吞掉、token 校验与错误响应契约；集成层走 m
 （会话治理 + store 落盘），main.chat 打桩保持离线。
 """
 
+import os
 import time
 from types import SimpleNamespace
 
@@ -13,7 +14,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.chat.store import SessionStore
-from src.channel.xianyu import build_xianyu_router
+from src.channel.base import EngineOps
+from src.channel.webhooks import build_channel_router
+from src.channel.xianyu import XianyuChannel
 
 
 # ============================================================================
@@ -21,11 +24,20 @@ from src.channel.xianyu import build_xianyu_router
 # ============================================================================
 
 class ChannelHarness:
-    """fake 引擎操作 + 独立 FastAPI app，记录调用供断言。"""
+    """fake 引擎操作 + 独立 FastAPI app，记录调用供断言。
+
+    pattern/token 通过环境变量注入（通用 handler 每请求读取），post() 帮助
+    方法在请求期间设置并在结束后还原。
+    """
 
     def __init__(self, pattern_code="demo_pattern", token=None):
         self.pattern_code = pattern_code
         self.token = token
+        self._env = {}
+        if pattern_code is not None:
+            self._env["XIANYU_CHANNEL_PATTERN"] = pattern_code
+        if token is not None:
+            self._env["XIANYU_CHANNEL_TOKEN"] = token
         self.sessions = {}
         self.launch_calls = []
         self.run_calls = []
@@ -59,14 +71,28 @@ class ChannelHarness:
             return f"echo:{query}", None
 
         app = FastAPI()
-        app.include_router(build_xianyu_router(
-            get_session=get_session,
-            launch_session=launch_session,
-            run_chat_turn=run_chat_turn,
-            pattern_code_lookup=lambda: self.pattern_code,
-            token_lookup=(lambda: self.token) if token else None,
+        app.include_router(build_channel_router(
+            XianyuChannel(),
+            EngineOps(
+                get_session=get_session,
+                launch_session=launch_session,
+                run_chat_turn=run_chat_turn,
+            ),
         ))
         self.client = TestClient(app)
+
+    def post(self, path, json=None, params=None):
+        """带 env 注入的 POST：请求期间设置环境变量，结束还原。"""
+        saved = {k: os.environ.get(k) for k in self._env}
+        try:
+            os.environ.update(self._env)
+            return self.client.post(path, json=json, params=params)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 def inbound(**overrides):
@@ -86,7 +112,7 @@ def inbound(**overrides):
 def test_first_message_auto_launches():
     """首条消息自动 launch：session_id 派生、task_info 提取、exist_ok 语义。"""
     h = ChannelHarness()
-    resp = h.client.post("/api/v1/channel/xianyu", json=inbound())
+    resp = h.post("/api/v1/channel/xianyu", json=inbound())
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["reply"] == "echo:你好"
@@ -109,8 +135,8 @@ def test_first_message_auto_launches():
 def test_second_message_reuses_session():
     """同会话第二条消息复用既有 session，不再 launch。"""
     h = ChannelHarness()
-    h.client.post("/api/v1/channel/xianyu", json=inbound())
-    h.client.post("/api/v1/channel/xianyu", json=inbound(message="多少钱"))
+    h.post("/api/v1/channel/xianyu", json=inbound())
+    h.post("/api/v1/channel/xianyu", json=inbound(message="多少钱"))
 
     assert len(h.launch_calls) == 1
     assert h.run_calls == [
@@ -122,7 +148,7 @@ def test_second_message_reuses_session():
 def test_unknown_session_without_pattern_503():
     """会话不存在且未配置 pattern：503，不触碰引擎。"""
     h = ChannelHarness(pattern_code=None)
-    resp = h.client.post("/api/v1/channel/xianyu", json=inbound())
+    resp = h.post("/api/v1/channel/xianyu", json=inbound())
     assert resp.status_code == 503
     assert h.launch_calls == [] and h.run_calls == []
 
@@ -131,7 +157,7 @@ def test_launch_failure_maps_500():
     """自动 launch 失败（如 pattern 未注册）映射 500。"""
     h = ChannelHarness()
     h.launch_error = ("404", "pattern_code 'x' 未注册")
-    resp = h.client.post("/api/v1/channel/xianyu", json=inbound())
+    resp = h.post("/api/v1/channel/xianyu", json=inbound())
     assert resp.status_code == 500
     assert "未注册" in resp.json()["detail"]
 
@@ -140,7 +166,7 @@ def test_run_error_maps_500():
     """引擎单轮异常映射 500，不带 reply（对方不会发送任何内容）。"""
     h = ChannelHarness()
     h.run_error = RuntimeError("LLM 超时")
-    resp = h.client.post("/api/v1/channel/xianyu", json=inbound())
+    resp = h.post("/api/v1/channel/xianyu", json=inbound())
     assert resp.status_code == 500
     assert "LLM 超时" in resp.json()["detail"]
 
@@ -149,7 +175,7 @@ def test_stale_message_swallowed():
     """过期消息（重连重放）吞掉：200 + 空 reply，不 launch 不对话。"""
     h = ChannelHarness()
     stale_ms = str(int((time.time() - 600) * 1000))
-    resp = h.client.post(
+    resp = h.post(
         "/api/v1/channel/xianyu", json=inbound(msg_time=stale_ms)
     )
     assert resp.status_code == 200
@@ -160,7 +186,7 @@ def test_stale_message_swallowed():
 def test_unparseable_msg_time_passes_through():
     """msg_time 格式无法识别时不过滤，正常对话。"""
     h = ChannelHarness()
-    resp = h.client.post(
+    resp = h.post(
         "/api/v1/channel/xianyu", json=inbound(msg_time="不是时间")
     )
     assert resp.status_code == 200
@@ -170,10 +196,10 @@ def test_unparseable_msg_time_passes_through():
 def test_token_rejects_wrong_and_accepts_right():
     """配置 token 后：错 token 403，对 token 放行。"""
     h = ChannelHarness(token="s3cret")
-    resp = h.client.post("/api/v1/channel/xianyu", json=inbound())
+    resp = h.post("/api/v1/channel/xianyu", json=inbound())
     assert resp.status_code == 403
 
-    resp = h.client.post(
+    resp = h.post(
         "/api/v1/channel/xianyu", json=inbound(), params={"token": "s3cret"}
     )
     assert resp.status_code == 200
@@ -185,7 +211,7 @@ def test_missing_required_field_422():
     h = ChannelHarness()
     payload = inbound()
     del payload["message"]
-    resp = h.client.post("/api/v1/channel/xianyu", json=payload)
+    resp = h.post("/api/v1/channel/xianyu", json=payload)
     assert resp.status_code == 422
 
 
@@ -193,7 +219,7 @@ def test_success_body_has_no_fallback_keys():
     """成功响应体不得携带 data/content/message 键：reply 为空时对方会依次
     取这三个键，误带会把调试信息发给买家。"""
     h = ChannelHarness()
-    resp = h.client.post("/api/v1/channel/xianyu", json=inbound())
+    resp = h.post("/api/v1/channel/xianyu", json=inbound())
     assert set(resp.json().keys()) <= {"reply", "session_id"}
 
 

@@ -8,7 +8,9 @@ import fastapi
 from pydantic import BaseModel
 
 from config.config import get_session_db_path
-from src.channel.xianyu import build_xianyu_router
+from src.channel.base import EngineOps
+from src.channel.register import discover_builtin_channels
+from src.channel.webhooks import build_channel_routers
 from src.chat.chat import chat
 from src.chat.session import Session
 from src.chat.store import SessionStore
@@ -388,15 +390,15 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
 
 
 # ----channel 接线（外部消息源 → 引擎操作）----
-# 闲鱼 xianyu-auto-reply 的"默认回复 API"外挂决策口：pattern/token 走环境变量
-# （XIANYU_CHANNEL_PATTERN / XIANYU_CHANNEL_TOKEN），每次请求时读取可热改
-app.include_router(build_xianyu_router(
+# AST 自动发现 src/channel/*.py 的声明式渠道（token/默认 pattern 走各渠道
+# 声明的环境变量，每次请求时读取可热改），通用 handler 生成 router
+discover_builtin_channels()
+for _router in build_channel_routers(EngineOps(
     get_session=_get_session,
     launch_session=_launch_session_core,
     run_chat_turn=_run_chat_turn_core,
-    pattern_code_lookup=lambda: os.getenv("XIANYU_CHANNEL_PATTERN") or None,
-    token_lookup=lambda: os.getenv("XIANYU_CHANNEL_TOKEN") or None,
-))
+)):
+    app.include_router(_router)
 
 
 # func3（只读审计）

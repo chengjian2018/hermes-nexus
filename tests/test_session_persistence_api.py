@@ -78,7 +78,7 @@ def chat(client, session_id, query):
 def _use_fake_llm(session_id):
     import main
 
-    main.all_sessions[session_id].cxt.llm_config = fake_llm_config()
+    main.all_sessions[session_id].cxt.metadata["llm_override"] = fake_llm_config()
 
 
 def test_launch_chat_persisted(client, store, registry_guard):
@@ -222,7 +222,7 @@ def test_restart_recovery_restores_and_continues(client, store, registry_guard):
     assert "rs-1" in main._session_last_active  # 活跃时间已换算登记
 
     # 恢复后继续对话：新消息接在还原 history 之后，DB 侧流水连续
-    session.cxt.llm_config = fake_llm_config()
+    session.cxt.metadata["llm_override"] = fake_llm_config()
     body = chat(client, "rs-1", "我想买车")
     assert body["status"] is True, body["message"]
 

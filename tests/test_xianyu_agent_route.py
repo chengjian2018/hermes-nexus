@@ -66,7 +66,7 @@ def launch(pattern, sessions, session_id="s1", bargain_settings=None):
     }
     if bargain_settings is not None:
         session.cxt.metadata["bargain_settings"] = bargain_settings
-    session.cxt.llm_config = fake_llm_config()
+    session.cxt.metadata["llm_override"] = fake_llm_config()
     sessions[session_id] = session
     return session
 

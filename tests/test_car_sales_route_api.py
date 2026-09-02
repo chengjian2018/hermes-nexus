@@ -41,7 +41,7 @@ def session_id(client):
     # 注入脚本化 provider，避免走真实 LLM
     import main
 
-    main.all_sessions["api-s1"].cxt.llm_config = fake_llm_config()
+    main.all_sessions["api-s1"].cxt.metadata["llm_override"] = fake_llm_config()
     return "api-s1"
 
 

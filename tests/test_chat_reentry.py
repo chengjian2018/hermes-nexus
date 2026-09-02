@@ -29,7 +29,7 @@ def _launch(pattern, sessions, sid="s1"):
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
     session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
-    session.cxt.llm_config = {"code": "x", "model": "m"}
+    session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions[sid] = session
     return session
 

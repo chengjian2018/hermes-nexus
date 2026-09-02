@@ -61,7 +61,7 @@ def launch(pattern, sessions, session_id="s1"):
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
     session.cxt.metadata["task_info"] = {}
-    session.cxt.llm_config = fake_llm_config()
+    session.cxt.metadata["llm_override"] = fake_llm_config()
     sessions[session_id] = session
     return session
 

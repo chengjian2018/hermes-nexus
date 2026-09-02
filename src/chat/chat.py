@@ -27,6 +27,32 @@ from config.config import get_llm_config
 logger = logging.getLogger(__name__)
 
 
+def _refresh_llm_config(session: Session, module_code: str = "",
+                        node_code: str = "") -> None:
+    """按当前位置解析 LLM 配置并写入 cxt.llm_config（spec §4，R1-R4 共用）。
+
+    override（cxt.metadata["llm_override"]）存在即采用；解析失败向上抛
+    （R1 包装为显式错误回复，R2-R4 走 chat() 的统一异常处理）。
+    """
+    cxt = session.cxt
+    cxt.llm_config = get_llm_config(
+        pattern_code=session.pattern_code or cxt.metadata.get("pattern_code", ""),
+        module_code=module_code or cxt.current_module_code or "",
+        node_code=node_code or cxt.current_node_code or "",
+        override=cxt.metadata.get("llm_override"),
+    )
+
+
+def _refresh_llm_config_from_ctx(cxt) -> None:
+    """stage 内版本：pattern/module code 取自 cxt（R4 专用）。"""
+    cxt.llm_config = get_llm_config(
+        pattern_code=cxt.metadata.get("pattern_code", ""),
+        module_code=cxt.current_module_code or "",
+        node_code=cxt.current_node_code or "",
+        override=cxt.metadata.get("llm_override"),
+    )
+
+
 def chat(query: str, session_id: str, all_sessions: Dict[str, Session]) -> str:
     """Handle a user dialogue request.
 
@@ -76,13 +102,14 @@ def chat(query: str, session_id: str, all_sessions: Dict[str, Session]) -> str:
         logger.warning("模块不存在: %s", current_module_code)
         return f"模块 '{current_module_code}' 不存在"
 
-    # Ensure LLM config is injected into the context
-    if session.cxt.llm_config is None:
-        try:
-            session.cxt.llm_config = get_llm_config()
-        except Exception as e:
-            logger.error("加载 LLM 配置失败: %s", e)
-            return f"LLM 配置加载失败: {e}"
+    # Ensure LLM config is injected into the context（R1：每轮按当前位置解析，
+    # override 优先；spec §4）
+    session.cxt.metadata["pattern_code"] = session.pattern_code
+    try:
+        _refresh_llm_config(session)
+    except Exception as e:
+        logger.error("加载 LLM 配置失败: %s", e)
+        return f"LLM 配置加载失败: {e}"
 
     # Record user message
     session.cxt.add_message("user", query, stage="chat")
@@ -163,6 +190,7 @@ def _handle_agent_module(session: Session, module,
         TurnResult: reply 与 dispatch_event 互斥
     """
     logger.info("Agent 模块处理: module=%s", module.module_code)
+    _refresh_llm_config(session, module_code=module.module_code)  # R2
     return run_agent(session, module, session.cxt.llm_config,
                      force_close=force_close)
 
@@ -216,6 +244,10 @@ def _run_pipeline(session: Session, module,
         raise ValueError(
             f"节点 '{cxt.current_node_code}' 不存在于 node_map 中"
         )
+
+    # R3：节点解析完按 module+node 刷新 LLM 配置（spec §4）
+    _refresh_llm_config(session, module_code=module.module_code,
+                        node_code=cxt.current_node_code)
 
     # ------------------------------------------------------------------
     # Get pipeline stages: prefer pattern-registered stages, else build default
@@ -319,6 +351,9 @@ class _RouteNodeAdvance(PipelineStage):
                 next_node_code,
             )
             ctx.current_node_code = next_node_code
+            # R4：菜单节点 node 级 LLM 配置当轮生效（spec §4；pattern_code
+            # 取 R1 写入的 metadata，ROUTE 每轮从 root 出发永不定居菜单节点）
+            _refresh_llm_config_from_ctx(ctx)
 
         return ctx
 

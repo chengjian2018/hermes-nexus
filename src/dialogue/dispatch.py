@@ -26,7 +26,7 @@ class ModuleDispatch:
     source: str = ""      # handoff_tool / route_menu / jump_tag
 
 
-def dispatch(ctx: "DialogueContext", event: ModuleDispatch) -> bool:
+def dispatch(ctx: DialogueContext, event: ModuleDispatch) -> bool:
     """执行模块转移：邻接校验 → 状态转移 → 记账。
 
     Returns:

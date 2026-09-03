@@ -29,7 +29,7 @@ def _launch(pattern, sessions, sid="s1"):
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
     session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
-    session.cxt.llm_config = {"code": "x", "model": "m"}
+    session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions[sid] = session
     return session
 
@@ -100,7 +100,7 @@ def test_force_close_route_returns_nonempty_reply():
     router = RouteModule(
         module_code="router", module_name="路由",
         module_nodes=[root, menu], sub_modules=["buy_agent"],
-        nlu_stage=_FakeRouteNLU(), nlg_stage=_FakeRouteNLG())
+        generate={"nlu": _FakeRouteNLU(), "nlg": _FakeRouteNLG()})
     reception = AgentModule(
         module_code="reception", module_name="前台", module_description="接待",
         sub_modules=[ModuleLink(target="router")])

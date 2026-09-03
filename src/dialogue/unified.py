@@ -16,9 +16,11 @@ Unified stage —— 单次调用 + structured output：一次 LLM 调用同时�
 - ctx.nlg_result = {"content": reply}          —— 下游回复提取零改动
 - ctx.metadata["unified"] = 观测信息（invalid_next_node / parse_failed 等）
 
-接入方式（module 级注入，无需改装配代码）：
-    FSMModule(nlu_stage=FSMUnifiedNLU(), nlg_stage=PassThroughNLG())
-    RouteModule(nlu_stage=RouteUnifiedNLU(), nlg_stage=PassThroughNLG())
+接入方式（module 级 generate 注入，经默认骨架 GenerateSlot 解析命中）：
+    FSMModule(generate=FSMUnifiedNLU())
+    RouteModule(generate=RouteUnifiedNLU())
+（node 级 generate 优先于 module 级，见 stage_slots.py；PassThroughNLG
+保留为独立工具类，generate 单 stage 形态下不再需要占位 NLG）
 
 与双轨澄清组合（enable_clarify=True 的 FSM 模块）：
     管线装配为 [统一阶段, ClarifyStage, PassThroughNLG]。
@@ -42,7 +44,7 @@ from src.dialogue.base import (
     PipelineStage,
     fill_prompt_template,
 )
-from src.dialogue.nlu import BaseNLU
+from src.dialogue.nlu.nlu import BaseNLU
 from src.prompt import (
     FSM_UNIFIED_DEFAULT_PROMPT,
     ROUTE_UNIFIED_DEFAULT_PROMPT,
@@ -264,8 +266,8 @@ class _UnifiedBaseNLU(BaseNLU):
 class FSMUnifiedNLU(_UnifiedBaseNLU):
     """FSM 模块统一阶段：一次结构化调用完成意图/槽位抽取与回复生成。
 
-    配套 ``PassThroughNLG`` 注入 module.nlg_stage 后，FSM 管线由
-    [NLU, NLG] 两次 LLM 调用变为 [统一阶段, 占位 NLG] 单次调用；
+    配套 ``PassThroughNLG``（generate dict 的 nlg 位）后，FSM 管线由
+    [NLU, NLG] 两次 LLM 调用变为统一阶段单次调用；
     节点跳转与槽位合并逻辑（_handle_node_transition）零改动。
     """
 
@@ -329,8 +331,9 @@ class RouteUnifiedNLU(_UnifiedBaseNLU):
 class PassThroughNLG(PipelineStage):
     """占位 NLG 阶段：保留统一阶段已写入的 nlg_result，跳过二次生成。
 
-    用法：``module.nlg_stage = PassThroughNLG()``，与统一阶段
-    （FSMUnifiedNLU / RouteUnifiedNLU）配对，替换默认 NLG 的第二次 LLM 调用。
+    用法：``module.generate = {"nlu": FSMUnifiedNLU()/RouteUnifiedNLU(),
+    "nlg": PassThroughNLG()}``（或统一阶段直接作 generate 单 stage 形态，
+    nlg 部件守卫自动 no-op），替换默认 NLG 的第二次 LLM 调用。
 
     澄清轮等其他先行阶段覆写 nlg_result 时同样直接放行；
     若管线中没有阶段先行生成 nlg_result（装配错误），本轮回复为空并告警。
@@ -342,7 +345,8 @@ class PassThroughNLG(PipelineStage):
         if ctx.nlg_result is None:
             logger.warning(
                 "PassThroughNLG 未检测到已生成的 nlg_result，"
-                "请确认统一阶段已配置为 module 的 nlu_stage: session=%s",
+                "请确认统一阶段已配置为 module 的 generate（单 stage 形态）"
+                "或 pattern.stages 显式装配: session=%s",
                 ctx.session_id,
             )
             ctx.nlg_result = {"content": ""}

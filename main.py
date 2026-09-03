@@ -1,12 +1,15 @@
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import fastapi
 from pydantic import BaseModel
 
 from config.config import get_session_db_path
+from src.channel.base import EngineOps
+from src.channel.register import discover_builtin_channels
+from src.channel.webhooks import build_channel_routers
 from src.chat.chat import chat
 from src.chat.session import Session
 from src.chat.store import SessionStore
@@ -148,14 +151,40 @@ def _restore_sessions() -> int:
     return restored
 
 
+def _cross_check_pattern_llm(config_path: str = "") -> None:
+    """交叉校验 pattern_llm 的 code 存在性（spec §5）：未知仅 warning 不阻断。"""
+    from config.config import load_config
+    try:
+        pattern_llm = load_config(config_path).get("pattern_llm", {})
+    except Exception:
+        logger.exception("加载配置失败，跳过 pattern_llm 交叉校验")
+        return
+    for pcode, pcfg in pattern_llm.items():
+        pattern = pattern_registry.get(pcode)
+        if pattern is None:
+            logger.warning("pattern_llm 配置了未注册的 pattern '%s'", pcode)
+            continue
+        for mcode in (pcfg.get("modules") or {}):
+            if mcode not in pattern.module_map:
+                logger.warning(
+                    "pattern '%s' 的 pattern_llm.modules 配置了未注册 module '%s'",
+                    pcode, mcode)
+        for ncode in (pcfg.get("nodes") or {}):
+            if ncode not in pattern.node_map:
+                logger.warning(
+                    "pattern '%s' 的 pattern_llm.nodes 配置了未注册 node '%s'",
+                    pcode, ncode)
+
+
 @app.on_event("startup")
 def _startup_persistence() -> None:
-    """服务启动：初始化会话存储 + 恢复未过期会话。"""
+    """服务启动：初始化会话存储 + 恢复未过期会话 + 交叉校验 pattern_llm。"""
     _init_store()
     try:
         _restore_sessions()
     except Exception:
         logger.exception("重启恢复失败，跳过恢复")
+    _cross_check_pattern_llm()
 
 
 # # check aleady registried patterns and tools
@@ -232,94 +261,94 @@ class SessionMessagesResponse(BaseModel):
 
 
 
-# func1
-# 外呼任务发起：根据pattern_code注册一个对话任务，并新增session
-@app.post("/api/v1/launch")
-def launch_dialogue(dialogue_request: DialogueRequest) -> DialogueResponse:
-    pattern_code = dialogue_request.pattern_code
+# ----引擎操作核心（endpoint 与 channel 共用；channel 由 main 注入这些函数）----
 
-    # 1. 校验 pattern_code 是否已注册
+def _launch_session_core(
+    pattern_code: str,
+    session_id: str,
+    task_info: Dict[str, str],
+    request_id: str,
+    exist_ok: bool = False,
+) -> Tuple[Optional[Session], str, str]:
+    """launch 核心：pattern 校验 + 会话治理（清理/查重/逐出）+ 审计落盘。
+
+    Args:
+        exist_ok: True 时 session_id 已存在视为成功并返回既有 session
+            （channel 的 get-or-create 语义），不覆盖原会话。
+
+    Returns:
+        (session, code, message)：code == "0" 成功；失败时 session 为 None，
+        code/message 语义与 /api/v1/launch 响应一致。
+    """
     pattern = pattern_registry.get(pattern_code)
     if pattern is None:
-        return DialogueResponse(
-            code="404",
-            status=False,
-            message=f"pattern_code '{pattern_code}' 未注册，已注册: {pattern_registry.list_codes()}",
+        return None, "404", (
+            f"pattern_code '{pattern_code}' 未注册，已注册: {pattern_registry.list_codes()}"
         )
 
-    # 2. 会话治理：清理过期会话；session_id 重复时报错而非静默覆盖；达到上限逐出最旧
     with _sessions_lock:
         _purge_expired_sessions()
 
-        if dialogue_request.session_id in all_sessions:
-            return DialogueResponse(
-                code="409",
-                status=False,
-                message=(
-                    f"session_id '{dialogue_request.session_id}' 已存在，"
-                    f"请更换 session_id 重新发起"
-                ),
+        existing = all_sessions.get(session_id)
+        if existing is not None:
+            if exist_ok:
+                _touch_session(session_id)
+                return existing, "0", f"session_id '{session_id}' 已存在，复用既有会话"
+            return None, "409", (
+                f"session_id '{session_id}' 已存在，请更换 session_id 重新发起"
             )
 
         _evict_oldest_if_over_limit()
 
-        # 3. 实例化 session，填充 pattern 与任务信息
-        session = Session(session_id=dialogue_request.session_id, pattern_code=pattern_code)
+        session = Session(session_id=session_id, pattern_code=pattern_code)
         session.pattern = pattern
-        session.task_info = dialogue_request.task_info
-
-        # 4. 注入管线上下文：node_map / module_map 供 pipeline 各阶段使用
+        session.task_info = task_info
         session.cxt.module_map = pattern.module_map
         session.cxt.node_map = pattern.node_map
-        session.cxt.metadata["task_info"] = dialogue_request.task_info
-        session.cxt.metadata["request_id"] = dialogue_request.request_id
+        session.cxt.metadata["task_info"] = task_info
+        session.cxt.metadata["request_id"] = request_id
 
-        # 5. 登记 session 并记录活跃时间
-        all_sessions[dialogue_request.session_id] = session
-        _touch_session(dialogue_request.session_id)
+        all_sessions[session_id] = session
+        _touch_session(session_id)
 
-    # 6. 审计落盘（内存登记成功后）；失败仅记日志，不阻断 launch
+    # 审计落盘（内存登记成功后）；失败仅记日志，不阻断 launch
     if store is not None:
         try:
             store.create_session(session)
         except Exception:
-            logger.exception("会话落盘失败: session=%s", dialogue_request.session_id)
+            logger.exception("会话落盘失败: session=%s", session_id)
 
-    return DialogueResponse(
-        code="0",
-        status=True,
-        message=f"对话任务发起成功: session_id={dialogue_request.session_id}",
-    )
+    return session, "0", f"对话任务发起成功: session_id={session_id}"
 
 
-# func2
-# 对话请求：根据 session_id 获取 session，处理用户 query
-@app.post("/api/v1/chat")
-def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
-    # 1. 清理过期会话后校验 session 是否存在，命中则刷新活跃时间（滑动续期）
+def _get_session(session_id: str) -> Optional[Session]:
+    """治理感知的会话查询：过期清理 + 命中刷新活跃时间（滑动续期）。"""
     with _sessions_lock:
         _purge_expired_sessions()
-        session = all_sessions.get(chat_request.session_id)
+        session = all_sessions.get(session_id)
         if session is not None:
-            _touch_session(chat_request.session_id)
+            _touch_session(session_id)
+        return session
 
-    if session is None:
-        return ChatResponse(
-            code="404",
-            status=False,
-            message=f"session_id '{chat_request.session_id}' 不存在或已过期，请先发起对话任务",
-        )
 
-    # 2. 调用 chat 函数处理对话。
-    #    锁外执行：LLM 调用耗时长，不能阻塞其他请求；chat 内部持 session 本地引用，
-    #    即便本轮处理中被并发逐出也不影响本次对话
-    # 3. 轮末审计落盘：追加本轮新增消息 + 状态快照（含上方异常路径；失败仅记日志）
+def _run_chat_turn_core(
+    session: Session, query: str
+) -> Tuple[Optional[str], Optional[Exception]]:
+    """单轮对话核心：调用 chat + 轮末审计落盘。
+
+    锁外执行（LLM 调用耗时长，不能阻塞其他请求）；chat 内部按 session_id
+    重取会话，持有本地 session 引用仅供落盘快照，即便本轮处理中被并发逐出
+    也不影响本次对话。异常路径同样落盘（与成功路径一致）。
+
+    Returns:
+        (reply, error)：正常时 error 为 None；reply 为 None 仅出现在异常路径。
+    """
     start_idx = len(session.cxt.history)
     error: Optional[Exception] = None
     try:
         response_text = chat(
-            query=chat_request.query,
-            session_id=chat_request.session_id,
+            query=query,
+            session_id=session.session_id,
             all_sessions=all_sessions,
         )
     except Exception as e:
@@ -330,7 +359,41 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
         try:
             store.save_turn(session, start_idx)
         except Exception:
-            logger.exception("会话轮末落盘失败: session=%s", chat_request.session_id)
+            logger.exception("会话轮末落盘失败: session=%s", session.session_id)
+
+    if error is not None:
+        return None, error
+    return response_text, None
+
+
+# func1
+# 外呼任务发起：根据pattern_code注册一个对话任务，并新增session
+@app.post("/api/v1/launch")
+def launch_dialogue(dialogue_request: DialogueRequest) -> DialogueResponse:
+    _session, code, message = _launch_session_core(
+        pattern_code=dialogue_request.pattern_code,
+        session_id=dialogue_request.session_id,
+        task_info=dialogue_request.task_info,
+        request_id=dialogue_request.request_id,
+    )
+    return DialogueResponse(code=code, status=(code == "0"), message=message)
+
+
+# func2
+# 对话请求：根据 session_id 获取 session，处理用户 query
+@app.post("/api/v1/chat")
+def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
+    # 1. 清理过期会话后校验 session 是否存在，命中则刷新活跃时间（滑动续期）
+    session = _get_session(chat_request.session_id)
+    if session is None:
+        return ChatResponse(
+            code="404",
+            status=False,
+            message=f"session_id '{chat_request.session_id}' 不存在或已过期，请先发起对话任务",
+        )
+
+    # 2. 单轮对话 + 轮末审计落盘（锁外执行，含异常路径）
+    response_text, error = _run_chat_turn_core(session, chat_request.query)
 
     if error is not None:
         return ChatResponse(
@@ -349,6 +412,18 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
             "response": response_text,
         },
     )
+
+
+# ----channel 接线（外部消息源 → 引擎操作）----
+# AST 自动发现 src/channel/*.py 的声明式渠道（token/默认 pattern 走各渠道
+# 声明的环境变量，每次请求时读取可热改），通用 handler 生成 router
+discover_builtin_channels()
+for _router in build_channel_routers(EngineOps(
+    get_session=_get_session,
+    launch_session=_launch_session_core,
+    run_chat_turn=_run_chat_turn_core,
+)):
+    app.include_router(_router)
 
 
 # func3（只读审计）

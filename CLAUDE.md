@@ -7,14 +7,14 @@
 | 层 | 位置 | 改动纪律 |
 |---|---|---|
 | **框架内核** | `src/dialogue/base.py` `module.py` `node.py` `pattern.py` `register.py`、`src/chat/session.py` `loop.py`、`src/llm/*`、`src/tools/register.py` | **串行做**：先出 implementation plan，人工审完再动手；小步 commit；改完跑全量 pytest；同步更新 ARCHITECTURE.md |
-| **框架扩展** | `src/dialogue/nlu.py` `nlg.py` `unified.py` `query.py` `recaller.py`、`src/clarify/*` | 半并行：新加 stage 类较自由；改基类签名算内核改动 |
+| **框架扩展** | `src/dialogue/nlu/` `nlg/` `query/` `recaller/`（包内实现文件）、`src/dialogue/unified.py`、`src/clarify/*` | 半并行：新加 stage 类较自由；改基类签名算内核改动 |
 | **应用层** | `src/dialogue/car_sales_route.py` 等业务 pattern、`src/tools/*_tool.py`、`src/prompt.py` | **可自由并行**（建议 git worktree 隔离） |
 
 约定：
 - 新功能/新工具/新 pattern **一律走注册机制**（`registry.register()` 模块级自注册 + AST 自动发现），不许绕过注册表硬连线
 - 新 stage 继承 `PipelineStage`，通过 `DialogueContext` 传数据，不改基类签名
 - prompt 模板三级优先：node > module > class default
-- 不引入新的全局单例；现有单例只有 pattern/tool/llm 三个 registry
+- 不引入新的全局单例；现有单例只有 pattern/tool/llm/channel 四个 registry
 
 ## 环境
 

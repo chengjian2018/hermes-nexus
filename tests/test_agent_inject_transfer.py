@@ -84,7 +84,7 @@ def _mk_session():
     s.cxt.node_map = p.node_map
     s.cxt.current_module_code = "reception"
     s.cxt.metadata["dispatch_graph"] = p.dispatch_graph
-    s.cxt.llm_config = {"code": "x", "model": "m"}
+    s.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     return s
 
 
@@ -134,7 +134,7 @@ def test_run_agent_direct_reply_with_lent_tool():
         {"content": "您的工单已查到，预计明天完工。", "tool_calls": []},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.llm_config)
+        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "您的工单已查到，预计明天完工。"
     assert result.dispatch_event is None
     assert s.cxt.metadata["served_by_projection"] == {
@@ -156,7 +156,7 @@ def test_run_agent_transfer_returns_dispatch_event():
                                      "arguments": '{"reason": "售后投诉"}'}}]},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.llm_config)
+        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply is None or result.reply == ""
     assert result.dispatch_event is not None
     assert result.dispatch_event.target_module_code == "after_sales"
@@ -176,7 +176,7 @@ def test_takeover_block_injected_for_target():
         {"content": "看到您要投诉，我先记录一下。", "tool_calls": []},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        result = run_agent(s, s.cxt.module_map["after_sales"], s.cxt.llm_config)
+        result = run_agent(s, s.cxt.module_map["after_sales"], s.cxt.metadata["llm_override"])
     assert "reception" in provider.seen[0]["messages"][0]["content"]
     assert "售后投诉" in provider.seen[0]["messages"][0]["content"]
 
@@ -193,7 +193,7 @@ def test_run_agent_transfer_rejected_backfills_error_and_continues():
         {"content": "好的，我直接为您处理。", "tool_calls": []},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.llm_config)
+        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "好的，我直接为您处理。"
     assert result.dispatch_event is None
     # 状态未变
@@ -250,7 +250,7 @@ def test_handoff_context_cleared_next_turn():
     s.cxt.module_map = p.module_map
     s.cxt.node_map = p.node_map
     s.cxt.metadata["dispatch_graph"] = p.dispatch_graph
-    s.cxt.llm_config = {"code": "x", "model": "m"}
+    s.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions = {"s3": s}
 
     provider = ScriptedProvider([
@@ -293,7 +293,7 @@ def test_projection_recall_scoped_to_borrower():
         {"content": "好的，继续为您处理。", "tool_calls": []},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        run_agent(s2, s2.cxt.module_map["reception"], s2.cxt.llm_config)
+        run_agent(s2, s2.cxt.module_map["reception"], s2.cxt.metadata["llm_override"])
     assert "上一轮提示" in provider.seen[0]["messages"][0]["content"]
 
 
@@ -312,7 +312,7 @@ def test_rejected_transfer_backfills_all_tool_calls():
         {"content": "好的，为您处理完毕。", "tool_calls": []},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.llm_config)
+        result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "好的，为您处理完毕。"
     # 第二轮收到的 messages 尾部有两条 role=tool（全部 tool_call_id 有应答）
     second = provider.seen[1]["messages"]
@@ -334,7 +334,7 @@ def test_force_close_no_transfer_tools_and_prompt():
         {"content": "好的，我直接处理。", "tool_calls": []},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        run_agent(s, s.cxt.module_map["reception"], s.cxt.llm_config,
+        run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"],
                   force_close=True)
     first = provider.seen[0]
     assert first["tools"] is not None

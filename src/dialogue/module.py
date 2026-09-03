@@ -12,9 +12,12 @@ the framework default implementation is used when unset.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ModuleType(Enum):
@@ -71,9 +74,8 @@ class BaseModule:
         module_nodes: list of nodes in the module (used by FSM/ROUTE types).
         use_tools: list of tools available to the module.
         base_prompt: module base prompt (used by AGENT type).
-        nlu_stage: module-level NLU stage instance (optional, default when unset).
-        nlg_stage: module-level NLG stage instance (optional, default when unset).
         agent_stage: module-level Agent stage instance (optional, default when unset).
+        generate/pre_recall/query/post_recall: 管线槽位配置（node 级最高优先级）。
         enable_clarify: dual-track clarify switch; when True the FSM module
             integrates ClarifyStage (see src/clarify/).
     """
@@ -92,8 +94,10 @@ class BaseModule:
         base_prompt: Optional[str] = None,
         base_nlu_prompt: Optional[str] = None,
         base_nlg_prompt: Optional[str] = None,
-        nlu_stage: Optional[Any] = None,
-        nlg_stage: Optional[Any] = None,
+        generate: Optional[Any] = None,
+        pre_recall: Optional[Any] = None,
+        query: Optional[Any] = None,
+        post_recall: Optional[Any] = None,
         agent_stage: Optional[Any] = None,
         enable_clarify: bool = False,
         is_end: Optional[bool] = False,
@@ -109,18 +113,32 @@ class BaseModule:
         self.base_prompt = base_prompt
         self.base_nlu_prompt = base_nlu_prompt
         self.base_nlg_prompt = base_nlg_prompt
+
+        # 管线槽位配置（三层优先级 node > module > pattern，执行期由
+        # stage_slots.resolve_stage 延迟解析；generate 支持单 stage 或
+        # {"nlu":…, "nlg":…} dict）
+        self.generate = generate
+        self.pre_recall = pre_recall
+        self.query = query
+        self.post_recall = post_recall
+
         self.sub_modules = _normalize_links(sub_modules)
         self.answer_examples = answer_examples or []
 
-        # Module-level stage instances (priority over default implementations)
-        self.nlu_stage = nlu_stage
-        self.nlg_stage = nlg_stage
         self.agent_stage = agent_stage
 
         # 双轨澄清开关：FSM 模块开启后接入 ClarifyStage（详见 src/clarify/）
         self.enable_clarify = enable_clarify
 
         self.is_end = is_end
+
+        for legacy in ("nlu_stage", "nlg_stage"):
+            if legacy in (kwargs or {}):
+                logger.warning(
+                    "[module] %s=%r 已废弃：槽位配置请改用 generate="
+                    "{'nlu':…, 'nlg':…} 或单 stage（stage_slots.py）",
+                    legacy, kwargs[legacy],
+                )
 
         # Extra attributes
         for key, value in (kwargs or {}).items():

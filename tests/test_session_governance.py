@@ -131,7 +131,7 @@ def test_chat_refreshes_ttl(client, registry_guard):
 
     register_fake_provider()
     launch(client, "gov-refresh")
-    main.all_sessions["gov-refresh"].cxt.llm_config = fake_llm_config()
+    main.all_sessions["gov-refresh"].cxt.metadata["llm_override"] = fake_llm_config()
 
     # 模拟活跃时间停在 1 秒前
     with main._sessions_lock:

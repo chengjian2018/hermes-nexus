@@ -39,7 +39,7 @@ def test_off_topic_turn_routes_kb_and_keeps_node():
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
     session.cxt.metadata["task_info"] = {}
-    session.cxt.llm_config = fake_llm_config()
+    session.cxt.metadata["llm_override"] = fake_llm_config()
 
     # 给购车 FSM 模块开启澄清（测试注入，不改产品 pattern 定义）
     buy = pattern.module_map["car_sales_buy"]

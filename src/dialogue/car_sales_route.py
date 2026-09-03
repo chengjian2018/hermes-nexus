@@ -28,7 +28,7 @@ Pattern 结构（Pattern → Module → Node）：:
 
 from src.clarify import ClarifyRouteRule, ClarifyStage
 from src.dialogue.module import FSMModule, RouteModule
-from src.dialogue.recaller import (
+from src.dialogue.recaller.recaller import (
     KeywordRecallPath,
     MultiPathRecaller,
     ScoreThresholdFilter,

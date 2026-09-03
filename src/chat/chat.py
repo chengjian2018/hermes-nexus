@@ -384,7 +384,3 @@ def _handle_node_transition(cxt, module) -> None:
         next_node_code,
     )
     cxt.current_node_code = next_node_code
-
-# _RouteNodeAdvance 已迁入 stage_slots（dialogue 层自洽，chat 不再被反向依赖）；
-# 此处 re-export 保持 chat_mod._RouteNodeAdvance 既有引用（test_llm_refresh R4）
-from src.dialogue.stage_slots import _RouteNodeAdvance  # noqa: E402, F401

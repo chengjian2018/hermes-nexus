@@ -281,9 +281,9 @@ def test_generate_single_same_stage_at_root_and_menu_runs_once():
     assert ran == [("root", "shared_unified")]
 
 
-def test_generate_single_menu_stage_reruns_in_nlg_part():
-    """single 守卫（异对象）：root 层 single 在 nlu 部件执行后 advance 切菜单，
-    菜单层是另一个 single stage → nlg 部件补执行（菜单版当轮生效）。"""
+def test_generate_single_menu_stage_skipped_until_next_turn():
+    """single 恒由 nlu 部件执行一次：root 层 dict 的 nlu 在 nlu 部件执行后
+    advance 切菜单，菜单层是 single → nlg 部件 no-op（菜单版下轮生效）。"""
     ctx = _ctx(node_code="root", module_code="r1")
     ctx.node_map["root"] = BaseNode(
         node_code="root", node_name="根",
@@ -298,9 +298,15 @@ def test_generate_single_menu_stage_reruns_in_nlg_part():
     for part in resolve_stage(GenerateSlot(), ctx, module, None):
         part.execute(ctx)
 
-    # root dict nlu 在 nlu 部件；advance 切菜单后 nlg 部件补执行菜单 single
-    assert ran == [("root", "root_nlu"), ("menu_a", "menu_unified")]
+    # root dict nlu 在 nlu 部件执行；菜单 single 当轮不执行（root_nlg 也不执行，
+    # nlg 部件重新解析到的是菜单层 single → no-op）
+    assert ran == [("root", "root_nlu")]
     assert ctx.current_node_code == "menu_a"
+    # 下轮：nlu 部件在菜单节点解析 → 菜单 single 生效
+    ctx.nlu_result = {}
+    for part in resolve_stage(GenerateSlot(), ctx, module, None):
+        part.execute(ctx)
+    assert ran == [("root", "root_nlu"), ("menu_a", "menu_unified")]
 
 
 def test_generate_pattern_layer_used_when_node_module_unset():

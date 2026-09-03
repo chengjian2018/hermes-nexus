@@ -479,7 +479,7 @@ xianyu_root = RouteModule(
 xianyu_agent_pattern = Pattern(
     code="xianyu_agent",
     name="闲鱼卖家客服助手",
-    description="复刻 tmp_xianyu.XianyuReplyBot agent 对话管理：ROUTE 每轮独立意图检测（本地规则 + LLM 兜底）+ 议价轮数控制 + 意图级 prompt",
+    description="对话管理：ROUTE 每轮独立意图检测（本地规则 + LLM 兜底）+ 议价轮数控制 + 意图级 prompt",
     entry_module_code="xianyu_root",
     modules=[xianyu_root],
     # 查询改写槽位：时间实体增强（零 LLM）——买家消息中的相对时间

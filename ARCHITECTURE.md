@@ -24,6 +24,7 @@ flowchart TB
     hdls --> agnth["handlers/agent.py<br/>AgentHandler"]
     agnth --> runners["chat/agents.py<br/>AgentRunner 协议<br/>(默认 LoopAgentRunner)"]
     runners --> loop2["chat/loop.py<br/>Agent ReAct 循环<br/>工具授权过滤 · 借出工具解析"]
+    loop2 --> msgs["chat/messages.py<br/>AGENT messages 构建<br/>module.messages_builder 槽位解析"]
     fsmh --> slots
     routh --> slots
     fsmh --> nlu["dialogue/nlu/nlu.py<br/>FSMNLU · RouteNLU"]
@@ -125,6 +126,7 @@ flowchart TB
 | `chat_turn(query, session_id, all_sessions, agent_runner=None) -> ChatResult` | `chat/chat.py` | 全量轮次入口：text + 预留 actions + dispatch_chain；`chat()` 为兼容入口（等价 `.text`） |
 | `ModuleHandler.handle(session, module, force_close) -> TurnResult` | `chat/handlers/base.py` | 单模块单轮处理器接口；`resolve_handler(module_type, refresh_llm, agent_runner)` 按类型构造（AGENT/FSM/ROUTE，非 registry） |
 | `AgentRunner.run(session, module, llm_config, force_close)` | `chat/agents.py` | AGENT 后端插件协议（默认 `LoopAgentRunner` 委托 loop.run_agent）；经 chat 入口可选参数注入 |
+| `build_agent_messages(module, system_prompt, cxt)` | `chat/messages.py` | AGENT 模块 LLM messages 构建入口：`module.messages_builder`（`(system_prompt, cxt) -> messages`，system_prompt 为终态含 force_close 后缀）优先；未设/不可调用（告警）降级 `default_build_messages`（system + user/assistant 历史）。自定义 builder 遵守不可信数据纪律：外部文本不写入 system 角色 |
 | `TurnLifecycle` 字段集合 | `chat/context_lifecycle.py` | cxt 字段生命周期唯一管理者：PERSISTENT / PER_TURN_RESET / INCREMENTAL / STAGE_MANAGED 四类声明式集合 + begin_turn / bind_pattern / end_turn / merge_slots |
 | `SessionStore` | `chat/store.py` | launch/轮末落盘、startup 恢复、审计查询；实例由 main.py 注入，非全局单例 |
 | `ChannelSpec` 协议 + `build_channel_router(spec, ops)` | `channel/base.py` `channel/webhooks.py` | 外部消息源适配的唯一形态：渠道声明差异 + 通用 handler 共性流程；`registry.register()` 自注册（AST 发现），main.py `discover_builtin_channels()` + `build_channel_routers(EngineOps(...))` 接线 |
@@ -141,6 +143,7 @@ flowchart TB
 - 调整 cxt 某字段的轮次归属（跨轮保留 / 每轮重置）→ 改 `TurnLifecycle` 声明式集合
   （`chat/context_lifecycle.py`），不动流程代码
 - 模块要单次调用（NLU+NLG 合一）→ module 上配 `generate=FSMUnifiedNLU()/RouteUnifiedNLU()`（见 `tests/test_unified_stage.py` 的内联示例；候选节点需声明 `answer_examples`）
+- AGENT 模块要自定义发给 LLM 的 messages（截断历史 / few-shot / 注入动态数据）→ module 上配 `messages_builder=fn`，签名 `(system_prompt, cxt) -> messages`（见 `src/chat/messages.py`）
 - 全局 prompt 模板 → `src/prompt.py`（node/module 可覆盖）
 
 ## 测试

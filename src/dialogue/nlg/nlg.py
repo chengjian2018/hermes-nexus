@@ -72,9 +72,12 @@ class BaseNLG(PipelineStage, ABC):
 
     def _resolve_prompt_template(self, cxt: DialogueContext) -> str:
         """Resolve the prompt template by priority: node > module > class default."""
-        return resolve_prompt_template(
+        system_prompt = resolve_prompt_template(
             cxt, "base_nlg_prompt", self._default_prompt_template()
         )
+        if system_prompt is None:
+            return self._default_prompt_template()
+        return system_prompt
 
     def _default_prompt_template(self) -> str:
         """Subclasses may override this method to return the default template."""

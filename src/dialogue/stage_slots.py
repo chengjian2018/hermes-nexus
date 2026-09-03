@@ -283,9 +283,7 @@ def resolve_stage(stage: Any, ctx: DialogueContext, module: Any,
 
     if isinstance(stage, GenerateSlot):
         parts: List[Any] = [_GenerateNLUPart(module, pattern)]
-        if getattr(module, "type", None) == ModuleType.ROUTE:
-            parts.append(_RouteNodeAdvance())
-        elif getattr(module, "enable_clarify", False):
+        if getattr(module, "type", None) == ModuleType.FSM and getattr(module, "enable_clarify", False):
             parts.append(getattr(module, "clarify_stage", None)
                          or default_clarify_stage())
         parts.append(_GenerateNLGPart(module, pattern))

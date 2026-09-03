@@ -224,7 +224,7 @@ class ChatResponse(BaseModel):
     code: str
     message: str
     status: bool
-    data: Dict[str, str] = {}
+    data: Dict[str, Any] = {}
 
 
 class SessionSummary(BaseModel):
@@ -251,6 +251,7 @@ class MessageItem(BaseModel):
     stage: str
     metadata: Dict[str, Any] = {}
     created_at: float
+    action: Dict[str, str] = {}
 
 
 class SessionMessagesResponse(BaseModel):

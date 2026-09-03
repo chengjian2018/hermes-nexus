@@ -12,6 +12,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
+from src.clarify.stage import CLARIFY_NODE_CODE
 
 from src.dialogue.base import (
     DialogueContext,
@@ -181,9 +182,13 @@ class BaseNLU(PipelineStage, ABC):
 
     def _resolve_prompt_template(self, cxt: DialogueContext) -> str:
         """Resolve the prompt template by priority: node > module > class default."""
-        return resolve_prompt_template(
+        system_prompt = resolve_prompt_template(
             cxt, "base_nlu_prompt", self._default_prompt_template()
         )
+        if system_prompt is None:
+            return self._default_prompt_template()
+        return system_prompt
+
 
     def _default_prompt_template(self) -> str:
         """Subclasses may override this method to return the default template."""
@@ -253,7 +258,9 @@ class FSMNLU(BaseNLU):
 
     def execute(self, ctx: DialogueContext) -> DialogueContext:
         prompt = self.prompt_build(ctx)
-        ctx.nlu_result = self._execute_with_retry(prompt, ctx.llm_config)
+        nlu_result = self._execute_with_retry(prompt, ctx.llm_config)
+        if nlu_result.get("next_node", "") not in ctx.node_map:
+            nlu_result.update({"next_node": CLARIFY_NODE_CODE})
         logger.info(
             "FSM NLU 完成: session=%s, next_node=%s",
             ctx.session_id,

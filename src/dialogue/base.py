@@ -189,6 +189,14 @@ class DialogueContext:
     # Current node / module accessors
     # ------------------------------------------------------------------
 
+    def get_next_node(self):
+        nlu_result = self.nlu_result or {}
+        next_node = nlu_result.get("next_node", "")
+        if next_node not in self.node_map:
+            return None
+        return self.node_map[next_node]
+
+
     def get_current_node(self) -> Optional[Any]:
         """Return the current node instance from node_map (None when unset)."""
         if not self.current_node_code:
@@ -206,6 +214,28 @@ class DialogueContext:
     # (node.py / module.py own the formatting; ctx only resolves "which node/module")
     # ------------------------------------------------------------------
 
+    def format_nlg_next_node(self, stage: str = "nlg") -> str:
+        """Format the current node as prompt-ready text (slot: cur_node).
+
+        Stage-specific variants — NLU and NLG need different facets of the node:
+        - "nlu": name + todo description + slot definitions (what to collect/decide)
+        - "nlg": name + node description (what scenario the reply is grounded in)
+        - "full": all fields (used by retrieval stages: query rewrite / recall)
+
+        Args:
+            stage: which stage's facet to format ("nlu" / "nlg" / "full").
+        """
+        node = self.get_next_node()
+        if node is None:
+            return "暂无当前节点信息"
+
+        formatters = {
+            "nlu": node.to_nlu_prompt_text,
+            "nlg": node.to_nlg_prompt_text,
+        }
+        formatter = formatters.get(stage, node.to_prompt_text)
+        return formatter()
+    
     def format_cur_node(self, stage: str = "nlu") -> str:
         """Format the current node as prompt-ready text (slot: cur_node).
 
@@ -292,7 +322,7 @@ def resolve_prompt_template(
     ctx: DialogueContext,
     prompt_attr: str,
     default_template: Optional[str],
-) -> Optional[str]:
+) -> Optional[str|None]:
     """Resolve a stage's prompt template by priority.
 
     Priority: node level > module level > *default_template*.

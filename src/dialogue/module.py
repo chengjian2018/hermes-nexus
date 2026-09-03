@@ -75,6 +75,10 @@ class BaseModule:
         use_tools: list of tools available to the module.
         base_prompt: module base prompt (used by AGENT type).
         agent_stage: module-level Agent stage instance (optional, default when unset).
+        messages_builder: AGENT 模块自定义 LLM messages 构建器，签名
+            ``(system_prompt, cxt) -> messages`` 列表；未设置走默认构建
+            （system + user/assistant 历史），不可调用时告警降级默认
+            （消费方见 src/chat/messages.py）。
         generate/pre_recall/query/post_recall: 管线槽位配置（node 级最高优先级）。
         enable_clarify: dual-track clarify switch; when True the FSM module
             integrates ClarifyStage (see src/clarify/).
@@ -99,6 +103,7 @@ class BaseModule:
         query: Optional[Any] = None,
         post_recall: Optional[Any] = None,
         agent_stage: Optional[Any] = None,
+        messages_builder: Optional[Any] = None,
         enable_clarify: bool = False,
         is_end: Optional[bool] = False,
         answer_examples: Optional[List[str]] = None,
@@ -127,6 +132,10 @@ class BaseModule:
 
         self.agent_stage = agent_stage
 
+        # AGENT 模块 messages 构建器槽位（消费方在 src/chat/messages.py，
+        # 与 agent_stage 同为 module 级可插拔组件声明）
+        self.messages_builder = messages_builder
+
         # 双轨澄清开关：FSM 模块开启后接入 ClarifyStage（详见 src/clarify/）
         self.enable_clarify = enable_clarify
 
@@ -144,11 +153,19 @@ class BaseModule:
         for key, value in (kwargs or {}).items():
             setattr(self, key, value)
 
+        self._init_node()
+
     def __repr__(self) -> str:
         return (
             f"<{type(self).__name__} "
             f"code={self.module_code!r} type={self.type.value!r}>"
         )
+
+    def _init_node(self):
+        self.node_name = self.module_name
+        self.node_code = self.module_code
+        self.node_description = self.module_description
+        self.node_todo_description = self.module_todo_description
 
     def to_projection_text(self) -> str:
         """模块头部投影：供邻接 module 的 agent prompt 注入（inject 原语）。

@@ -314,6 +314,8 @@ class FixedNLG(BaseNLG):
         """
         template = self._resolve_prompt_template(cxt)
         kwargs = self._build_template_kwargs(cxt)
+        if template is None:
+            template = self._default_prompt_template()
         prompt = self._fill_template(template, kwargs)
 
         if (cxt.nlu_result or {}).get("intent") == "price":

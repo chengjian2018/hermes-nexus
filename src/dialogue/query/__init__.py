@@ -5,9 +5,11 @@
 
 Exports:
     - ``BaseQueryRewriter``: 查询改写 stage 抽象基类。
-    - ``QueryRewriter``: 默认查询改写实现。
+    - ``QueryRewriter``: 默认查询改写实现（LLM）。
+    - ``TimeAugQueryRewriter``: 时间增强确定性改写（零 LLM）。
 """
 
 from src.dialogue.query.query import BaseQueryRewriter, QueryRewriter
+from src.dialogue.query.time_aug import TimeAugQueryRewriter
 
-__all__ = ["BaseQueryRewriter", "QueryRewriter"]
+__all__ = ["BaseQueryRewriter", "QueryRewriter", "TimeAugQueryRewriter"]

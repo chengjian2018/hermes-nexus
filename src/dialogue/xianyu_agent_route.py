@@ -6,7 +6,7 @@ prompt 模板取自 src/prompt.py 的 XIANYU_* 系列。
 
 Pattern 结构（对齐 car_sales_route 的 ROUTE 模式）：
 
-    xianyu_agent (Pattern, entry: xianyu_root)
+    xianyu_agent (Pattern, entry: xianyu_root, query=TimeAugQueryRewriter)
     └── xianyu_root (RouteModule)   全部节点留在路由模块，无 jump_module
         ├── xy_route_root      路由根节点（sub_nodes = 意图菜单）
         ├── xy_menu_price      议价菜单（议价次数未达上限）
@@ -53,6 +53,7 @@ from src.dialogue.nlu import BaseNLU
 from src.dialogue.module import RouteModule
 from src.dialogue.node import BaseNode
 from src.dialogue.pattern import Pattern
+from src.dialogue.query import TimeAugQueryRewriter
 from src.dialogue.register import registry
 from src.prompt import (
     XIANYU_DEFAULT_NLG_PROMPT,
@@ -130,6 +131,13 @@ def detect_intent(message: str) -> str:
     return "default"
 
 
+def _effective_query(cxt) -> str:
+    """取改写后的买家消息：query 槽位（TimeAugQueryRewriter）已在本轮
+    generate 之前执行，rewritten_queries[0] 即时间增强结果；槽位 no-op
+    或未配置时回落原 query。"""
+    return (cxt.rewritten_queries or [cxt.user_query])[0]
+
+
 def _get_bargain_settings(cxt) -> dict:
     """取议价设置：metadata 注入优先，缺省回 DEFAULT_BARGAIN_SETTINGS。"""
     settings = dict(DEFAULT_BARGAIN_SETTINGS)
@@ -198,12 +206,12 @@ class XianyuIntentNLU(BaseNLU):
             "history": cxt.format_history(),
         }
         prompt = self._fill_template(self._default_prompt_template(), slots)
-        prompt += "\n### 买家消息\n" + cxt.user_query
+        prompt += "\n### 买家消息\n" + _effective_query(cxt)
         return prompt
 
     def execute(self, ctx):
         # 1-2. 本地规则层（技术优先，零 LLM）
-        intent = detect_intent(ctx.user_query)
+        intent = detect_intent(_effective_query(ctx))
 
         # 3. LLM 兜底：本地未命中（default）时走 ClassifyAgent
         if intent == "default":
@@ -312,7 +320,7 @@ class FixedNLG(BaseNLG):
             prompt += self._bargain_block(cxt)
 
         # 复刻 BaseAgent._build_messages：买家当前消息单列（user 角色）
-        prompt += "\n### 买家消息\n" + cxt.user_query
+        prompt += "\n### 买家消息\n" + _effective_query(cxt)
         return prompt
 
     def execute(self, ctx):
@@ -474,6 +482,9 @@ xianyu_agent_pattern = Pattern(
     description="复刻 tmp_xianyu.XianyuReplyBot agent 对话管理：ROUTE 每轮独立意图检测（本地规则 + LLM 兜底）+ 议价轮数控制 + 意图级 prompt",
     entry_module_code="xianyu_root",
     modules=[xianyu_root],
+    # 查询改写槽位：时间实体增强（零 LLM）——买家消息中的相对时间
+    # （"明天下午"等）先解析为绝对时间标注，再进 NLU/NLG prompt
+    query=TimeAugQueryRewriter(),
 )
 
 registry.register(xianyu_agent_pattern)

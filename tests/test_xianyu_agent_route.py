@@ -120,6 +120,13 @@ def test_generate_wired_at_module_level(pattern):
     assert isinstance(generate["nlg"], FixedNLG)
 
 
+def test_query_slot_wired_with_time_aug(pattern):
+    """pattern 级 query 槽位配置 TimeAugQueryRewriter（时间增强改写）。"""
+    from src.dialogue.query import TimeAugQueryRewriter
+
+    assert isinstance(pattern.query, TimeAugQueryRewriter)
+
+
 # ============================================================================
 # 意图检测测试（复刻 detect_intent 关键词表）
 # ============================================================================
@@ -300,3 +307,41 @@ def test_intent_specific_prompt_selected(pattern, sessions):
 
     assert "技术专家" in captured[0]
     assert "电商卖家" in captured[1]
+
+
+# ============================================================================
+# 时间增强改写贯通测试（query 槽位 → NLU/NLG 消费增强后消息）
+# ============================================================================
+
+def test_time_augmented_query_flows_into_prompt(pattern, sessions):
+    """含相对时间的买家消息经 TimeAugQueryRewriter 增强后进入 NLG prompt。
+
+    注入固定 time_base（2026-09-03 10:00:00，周四）→ "明天下午3点前"
+    增强带绝对时间标注（jionlp 区间解析，含次日 2026-09-04）。
+    default 意图走 LLM 兜底，FakeProvider 返回非标签文本回落 default
+    菜单 → FixedNLG 单次 LLM。
+    """
+    import time as _time
+
+    session = launch(pattern, sessions)
+    session.cxt.metadata["time_base"] = _time.mktime(
+        _time.strptime("2026-09-03 10:00:00", "%Y-%m-%d %H:%M:%S"))
+
+    from src.dialogue.nlg import BaseNLG
+    original = BaseNLG._call_llm
+    captured = {}
+
+    def spy(self, prompt, llm_config=None):
+        captured["prompt"] = prompt
+        return original(self, prompt, llm_config)
+
+    BaseNLG._call_llm = spy
+    try:
+        chat(sessions, "s1", "明天下午3点前能发货吗")
+    finally:
+        BaseNLG._call_llm = original
+
+    # 改写结果进 ctx 与 NLG prompt（增强标注含解析出的绝对时间）
+    assert session.cxt.rewritten_queries[0] != "明天下午3点前能发货吗"
+    assert "2026-09-04" in session.cxt.rewritten_queries[0]
+    assert session.cxt.rewritten_queries[0] in captured["prompt"]

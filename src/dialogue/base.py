@@ -128,6 +128,11 @@ class DialogueContext:
     module_map: Dict[str, Any] = field(default_factory=dict)
     llm_config: Optional[Dict[str, Any]] = None
 
+    # Actions reserved for this turn (e.g. sends / transitions / external calls the reply should
+    # trigger besides the text). Stages/handlers may append; the chat layer snapshots per turn
+    # (see TurnLifecycle in src/chat/context_lifecycle.py — per-turn reset).
+    actions: List[Dict[str, Any]] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Convenience methods
     # ------------------------------------------------------------------

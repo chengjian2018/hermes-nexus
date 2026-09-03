@@ -11,7 +11,7 @@ Supports:
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from src.chat.session import Session
@@ -38,10 +38,15 @@ _PROMPT_LENGTH_WARN = 4000
 
 @dataclass
 class TurnResult:
-    """单模块单轮执行结果：reply 与 dispatch_event 互斥（spec §3.2）。"""
+    """单模块单轮执行结果：reply 与 dispatch_event 互斥（spec §3.2）。
+
+    actions 为预留通道：本模块本轮应触发的动作（与 cxt.actions 同形），
+    现有执行器不产生，供后续 agent 后端 / API 层消费。
+    """
 
     reply: Optional[str] = None
     dispatch_event: Optional[ModuleDispatch] = None
+    actions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def conversation(

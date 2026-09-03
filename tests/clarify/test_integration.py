@@ -1,4 +1,8 @@
-"""偏题轮全链路集成测试 —— FakeProvider + 内存知识库。"""
+"""偏题轮全链路集成测试 —— FakeProvider + 内存知识库。
+
+Pattern 为内联构建，节点 code/name 与 fake_provider 脚本约定保持一致
+（路由根节点 / menu_sales / 询问品牌 …）。
+"""
 
 import pytest
 
@@ -6,6 +10,9 @@ from fake_provider import fake_llm_config, register_fake_provider
 
 from src.chat.chat import chat as chat_fn
 from src.chat.session import Session
+from src.dialogue.module import FSMModule, RouteModule
+from src.dialogue.node import BaseNode
+from src.dialogue.pattern import Pattern
 from src.dialogue.recaller import (
     KeywordRecallPath,
     MultiPathRecaller,
@@ -26,13 +33,84 @@ KB_DOCS = [
 ]
 
 
-def test_off_topic_turn_routes_kb_and_keeps_node():
+@pytest.fixture()
+def pattern():
+    """内联 route + FSM pattern（ROUTE 路由 + 购车 FSM 子模块）。"""
+    return Pattern(
+        code="clarify_demo",
+        name="澄清集成测试 pattern",
+        description="路由 + 购车 FSM（内联测试 fixture）",
+        entry_module_code="demo_root",
+        modules=[
+            RouteModule(
+                module_code="demo_root",
+                module_name="总路由",
+                module_description="顶层路由",
+                module_todo_description="意图分发",
+                module_nodes=[
+                    BaseNode(
+                        node_code="route_root",
+                        node_name="路由根节点",
+                        node_description="总入口",
+                        node_todo_description="意图分类",
+                        sub_nodes=["menu_sales"],
+                    ),
+                    BaseNode(
+                        node_code="menu_sales",
+                        node_name="购车咨询",
+                        node_description="购车入口",
+                        node_todo_description="跳转到购车子模块",
+                        sub_nodes=[],
+                        jump_module="demo_buy",
+                    ),
+                ],
+            ),
+            FSMModule(
+                module_code="demo_buy",
+                module_name="购车流程",
+                module_description="品牌 → 预算 → 城市 → 确认",
+                module_todo_description="收集购车信息",
+                module_nodes=[
+                    BaseNode(
+                        node_code="buy_ask_brand",
+                        node_name="询问品牌",
+                        node_description="收集品牌",
+                        node_todo_description="抽取 brand 槽位",
+                        node_slots={"brand": "品牌"},
+                        sub_nodes=["buy_ask_budget"],
+                    ),
+                    BaseNode(
+                        node_code="buy_ask_budget",
+                        node_name="询问预算",
+                        node_description="收集预算",
+                        node_todo_description="抽取 budget 槽位",
+                        node_slots={"budget": "预算"},
+                        sub_nodes=["buy_ask_city"],
+                    ),
+                    BaseNode(
+                        node_code="buy_ask_city",
+                        node_name="询问城市",
+                        node_description="收集城市",
+                        node_todo_description="抽取 city 槽位",
+                        node_slots={"city": "城市"},
+                        sub_nodes=["buy_confirm"],
+                    ),
+                    BaseNode(
+                        node_code="buy_confirm",
+                        node_name="确认购车信息",
+                        node_description="最终确认",
+                        node_todo_description="结束流程",
+                        sub_nodes=[],
+                        is_end=True,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def test_off_topic_turn_routes_kb_and_keeps_node(pattern):
     """偏题轮：kb 应答 + 拉回；节点不动、槽位不污染；下一轮恢复正常。"""
-    from src.dialogue.register import discover_builtin_patterns, registry
-
-    discover_builtin_patterns()
-    pattern = registry.get("car_sales_route")
-
     session = Session(session_id="it", pattern_code=pattern.code)
     session.pattern = pattern
     session.task_info = {}
@@ -41,8 +119,8 @@ def test_off_topic_turn_routes_kb_and_keeps_node():
     session.cxt.metadata["task_info"] = {}
     session.cxt.metadata["llm_override"] = fake_llm_config()
 
-    # 给购车 FSM 模块开启澄清（测试注入，不改产品 pattern 定义）
-    buy = pattern.module_map["car_sales_buy"]
+    # 给购车 FSM 模块开启澄清（测试注入，不改 fixture 定义）
+    buy = pattern.module_map["demo_buy"]
     buy.enable_clarify = True
     buy.clarify_stage = ClarifyStage(
         recaller=MultiPathRecaller(
@@ -58,7 +136,7 @@ def test_off_topic_turn_routes_kb_and_keeps_node():
     # 第 1 轮：路由静默分发，buy FSM 首节点 buy_ask_brand 同轮消化该句，
     # brand 槽位 = 整句 query，节点推进到 buy_ask_budget
     r1 = chat_fn("我想买车", "it", sessions)
-    assert session.cxt.current_module_code == "car_sales_buy"
+    assert session.cxt.current_module_code == "demo_buy"
     assert session.cxt.current_node_code == "buy_ask_budget"
     assert session.cxt.filled_slots.get("brand") == "我想买车"
     assert "询问品牌" in r1  # FSMNLG 用转移前节点生成回复

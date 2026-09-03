@@ -4,7 +4,7 @@
 复刻来源：src/dialogue/tmp_xianyu.py（XianyuReplyBot / IntentRouter / 三领域 Agent），
 prompt 模板取自 src/prompt.py 的 XIANYU_* 系列。
 
-Pattern 结构（对齐 car_sales_route 的 ROUTE 模式）：
+Pattern 结构（ROUTE 模式）：
 
     xianyu_agent (Pattern, entry: xianyu_root, query=TimeAugQueryRewriter)
     └── xianyu_root (RouteModule)   全部节点留在路由模块，无 jump_module

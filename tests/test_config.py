@@ -43,12 +43,12 @@ llm_default:
   model: qwen3.8-max
   temperature: 0.7
 pattern_llm:
-  car_sales_route:
+  xianyu_agent:
     model: qwen-flash
     modules:
-      car_sales_buy: {model: qwen3.8-max}
+      xianyu_root: {model: qwen3.8-max}
     nodes:
-      buy_confirm: {code: deepseek, model: deepseek-chat}
+      xy_route_root: {code: deepseek, model: deepseek-chat}
 """
 
 _LEGACY = """\
@@ -71,8 +71,8 @@ def test_new_structure_parsed(tmp_path):
     cfg = load_config(_write(tmp_path, _NEW_STRUCT))
     assert cfg["llm_default"]["code"] == "openai"
     assert cfg["llm_providers"]["openai"]["api_key_env"] == "DASHSCOPE_API_KEY"
-    assert cfg["pattern_llm"]["car_sales_route"]["modules"]["car_sales_buy"]["model"] == "qwen3.8-max"
-    assert cfg["pattern_llm"]["car_sales_route"]["nodes"]["buy_confirm"]["code"] == "deepseek"
+    assert cfg["pattern_llm"]["xianyu_agent"]["modules"]["xianyu_root"]["model"] == "qwen3.8-max"
+    assert cfg["pattern_llm"]["xianyu_agent"]["nodes"]["xy_route_root"]["code"] == "deepseek"
     assert "llm" not in cfg
 
 
@@ -106,23 +106,23 @@ def test_no_llm_section_at_all_rejected(tmp_path):
 
 def test_unknown_orchestration_field_warns(tmp_path, caplog):
     text = _NEW_STRUCT.replace(
-        "car_sales_route:\n    model: qwen-flash",
-        "car_sales_route:\n    model: qwen-flash\n    bogus_field: 1",
+        "xianyu_agent:\n    model: qwen-flash",
+        "xianyu_agent:\n    model: qwen-flash\n    bogus_field: 1",
     )
     with caplog.at_level("WARNING"):
         cfg = load_config(_write(tmp_path, text))
-    assert cfg["pattern_llm"]["car_sales_route"].get("bogus_field") is None
+    assert cfg["pattern_llm"]["xianyu_agent"].get("bogus_field") is None
     assert any("bogus_field" in r.message for r in caplog.records)
 
 
 def test_nested_modules_rejected_with_warning(tmp_path, caplog):
     text = _NEW_STRUCT.replace(
-        "car_sales_buy: {model: qwen3.8-max}",
-        "car_sales_buy:\n        modules: {inner: {model: m}}",
+        "xianyu_root: {model: qwen3.8-max}",
+        "xianyu_root:\n        modules: {inner: {model: m}}",
     )
     with caplog.at_level("WARNING"):
         cfg = load_config(_write(tmp_path, text))
-    assert cfg["pattern_llm"]["car_sales_route"]["modules"]["car_sales_buy"] == {}
+    assert cfg["pattern_llm"]["xianyu_agent"]["modules"]["xianyu_root"] == {}
     assert any("嵌套" in r.message for r in caplog.records)
 
 
@@ -133,7 +133,7 @@ def test_nested_modules_rejected_with_warning(tmp_path, caplog):
 def test_layered_merge_priority(tmp_path):
     """node > module > pattern > 全局，逐层浅合并。"""
     path = _write(tmp_path, _NEW_STRUCT + """\
-  car_sales_route2:
+  xianyu_agent2:
     model: qwen3.8-max
     modules:
       m1: {model: m-flash}
@@ -141,7 +141,7 @@ def test_layered_merge_priority(tmp_path):
     nodes:
       n1: {code: deepseek, model: deepseek-chat}
 """)
-    cfg = get_llm_config(pattern_code="car_sales_route2",
+    cfg = get_llm_config(pattern_code="xianyu_agent2",
                          module_code="m2", node_code="n1", config_path=path)
     # n1 换 code → 连接层切到 deepseek 段（无该段则空）；temperature 继承 m2
     assert cfg["code"] == "deepseek"
@@ -177,7 +177,7 @@ pattern_llm:
 def test_unknown_codes_fallback_to_shallow_layer(tmp_path, caplog):
     cfg = get_llm_config(pattern_code="no_such_pattern", config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg["model"] == "qwen3.8-max"  # 回退全局
-    cfg2 = get_llm_config(pattern_code="car_sales_route", module_code="no_such_module",
+    cfg2 = get_llm_config(pattern_code="xianyu_agent", module_code="no_such_module",
                           config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg2["model"] == "qwen-flash"  # 回退 pattern 层
     # pattern 未配置为常态，降为 debug；module 未命中仍是 warning
@@ -185,7 +185,7 @@ def test_unknown_codes_fallback_to_shallow_layer(tmp_path, caplog):
         get_llm_config(pattern_code="no_such_pattern", config_path=_write(tmp_path, _NEW_STRUCT))
     assert any("no_such_pattern" in r.message for r in caplog.records)
     with caplog.at_level("WARNING"):
-        get_llm_config(pattern_code="car_sales_route", module_code="no_such_module",
+        get_llm_config(pattern_code="xianyu_agent", module_code="no_such_module",
                        config_path=_write(tmp_path, _NEW_STRUCT))
     assert any("no_such_module" in r.message for r in caplog.records)
 
@@ -199,7 +199,7 @@ def test_no_args_returns_global(tmp_path):
 
 def test_override_skips_layers(tmp_path):
     ov = {"code": "fake_test_provider", "model": "fake-model", "temperature": 0.1}
-    cfg = get_llm_config(pattern_code="car_sales_route", node_code="buy_confirm",
+    cfg = get_llm_config(pattern_code="xianyu_agent", node_code="xy_route_root",
                          override=ov, config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg["model"] == "fake-model" and cfg["temperature"] == 0.1
 
@@ -216,10 +216,10 @@ def test_cross_check_warns_unknown_codes(tmp_path, caplog):
     model: m
 """
     # 未注册 pattern 的 modules/nodes 分支不可达（continue），故 module/node
-    # 未知分支挂在已注册的 car_sales_route 下单独验证
-    text = text.replace("buy_confirm: {code: deepseek, model: deepseek-chat}",
+    # 未知分支挂在已注册 pattern 下单独验证
+    text = text.replace("xy_route_root: {code: deepseek, model: deepseek-chat}",
                         "no_such_node: {code: deepseek, model: deepseek-chat}")
-    text = text.replace("car_sales_buy: {model: qwen3.8-max}",
+    text = text.replace("xianyu_root: {model: qwen3.8-max}",
                         "no_such_module: {model: qwen3.8-max}")
     with caplog.at_level("WARNING"):
         main._cross_check_pattern_llm(config_path=_write(tmp_path, text))

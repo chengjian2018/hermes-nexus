@@ -48,7 +48,7 @@ def registry_guard():
         main._session_last_active.update(snap_ts)
 
 
-def launch(client, session_id, pattern_code="car_sales_route"):
+def launch(client, session_id, pattern_code="xianyu_agent"):
     resp = client.post(
         "/api/v1/launch",
         json={
@@ -92,7 +92,7 @@ def test_launch_chat_persisted(client, store, registry_guard):
 
     rows = store.list_sessions()
     assert [r["session_id"] for r in rows] == ["audit-1"]
-    assert rows[0]["pattern_code"] == "car_sales_route"
+    assert rows[0]["pattern_code"] == "xianyu_agent"
     assert rows[0]["message_count"] >= 2
 
     msgs = store.get_messages("audit-1")
@@ -143,10 +143,10 @@ def test_list_sessions_endpoint(client, store, registry_guard):
     ids = [s["session_id"] for s in body["data"]["sessions"]]
     assert "api-a" in ids and "api-b" not in ids  # 未注册 pattern 的 launch 被拒
 
-    resp = client.get("/api/v1/sessions", params={"pattern_code": "car_sales_route", "limit": 1})
+    resp = client.get("/api/v1/sessions", params={"pattern_code": "xianyu_agent", "limit": 1})
     sessions = resp.json()["data"]["sessions"]
     assert len(sessions) == 1
-    assert sessions[0]["pattern_code"] == "car_sales_route"
+    assert sessions[0]["pattern_code"] == "xianyu_agent"
 
 
 def test_messages_endpoint_and_404(client, store, registry_guard):
@@ -270,8 +270,8 @@ def test_restore_failure_does_not_block(client, store, registry_guard, monkeypat
     assert main._restore_sessions() == 0
 
     # 2) 单会话失败（如行数据损坏触发的任意异常）：跳过该会话，不阻断整体
-    good = Session(session_id="rs-good", pattern_code="car_sales_route")
-    bad = Session(session_id="rs-bad", pattern_code="car_sales_route")
+    good = Session(session_id="rs-good", pattern_code="xianyu_agent")
+    bad = Session(session_id="rs-bad", pattern_code="xianyu_agent")
 
     def fake_load(ttl):
         return [(good, main.time.time()), (bad, main.time.time())]

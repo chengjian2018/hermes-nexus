@@ -27,8 +27,8 @@ class TestParseSlashCommand:
         assert cli.parse_slash_command("/slots") == {"name": "slots", "arg": ""}
 
     def test_known_command_with_arg(self):
-        assert cli.parse_slash_command("/new car_sales_route") == {
-            "name": "new", "arg": "car_sales_route"}
+        assert cli.parse_slash_command("/new xianyu_agent") == {
+            "name": "new", "arg": "xianyu_agent"}
         assert cli.parse_slash_command("/llm openai") == {
             "name": "llm", "arg": "openai"}
 
@@ -252,7 +252,7 @@ class TestBuildSessionTaskInfo:
 
         discover_builtin_patterns()
         session = cli.build_session(
-            "t-task", "car_sales_route",
+            "t-task", "xianyu_agent",
             task_info={"channel": "xianyu", "item_id": "1"},
         )
         assert session.task_info == {"channel": "xianyu", "item_id": "1"}
@@ -264,7 +264,7 @@ class TestBuildSessionTaskInfo:
         from src.dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
-        session = cli.build_session("t-no-task", "car_sales_route")
+        session = cli.build_session("t-no-task", "xianyu_agent")
         assert session.task_info == {}
         assert "task_info" not in session.cxt.metadata
 
@@ -307,7 +307,7 @@ class TestBuildSessionOverride:
         discover_builtin_patterns()
 
         session = cli.build_session(
-            "t1", "car_sales_route",
+            "t1", "xianyu_agent",
             llm_overrides={"code": "fake_test_provider", "model": "fake-model"},
         )
         assert session.cxt.metadata["llm_override"]["model"] == "fake-model"

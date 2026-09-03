@@ -83,10 +83,6 @@ def _route_nlu(query: str, retry: bool) -> str:
         return "这不是合法的 JSON 输出"  # 触发第一次解析失败
     if "永远解析失败" in query:
         return "这不是合法的 JSON 输出"
-    if any(k in query for k in ("售后", "维修", "保养", "投诉", "理赔")):
-        return '{"next_node": "menu_after", "slots": {}}'
-    if any(k in query for k in ("你好", "谢谢", "再见", "早上好")):
-        return '{"next_node": "menu_chitchat", "slots": {}}'
     if any(k in query for k in ("买车", "购车", "试驾", "看车", "询价", "车型")):
         return '{"next_node": "menu_sales", "slots": {}}'
     return '{"next_node": "", "slots": {}}'  # 未知意图兜底
@@ -108,15 +104,6 @@ def _fsm_nlu(node_name: str, query: str) -> str:
         "询问预算": {"next_node": "buy_ask_city", "slots": {"budget": query}},
         "询问城市": {"next_node": "buy_confirm", "slots": {"city": query}},
         "确认购车信息": {"next_node": "", "slots": {}},
-        "询问问题类型": {
-            "next_node": "after_ask_vehicle",
-            "slots": {"issue_type": query},
-        },
-        "询问车辆信息": {
-            "next_node": "after_confirm",
-            "slots": {"car_info": query},
-        },
-        "确认售后信息": {"next_node": "", "slots": {}},
     }
     result = mapping.get(node_name, {"next_node": "", "slots": {}})
     return json.dumps(result, ensure_ascii=False)

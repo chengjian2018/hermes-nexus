@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.WARNING)
 
 
 # ============================================================================
-# Fixtures & helpers（与 test_car_sales_route.py 同构）
+# Fixtures & helpers
 # ============================================================================
 
 @pytest.fixture(scope="session", autouse=True)
@@ -36,14 +36,96 @@ def _fake_provider():
 
 @pytest.fixture(scope="module")
 def pattern():
-    """发现内置 pattern 并返回 car_sales_unified。"""
-    from src.dialogue.register import discover_builtin_patterns, registry
+    """返回内联构建的统一阶段 pattern（节点 code/name 与
+    fake_provider 脚本约定保持一致）。"""
+    from src.dialogue.module import FSMModule, RouteModule
+    from src.dialogue.node import BaseNode
+    from src.dialogue.pattern import Pattern
+    from src.dialogue.register import discover_builtin_patterns
+    from src.dialogue.unified import FSMUnifiedNLU, RouteUnifiedNLU
 
+    # AST 自动发现仍工作（挂到保留的内置 pattern 上验证）
     imported = discover_builtin_patterns()
-    assert "src.dialogue.car_sales_unified_route" in imported, (
-        f"car_sales_unified_route 未被自动发现，已发现: {imported}"
+    assert "src.dialogue.xianyu_agent_route" in imported, (
+        f"xianyu_agent_route 未被自动发现，已发现: {imported}"
     )
-    return registry.get("car_sales_unified")
+
+    root = RouteModule(
+        module_code="unified_root",
+        module_name="统一路由模块",
+        module_description="顶层路由：意图分类并分发到购车子流程或闲聊",
+        module_todo_description="判断用户是购车咨询还是闲聊，分发到对应菜单",
+        module_nodes=[
+            BaseNode(
+                node_code="u_route_root",
+                node_name="统一路由根节点",
+                node_description="助手入口，负责顶层意图分类",
+                node_todo_description="理解用户输入，匹配到购车或闲聊意图菜单",
+                sub_nodes=["u_menu_sales", "u_menu_chitchat"],
+                answer_examples=["您好，请问您是想看车还是有其他问题呢？"],
+            ),
+            BaseNode(
+                node_code="u_menu_sales",
+                node_name="购车菜单",
+                node_description="购车咨询入口菜单",
+                node_todo_description="用户有购车意图时选中本菜单",
+                jump_module="unified_buy",
+                answer_examples=["您好，购车咨询为您服务！"],
+            ),
+            BaseNode(
+                node_code="u_menu_chitchat",
+                node_name="闲聊菜单",
+                node_description="寒暄与闲聊承接",
+                node_todo_description="用户打招呼或闲聊时选中本菜单",
+                answer_examples=["您好呀～有什么能帮到您的，随时告诉我！"],
+            ),
+        ],
+        generate=RouteUnifiedNLU(),
+    )
+    buy = FSMModule(
+        module_code="unified_buy",
+        module_name="统一购车流程模块",
+        module_description="购车信息收集流程：品牌 → 预算 → 确认",
+        module_todo_description="按节点链收集品牌与预算，最终确认购车信息",
+        module_nodes=[
+            BaseNode(
+                node_code="u_ask_brand",
+                node_name="询问品牌",
+                node_description="收集用户心仪的汽车品牌",
+                node_todo_description="理解用户提到的汽车品牌并抽取 brand 槽位",
+                sub_nodes=["u_ask_budget"],
+                node_slots={"brand": "汽车品牌，如比亚迪、特斯拉"},
+                answer_examples=["好的，您对{brand}感兴趣呀！方便说下预算吗？"],
+            ),
+            BaseNode(
+                node_code="u_ask_budget",
+                node_name="询问预算",
+                node_description="收集用户的购车预算区间",
+                node_todo_description="理解用户提到的预算并抽取 budget 槽位",
+                sub_nodes=["u_confirm"],
+                node_slots={"budget": "预算区间，如20万左右"},
+                answer_examples=["预算{budget}很清晰！下面帮您确认一下信息。"],
+            ),
+            BaseNode(
+                node_code="u_confirm",
+                node_name="确认购车信息",
+                node_description="向用户确认已收集的品牌与预算信息",
+                node_todo_description="确认信息无误；流程到此结束",
+                sub_nodes=[],
+                node_slots={},
+                answer_examples=["为您确认：品牌{brand}，预算{budget}。"],
+                is_end=True,
+            ),
+        ],
+        generate=FSMUnifiedNLU(),
+    )
+    return Pattern(
+        code="unified_demo",
+        name="统一阶段测试 pattern",
+        description="ROUTE + FSM 全统一阶段（内联测试 fixture）",
+        entry_module_code="unified_root",
+        modules=[root, buy],
+    )
 
 
 @pytest.fixture()
@@ -98,7 +180,7 @@ def test_pattern_discovered_and_stage_wiring(pattern):
     from src.dialogue.module import ModuleType
     from src.dialogue.unified import FSMUnifiedNLU, RouteUnifiedNLU
 
-    assert pattern.code == "car_sales_unified"
+    assert pattern.code == "unified_demo"
     assert pattern.entry_module_code == "unified_root"
 
     root_module = pattern.module_map["unified_root"]

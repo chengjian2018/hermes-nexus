@@ -16,7 +16,7 @@ def test_explicit_enabled():
 
 
 def test_kwargs_style_enabled():
-    """car_sales_route 等声明式 pattern 用 kwargs 传参，需同样生效。"""
+    """声明式 pattern 用 kwargs 传参，需同样生效。"""
     from src.dialogue.module import FSMModule
 
     m = FSMModule(module_code="m1", **{"enable_clarify": True})

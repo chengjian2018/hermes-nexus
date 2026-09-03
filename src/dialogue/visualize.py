@@ -17,9 +17,9 @@ Pattern 可视化 -- 把 Pattern / Module / Node 的结构关系渲染成图。
 
 用法：
     python -m src.dialogue.visualize --list
-    python -m src.dialogue.visualize car_sales_route                  # diagrams/car_sales_route.html
-    python -m src.dialogue.visualize car_sales_route --format md     # Mermaid Markdown
-    python -m src.dialogue.visualize car_sales_route --format mermaid -o graph.mmd
+    python -m src.dialogue.visualize xianyu_agent                   # diagrams/xianyu_agent.html
+    python -m src.dialogue.visualize xianyu_agent --format md      # Mermaid Markdown
+    python -m src.dialogue.visualize xianyu_agent --format mermaid -o graph.mmd
     python -m src.dialogue.visualize --all
 """
 

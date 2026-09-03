@@ -12,7 +12,7 @@ import pytest
 from fake_provider import fake_llm_config, register_fake_provider
 
 
-def launch(client, session_id, pattern_code="car_sales_route"):
+def launch(client, session_id, pattern_code="xianyu_agent"):
     """发起对话任务并返回响应 JSON。"""
     resp = client.post(
         "/api/v1/launch",
@@ -161,7 +161,7 @@ def test_concurrent_duplicate_launch(registry_guard):
         request = DialogueRequest(
             request_id="req-gov-race",
             session_id="gov-race",
-            pattern_code="car_sales_route",
+            pattern_code="xianyu_agent",
             task_info={"caller": "pytest"},
         )
         barrier.wait()

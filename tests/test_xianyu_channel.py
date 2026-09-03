@@ -290,7 +290,7 @@ def fake_chat(monkeypatch):
 
 def test_channel_end_to_end(client, store, registry_guard, fake_chat, monkeypatch):
     """首条消息：自动 launch（真治理 + 落盘）→ 引擎对话 → reply 契约。"""
-    monkeypatch.setenv("XIANYU_CHANNEL_PATTERN", "car_sales_route")
+    monkeypatch.setenv("XIANYU_CHANNEL_PATTERN", "xianyu_agent")
     resp = client.post("/api/v1/channel/xianyu", json=inbound())
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -300,12 +300,12 @@ def test_channel_end_to_end(client, store, registry_guard, fake_chat, monkeypatc
     import main
 
     session = main.all_sessions["xianyu:acc1:chat1"]
-    assert session.pattern_code == "car_sales_route"
+    assert session.pattern_code == "xianyu_agent"
     assert session.cxt.metadata["task_info"]["item_id"] == "item1"
 
     rows = store.list_sessions()
     assert [r["session_id"] for r in rows] == ["xianyu:acc1:chat1"]
-    assert rows[0]["pattern_code"] == "car_sales_route"
+    assert rows[0]["pattern_code"] == "xianyu_agent"
 
     msgs = store.get_messages("xianyu:acc1:chat1")
     assert msgs[0]["role"] == "user" and msgs[0]["content"] == "你好"
@@ -315,7 +315,7 @@ def test_channel_second_turn_appends(
     client, store, registry_guard, fake_chat, monkeypatch
 ):
     """第二条消息复用会话：落盘消息追加，会话行不重复。"""
-    monkeypatch.setenv("XIANYU_CHANNEL_PATTERN", "car_sales_route")
+    monkeypatch.setenv("XIANYU_CHANNEL_PATTERN", "xianyu_agent")
     client.post("/api/v1/channel/xianyu", json=inbound())
     first_count = len(store.get_messages("xianyu:acc1:chat1"))
 

@@ -11,7 +11,7 @@ from src.chat.session import Session
 from src.chat.store import SessionStore
 
 
-def make_session(session_id="s1", pattern_code="car_sales_route"):
+def make_session(session_id="s1", pattern_code="xianyu_agent"):
     """构造一个带任务信息的最小 Session。"""
     session = Session(session_id=session_id, pattern_code=pattern_code)
     session.task_info = {"caller": "pytest"}
@@ -51,7 +51,7 @@ def test_create_session_roundtrip(tmp_path):
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
-    session.cxt.current_module_code = "car_sales_root"
+    session.cxt.current_module_code = "xianyu_root"
     session.cxt.current_node_code = "route_root"
     session.cxt.filled_slots = {"brand": "特斯拉"}
     store.create_session(session)
@@ -59,10 +59,10 @@ def test_create_session_roundtrip(tmp_path):
 
     row = fetch_one(db, "SELECT * FROM sessions WHERE session_id = 's1'")
     assert row is not None
-    assert row["pattern_code"] == "car_sales_route"
+    assert row["pattern_code"] == "xianyu_agent"
     assert row["request_id"] == "req-s1"
     assert json.loads(row["task_info"]) == {"caller": "pytest"}
-    assert row["current_module_code"] == "car_sales_root"
+    assert row["current_module_code"] == "xianyu_root"
     assert row["current_node_code"] == "route_root"
     assert json.loads(row["filled_slots"]) == {"brand": "特斯拉"}
     assert row["created_at"] > 0 and row["last_active_at"] > 0
@@ -217,7 +217,7 @@ def test_load_active_sessions_restores_fields(tmp_path):
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session("alive")
-    session.cxt.current_module_code = "car_sales_root"
+    session.cxt.current_module_code = "xianyu_root"
     session.cxt.current_node_code = "menu_sales"
     session.cxt.filled_slots = {"brand": "特斯拉"}
     store.create_session(session)
@@ -232,11 +232,11 @@ def test_load_active_sessions_restores_fields(tmp_path):
     r, last_active = restored[0]
     assert isinstance(last_active, float) and last_active > 0
     assert r.session_id == "alive"
-    assert r.pattern_code == "car_sales_route"
+    assert r.pattern_code == "xianyu_agent"
     assert r.pattern is None
     assert r.task_info == {"caller": "pytest"}
     assert r.cxt.metadata["request_id"] == "req-alive"
-    assert r.cxt.current_module_code == "car_sales_root"
+    assert r.cxt.current_module_code == "xianyu_root"
     assert r.cxt.current_node_code == "menu_sales"
     assert r.cxt.filled_slots == {"brand": "特斯拉"}
     assert [(m.role, m.content) for m in r.cxt.history] == [
@@ -270,7 +270,7 @@ def test_load_active_sessions_filters_expired(tmp_path):
 def _seed_two_sessions(store):
     """造两个会话各一轮对话，返回 (ids)。"""
     for sid in ("sa", "sb"):
-        session = make_session(sid, pattern_code="car_sales_route" if sid == "sa" else "other")
+        session = make_session(sid, pattern_code="xianyu_agent" if sid == "sa" else "other")
         store.create_session(session)
         session.cxt.add_message("user", f"q-{sid}", stage="chat")
         session.cxt.add_message("assistant", f"a-{sid}", stage="chat")

@@ -11,8 +11,8 @@
 task_info JSON（回车跳过；--task-info 直接传）。调试输出: -v 简要 / -vv 完整。
 
 用法示例:
-    .venv/bin/python cli.py chat --pattern car_sales_route -vv
-    .venv/bin/python cli.py ask "我想买车" --session-id t1
+    .venv/bin/python cli.py chat --pattern xianyu_agent -vv
+    .venv/bin/python cli.py ask "这个还包邮吗" --session-id t1
     .venv/bin/python cli.py list patterns
 """
 

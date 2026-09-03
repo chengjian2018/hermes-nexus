@@ -11,7 +11,7 @@ from src.tools.register import registry as tool_registry
 
 
 # ---------------------------------------------------------------------------
-# 中性 mock 工具：真实 workorder 工具由 Task 8 引入，此处用独立名避免冲突
+# 中性 mock 工具：模块级自注册，与内置工具互不干扰
 # ---------------------------------------------------------------------------
 
 def _mock_lent_tool_handler(args, **kwargs):

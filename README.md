@@ -22,9 +22,6 @@
 
 | Pattern | 说明 |
 |---|---|
-| `car_sales_route` | 卖车流程（FSM + ROUTE 混合示例） |
-| `car_sales_agent` | Agent 多模块示例（自由对话 + 工具） |
-| `car_sales_unified_route` | 统一阶段示例（单次调用 NLU+NLG 合一） |
 | `xianyu_agent` | 闲鱼卖家客服（复刻 xianyu-auto-reply：本地关键词意图检测，议价轮数控制） |
 
 ## 快速开始
@@ -83,8 +80,8 @@ export DASHSCOPE_API_KEY=sk-xxx
 ### 调试 CLI
 
 ```bash
-.venv/bin/python cli.py chat --pattern car_sales_route -vv   # 交互 REPL + 完整调试
-.venv/bin/python cli.py ask "我想买车" --session-id t1        # 单问单答
+.venv/bin/python cli.py chat --pattern xianyu_agent -vv    # 交互 REPL + 完整调试
+.venv/bin/python cli.py ask "这个还包邮吗" --session-id t1    # 单问单答
 .venv/bin/python cli.py list patterns                        # 列出已注册 pattern/tool/llm
 .venv/bin/python cli.py sessions                             # 列出持久化会话
 ```
@@ -105,11 +102,10 @@ src/
     unified.py           统一阶段（单次调用 NLU+NLG）
     dispatch.py          模块间分发原语（同轮移交/回弹拒绝）
     nlu/ nlg/ query/ recaller/   管线 stage 实现（框架扩展层）
-    car_sales_*.py       示例 pattern（应用层）
     xianyu_agent_route.py 闲鱼客服 pattern（应用层）
   clarify/               偏题澄清（rule + prompts + stage）
   llm/                   Provider 注册中心 + OpenAICompatible 实现
-  tools/                 工具注册中心 + 内置工具（calculator/weather/workorder）
+  tools/                 工具注册中心 + 内置工具（calculator/weather）
   channel/               外部消息渠道适配（ChannelSpec + 通用 handler + 闲鱼）
   prompt.py              全局 prompt 模板（node > module > class 三级覆盖）
 config/                  配置加载 + local_config.yaml（gitignored）

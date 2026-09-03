@@ -145,7 +145,7 @@ class BaseNode:
             return "暂无槽位定义"
         return json.dumps(self.node_slots, ensure_ascii=False)
 
-    def format_sub_nodes(self, node_map: Dict[str, "BaseNode"]) -> str:
+    def format_sub_nodes(self, node_map: Dict[str, BaseNode]) -> str:
         """Format the sub-node list (state-machine transition targets) as prompt-ready text.
 
         ``node_map`` maps node_code → node instance, typically ``ctx.node_map``.

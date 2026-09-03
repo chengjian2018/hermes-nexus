@@ -65,7 +65,7 @@ def test_r1_passes_position_and_override():
 
 
 def test_r2_agent_module_chat_path_uses_module_code():
-    """R2：AGENT 模块经 chat() 路径触发 _handle_agent_module，
+    """R2：AGENT 模块经 chat() 路径触发 AgentHandler，
     get_llm_config 以 module_code=<agent模块code>、node_code="" 调用。"""
     from src.dialogue.module import AgentModule
     agent_m = AgentModule(module_code="reception", module_name=" reception",
@@ -93,7 +93,7 @@ def test_r2_agent_module_chat_path_uses_module_code():
 
 
 def test_r3_refresh_after_node_resolution():
-    """R3：_run_pipeline 节点解析后按 module+node 刷新。"""
+    """R3：管线 handler 节点解析后按 module+node 刷新。"""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     calls = []

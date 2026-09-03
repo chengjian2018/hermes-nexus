@@ -1,7 +1,7 @@
 """
 ROUTE 模块处理器 — 管线执行 + jump_module 静默分发 / root 重置。
 
-原 chat._run_pipeline 的 ROUTE 分支原样迁移。
+行为等价原 chat._run_pipeline 的 ROUTE 分支。
 """
 
 import logging

@@ -1,7 +1,7 @@
 """
 AGENT 模块处理器 — 委托可插拔的 AgentRunner 执行。
 
-原 chat._handle_agent_module 原样迁移；唯一差异：run_agent 硬连线改为
+行为等价原 chat._handle_agent_module；差异：run_agent 硬连线改为
 经 AgentRunner 协议（默认 LoopAgentRunner，行为不变）。
 """
 

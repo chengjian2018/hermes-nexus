@@ -60,7 +60,7 @@ class PipelineHandler(ModuleHandler):
     def _resolve_entry_node(self, cxt, module) -> None:
         """确定当前节点（首次进入模块时取首节点），写入 cxt.current_node_code。
 
-        原 chat._run_pipeline 节点解析段原样迁移。
+        节点解析（首次进入模块取首节点 + node_map 校验）。
         """
         if cxt.current_node_code is None:
             if module.module_nodes:
@@ -83,7 +83,7 @@ class PipelineHandler(ModuleHandler):
     def _run_stages(self, cxt, module, pattern) -> None:
         """顺序执行管线 stages（槽位按 node > module > pattern 延迟解析）。
 
-        原 chat._run_pipeline stage 执行段原样迁移。
+        顺序执行 stages（槽位延迟解析在 resolve_stage 内）。
         """
         stages = self._stages(pattern, module)
 

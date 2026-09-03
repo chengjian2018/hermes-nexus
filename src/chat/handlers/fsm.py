@@ -1,7 +1,7 @@
 """
 FSM 模块处理器 — 管线执行 + next_node 节点跳转。
 
-原 chat._run_pipeline 的 FSM 分支与 _handle_node_transition 原样迁移。
+行为等价原 chat._run_pipeline FSM 分支与 _handle_node_transition。
 """
 
 import logging
@@ -44,7 +44,7 @@ class FsmHandler(PipelineHandler):
 
 
 def fsm_node_transition(cxt, module) -> None:
-    """FSM 轮末节点转移（原 chat._handle_node_transition 原样迁移）。
+    """FSM 轮末节点转移。
 
     按 NLU 结果的 next_node 跳转；澄清轮跳过槽位合并与跳转（topic/keywords
     不入 filled_slots，节点保持）。同时把 NLU 抽取的槽位增量合并进

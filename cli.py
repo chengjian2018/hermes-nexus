@@ -813,6 +813,24 @@ def _expand_short_verbose(argv: List[str]) -> List[str]:
     return [mapping.get(a, a) for a in argv]
 
 
+def knowledge_seed(scope: str = "xianyu:demo") -> None:
+    """给知识库填充演示种子数据（幂等）。
+
+    Args:
+        scope: 知识隔离域，格式 {channel}:{account_id}
+    """
+    from src.tools.knowledge_store import close_knowledge_store, get_knowledge_store
+
+    store = get_knowledge_store()
+    try:
+        store.seed(scope)
+        n_products = len(store.search_products(scope, limit=50))
+        n_cs = len(store.search_cs(scope, limit=50))
+        print(green(f"知识库种子完成: scope={scope}, 商品 {n_products} 条, 客服知识 {n_cs} 条"))
+    finally:
+        close_knowledge_store()
+
+
 if __name__ == "__main__":
     sys.argv[1:] = _expand_short_verbose(sys.argv[1:])
     fire.Fire({
@@ -820,4 +838,5 @@ if __name__ == "__main__":
         "ask": ask,
         "list": list_cmd,
         "sessions": sessions,
+        "knowledge-seed": knowledge_seed,
     })

@@ -106,6 +106,16 @@ def _init_store() -> None:
         store = None
 
 
+def _init_knowledge_store() -> None:
+    """预热知识库连接（工具懒持有的兜底提前到启动期）；失败不阻断服务。"""
+    try:
+        from src.tools.knowledge_store import get_knowledge_store
+        kb = get_knowledge_store()
+        logger.info("知识库已启用: %s", kb._conn and "ok")
+    except Exception:
+        logger.exception("初始化知识库失败，知识工具将在首次调用时重试")
+
+
 def _restore_sessions() -> int:
     """从 store 恢复未过期会话回内存（重启恢复）。
 
@@ -184,7 +194,25 @@ def _startup_persistence() -> None:
         _restore_sessions()
     except Exception:
         logger.exception("重启恢复失败，跳过恢复")
+    _init_knowledge_store()
     _cross_check_pattern_llm()
+
+
+@app.on_event("shutdown")
+def _shutdown_stores() -> None:
+    """服务关闭：释放知识库/会话库连接。"""
+    global store
+    try:
+        from src.tools.knowledge_store import close_knowledge_store
+        close_knowledge_store()
+    except Exception:
+        logger.exception("关闭知识库失败")
+    if store is not None:
+        try:
+            store.close()
+        except Exception:
+            logger.exception("关闭会话存储失败")
+        store = None
 
 
 # # check aleady registried patterns and tools

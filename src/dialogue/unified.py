@@ -356,3 +356,67 @@ class PassThroughNLG(PipelineStage):
                 ctx.session_id,
             )
         return ctx
+
+
+# ============================================================================
+# 开场白播报 —— 零 LLM 纯拼接 stage
+# ============================================================================
+
+class OpeningBroadcastNLG(PipelineStage):
+    """开场白播报 stage：task_info 字段与文案模板拼接成开场白，直接写
+    nlg_result["content"]（零 LLM 调用）。
+
+    装配：挂在入口节点的 ``generate``（单 stage 形态）。FSM 跳走后不再
+    回到该节点，天然只播一次；nlu_result 为空 → 跳转守卫保持当前节点，
+    直到业务节点接管。
+
+    模板两级：
+    - ``template``（构造参数）：str.format 字段级嵌入 task_info 字段，
+      如 ``"您好，我是{product_name}的智能助手"``；
+    - 未传 / 格式化失败（缺字段等）：回落默认文案 + task_info 键值对
+      逐行拼接（与 ctx.format_task_info 同源同格式）。
+    """
+
+    stage_name = "opening_broadcast"
+
+    DEFAULT_TEMPLATE = "您好，很高兴为您服务！"
+
+    def __init__(self, template: Optional[str] = None):
+        """
+        Args:
+            template: 开场白文案模板，``{field}`` 占位符对应 task_info 字段；
+                缺省回落类默认文案 + task_info 键值对拼接。
+        """
+        self.template = template
+
+    def _task_info(self, ctx: DialogueContext) -> Dict[str, Any]:
+        """与 ctx.format_task_info 同源：task_basic_info 优先，metadata 回落。"""
+        return ctx.task_basic_info or ctx.metadata.get("task_info") or {}
+
+    def _build_content(self, ctx: DialogueContext) -> str:
+        """拼接开场白：template.format 字段级填入；失败回落默认拼接。"""
+        task_info = self._task_info(ctx)
+
+        if self.template:
+            try:
+                return self.template.format(**task_info)
+            except (KeyError, IndexError, ValueError) as e:
+                logger.warning(
+                    "开场白模板格式化失败（task_info 缺字段或格式非法），"
+                    "回落默认拼接: template=%r, error=%s",
+                    self.template, e,
+                )
+
+        parts = [self.DEFAULT_TEMPLATE]
+        parts.extend(f"{key}: {value}" for key, value in task_info.items())
+        return "\n".join(parts)
+
+    def execute(self, ctx: DialogueContext) -> DialogueContext:
+        content = self._build_content(ctx)
+        ctx.nlg_result = {"content": content}
+        logger.info(
+            "开场白播报完成: session=%s, content_len=%d",
+            ctx.session_id,
+            len(content),
+        )
+        return ctx

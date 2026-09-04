@@ -351,6 +351,52 @@ def test_pass_through_nlg_keeps_existing_result():
 
 
 # ============================================================================
+# 开场白播报测试（零 LLM，纯拼接）
+# ============================================================================
+
+def test_opening_broadcast_default_fallback():
+    """未传 template：默认文案 + task_info 键值对逐行拼接。"""
+    from src.dialogue.base import DialogueContext
+    from src.dialogue.unified import OpeningBroadcastNLG
+
+    ctx = DialogueContext(session_id="s-ob-1", user_query="q")
+    ctx.metadata["task_info"] = {"product_name": "闲置iPhone", "price": "3000"}
+    ctx = OpeningBroadcastNLG().execute(ctx)
+
+    assert ctx.nlg_result["content"] == (
+        "您好，很高兴为您服务！\nproduct_name: 闲置iPhone\nprice: 3000"
+    )
+
+
+def test_opening_broadcast_template_fields():
+    """传 template：task_info 字段经 str.format 嵌入。"""
+    from src.dialogue.base import DialogueContext
+    from src.dialogue.unified import OpeningBroadcastNLG
+
+    ctx = DialogueContext(session_id="s-ob-2", user_query="q")
+    ctx.task_basic_info = {"product_name": "闲置iPhone"}
+    stage = OpeningBroadcastNLG(template="您好，我是{product_name}的智能助手")
+    ctx = stage.execute(ctx)
+
+    assert ctx.nlg_result["content"] == "您好，我是闲置iPhone的智能助手"
+
+
+def test_opening_broadcast_template_missing_field_falls_back():
+    """template 引用 task_info 缺失字段：告警回落默认拼接，不抛异常。"""
+    from src.dialogue.base import DialogueContext
+    from src.dialogue.unified import OpeningBroadcastNLG
+
+    ctx = DialogueContext(session_id="s-ob-3", user_query="q")
+    ctx.task_basic_info = {"product_name": "闲置iPhone"}
+    stage = OpeningBroadcastNLG(template="您好，我是{seller_name}的助手")
+    ctx = stage.execute(ctx)
+
+    assert ctx.nlg_result["content"] == (
+        "您好，很高兴为您服务！\nproduct_name: 闲置iPhone"
+    )
+
+
+# ============================================================================
 # 双轨澄清组合测试（enable_clarify=True 的 FSM 模块）
 # ============================================================================
 

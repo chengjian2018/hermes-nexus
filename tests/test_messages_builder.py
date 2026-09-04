@@ -1,11 +1,16 @@
-"""messages_builder 可插拔构建：默认行为 / 自定义透传 / 降级 / loop 接线。"""
+"""messages_builder 一体化契约：默认行为 / 自定义全权 / 两级解析 / loop 接线。"""
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from src.chat.messages import build_agent_messages, default_build_messages
+from src.chat.messages import (
+    build_agent_messages,
+    build_system_prompt,
+    default_build_messages,
+)
 from src.dialogue.base import DialogueContext
 from src.dialogue.module import AgentModule, BaseModule
 
@@ -20,13 +25,36 @@ def _mk_cxt() -> DialogueContext:
     return cxt
 
 
+def _bare_module() -> AgentModule:
+    """无 base_prompt / 无 sub_modules 的裸模块：默认构建无 system 行。"""
+    return AgentModule(module_code="m")
+
+
 # ---------------------------------------------------------------------------
-# default_build_messages（三段式：跨轮 + 显式 query + 本轮 hop 段）
+# build_system_prompt（自 loop 迁入的四块结构 + hooks 扩展块）
+# ---------------------------------------------------------------------------
+
+def test_build_system_prompt_base_and_extra_blocks():
+    module = AgentModule(module_code="m", base_prompt="你是客服")
+    cxt = DialogueContext(session_id="s", user_query="q")
+    prompt = build_system_prompt(module, cxt, extra_blocks=["店铺在售：A"])
+    assert prompt.startswith("你是客服")
+    assert "## 扩展上下文" in prompt and "店铺在售：A" in prompt
+
+
+def test_build_system_prompt_empty_when_no_material():
+    assert build_system_prompt(_bare_module(),
+                               DialogueContext(session_id="s", user_query="q")) == ""
+
+
+# ---------------------------------------------------------------------------
+# default_build_messages（system 行 + 三段式列表）
 # ---------------------------------------------------------------------------
 
 def test_default_builds_system_plus_user_assistant_history():
+    module = AgentModule(module_code="m", base_prompt="你是客服")
     cxt = _mk_cxt()
-    messages = default_build_messages("你是客服", cxt)
+    messages = default_build_messages(module, cxt)
     assert [m["role"] for m in messages] == [
         "system", "user", "assistant", "user", "user"]
     assert messages[0] == {"role": "system", "content": "你是客服"}
@@ -40,11 +68,18 @@ def test_default_builds_system_plus_user_assistant_history():
     assert messages[4] == {"role": "user", "content": "在吗"}
 
 
-def test_default_omits_system_entry_when_prompt_empty():
+def test_default_omits_system_entry_when_no_material():
     cxt = _mk_cxt()
-    messages = default_build_messages("", cxt)
+    messages = default_build_messages(_bare_module(), cxt)
     assert messages[0] == {"role": "user", "content": "你好"}
     assert all(m["role"] != "system" for m in messages)
+
+
+def test_default_includes_extra_blocks_in_system_row():
+    module = AgentModule(module_code="m", base_prompt="你是客服")
+    messages = default_build_messages(module, _mk_cxt(),
+                                      extra_blocks=["店铺在售：A"])
+    assert "店铺在售：A" in messages[0]["content"]
 
 
 def test_paired_tool_trace_replayed_as_protocol():
@@ -62,7 +97,7 @@ def test_paired_tool_trace_replayed_as_protocol():
     cxt.add_message("user", "北京天气怎么样", stage="chat")
     cxt.turn_history_start = 4
 
-    messages = default_build_messages("", cxt)
+    messages = default_build_messages(_bare_module(), cxt)
     assert messages == [
         {"role": "user", "content": "查下天气"},
         {"role": "assistant", "content": "查询中", "tool_calls": tool_calls},
@@ -85,7 +120,7 @@ def test_broken_pair_degrades_to_plain_text():
     cxt.add_message("user", "q", stage="chat")
     cxt.turn_history_start = 2
 
-    messages = default_build_messages("", cxt)
+    messages = default_build_messages(_bare_module(), cxt)
     assert messages == [
         {"role": "assistant", "content": "查询中"},  # 降级
         {"role": "assistant", "content": "结果如下"},
@@ -104,7 +139,7 @@ def test_trailing_pending_assistant_degrades():
     cxt.add_message("user", "q", stage="chat")
     cxt.turn_history_start = 1
 
-    messages = default_build_messages("", cxt)
+    messages = default_build_messages(_bare_module(), cxt)
     assert messages[0] == {"role": "assistant", "content": ""}
     assert messages[-1] == {"role": "user", "content": "q"}
 
@@ -116,7 +151,7 @@ def test_summary_wrapped_as_untrusted_user():
     cxt.add_message("user", "q", stage="chat")
     cxt.turn_history_start = 1
 
-    messages = default_build_messages("", cxt)
+    messages = default_build_messages(_bare_module(), cxt)
     assert messages[0]["role"] == "user"
     assert "untrusted_会话摘要" in messages[0]["content"]
     assert "此前用户咨询了手机价格" in messages[0]["content"]
@@ -134,7 +169,7 @@ def test_query_not_duplicated_with_hop_segment():
                     metadata={"suppressed": True})
     cxt.turn_history_start = 2
 
-    messages = default_build_messages("", cxt)
+    messages = default_build_messages(_bare_module(), cxt)
     contents = [m["content"] for m in messages if m["role"] == "user"]
     assert contents.count("帮我处理售后") == 1  # query 恰一次
     assert messages == [
@@ -146,61 +181,79 @@ def test_query_not_duplicated_with_hop_segment():
 
 
 # ---------------------------------------------------------------------------
-# build_agent_messages 解析入口
+# build_agent_messages 解析入口（module > pattern > 默认）
 # ---------------------------------------------------------------------------
 
 def test_unconfigured_module_falls_back_to_default():
     module = AgentModule(module_code="m")
     cxt = _mk_cxt()
-    assert build_agent_messages(module, "sp", cxt) == default_build_messages("sp", cxt)
+    assert build_agent_messages(module, cxt) == default_build_messages(module, cxt)
 
 
-def test_custom_builder_receives_final_prompt_and_full_cxt():
+def test_pattern_level_builder_used_when_module_has_none():
+    builder = lambda module, cxt, extra_blocks: [  # noqa: E731
+        {"role": "user", "content": "pattern-built"}]
+    module = AgentModule(module_code="m")
+    pattern = SimpleNamespace(code="p", messages_builder=builder)
+    assert build_agent_messages(module, _mk_cxt(), pattern=pattern) == [
+        {"role": "user", "content": "pattern-built"}]
+
+
+def test_module_builder_overrides_pattern_builder():
+    pat_builder = lambda m, c, e: [{"role": "user", "content": "pattern"}]  # noqa: E731
+    mod_builder = lambda m, c, e: [{"role": "user", "content": "module"}]  # noqa: E731
+    module = AgentModule(module_code="m", messages_builder=mod_builder)
+    pattern = SimpleNamespace(code="p", messages_builder=pat_builder)
+    assert build_agent_messages(module, _mk_cxt(), pattern=pattern) == [
+        {"role": "user", "content": "module"}]
+
+
+def test_custom_builder_receives_module_and_cxt():
     captured = {}
 
-    def builder(system_prompt, cxt):
-        captured["system_prompt"] = system_prompt
+    def builder(module, cxt, extra_blocks):
+        captured["module"] = module
         captured["cxt"] = cxt
+        captured["extra_blocks"] = extra_blocks
         return [{"role": "user", "content": "rewritten"}]
 
     module = AgentModule(module_code="m", messages_builder=builder)
     cxt = _mk_cxt()
-    result = build_agent_messages(module, "终态 prompt", cxt)
-    assert captured["system_prompt"] == "终态 prompt"
-    assert captured["cxt"] is cxt  # 同一对象：builder 自主决定怎么用完整 history
+    result = build_agent_messages(module, cxt, extra_blocks=["X"])
+    assert captured["module"] is module       # builder 自取组装原料
+    assert captured["cxt"] is cxt             # 同一对象：自主决定怎么用完整 history
+    assert captured["extra_blocks"] == ["X"]
     assert result == [{"role": "user", "content": "rewritten"}]
 
 
 def test_non_callable_builder_warns_and_degrades(caplog):
     module = AgentModule(module_code="m", messages_builder="oops")
-    cxt = _mk_cxt()
     with caplog.at_level(logging.WARNING, logger="src.chat.messages"):
-        result = build_agent_messages(module, "sp", cxt)
+        result = build_agent_messages(module, _mk_cxt())
     assert any("messages_builder" in r.message and "module m" in r.message
                for r in caplog.records)
-    assert result == default_build_messages("sp", cxt)
+    assert result == default_build_messages(module, _mk_cxt())
 
 
 def test_explicit_none_builder_keeps_default_silent(caplog):
     module = AgentModule(module_code="m", messages_builder=None)
-    cxt = _mk_cxt()
     with caplog.at_level(logging.WARNING, logger="src.chat.messages"):
-        result = build_agent_messages(module, "sp", cxt)
+        result = build_agent_messages(module, _mk_cxt())
     assert not caplog.records
-    assert result == default_build_messages("sp", cxt)
+    assert result == default_build_messages(module, _mk_cxt())
 
 
 def test_builder_exception_propagates():
-    def broken(system_prompt, cxt):
+    def broken(module, cxt, extra_blocks):
         raise RuntimeError("user code bug")
 
     module = AgentModule(module_code="m", messages_builder=broken)
     with pytest.raises(RuntimeError, match="user code bug"):
-        build_agent_messages(module, "sp", _mk_cxt())
+        build_agent_messages(module, _mk_cxt())
 
 
 def test_kwargs_passthrough_still_sets_attribute():
-    builder = lambda sp, cxt: []  # noqa: E731
+    builder = lambda module, cxt, extra_blocks: []  # noqa: E731
     module = BaseModule(module_code="m", **{"messages_builder": builder})
     assert module.messages_builder is builder
 
@@ -222,17 +275,34 @@ class _ScriptedProvider:
         return self.script.pop(0)
 
 
-def test_run_agent_uses_custom_messages_builder():
-    """run_agent 全链路：module.messages_builder 的返回值直达 provider。"""
-    from src.chat.loop import run_agent
+def _mk_run_session(module, pattern=None):
     from src.chat.session import Session
-    from src.dialogue.module import ModuleLink
     from src.dialogue.pattern import Pattern
 
-    def builder(system_prompt, cxt):
-        assert system_prompt  # 终态 system prompt 已拼好（含 base_prompt）
+    p = pattern or Pattern(code="p", name="t", description="t",
+                           entry_module_code=module.module_code,
+                           modules=[module])
+    s = Session(session_id="s", pattern_code=p.code)
+    s.pattern = p
+    s.cxt.module_map = p.module_map
+    s.cxt.node_map = p.node_map
+    s.cxt.current_module_code = module.module_code
+    s.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
+    s.cxt.user_query = "多少钱"
+    s.cxt.add_message("user", "多少钱", stage="chat")
+    return s
+
+
+def test_run_agent_uses_custom_messages_builder():
+    """run_agent 全链路：module.messages_builder 的产物直达 provider
+    （system 行归 builder 组装——base_prompt 从 module 自取）。"""
+    from src.chat.loop import run_agent
+
+    def builder(module, cxt, extra_blocks):
+        base = getattr(module, "base_prompt", "")
+        assert base == "你是前台"
         return [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": base},
             {"role": "user", "content": "few-shot: 问价→答价"},
             {"role": "user", "content": cxt.user_query},
         ]
@@ -241,23 +311,8 @@ def test_run_agent_uses_custom_messages_builder():
         module_code="reception", module_name="前台", module_description="接待",
         base_prompt="你是前台",
         messages_builder=builder,
-        sub_modules=[ModuleLink(target="after_sales")],
     )
-    after_sales = AgentModule(
-        module_code="after_sales", module_name="售后",
-        module_description="售后",
-    )
-    p = Pattern(code="p", name="t", description="t",
-                entry_module_code="reception",
-                modules=[reception, after_sales])
-    s = Session(session_id="s", pattern_code="p")
-    s.pattern = p
-    s.cxt.module_map = p.module_map
-    s.cxt.node_map = p.node_map
-    s.cxt.current_module_code = "reception"
-    s.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
-    s.cxt.user_query = "多少钱"  # run_agent 不写该字段（chat() 每轮写入），测试手动赋
-    s.cxt.add_message("user", "多少钱", stage="chat")
+    s = _mk_run_session(reception)
 
     provider = _ScriptedProvider([{"content": "99 包邮", "tool_calls": []}])
     with patch("src.chat.loop.build_provider", return_value=provider):
@@ -270,3 +325,61 @@ def test_run_agent_uses_custom_messages_builder():
     assert seen_messages[1] == {"role": "user", "content": "few-shot: 问价→答价"}
     assert seen_messages[-1] == {"role": "user", "content": "多少钱"}
     assert not any(m.get("content") == "你好" for m in seen_messages)
+
+
+def test_run_agent_delivers_p1_fragments_to_custom_builder():
+    """P1 hook 片段经 extra_blocks 送达自定义 builder（叠加不被替换失效）。"""
+    from src.chat.loop import run_agent
+
+    captured = {}
+
+    def builder(module, cxt, extra_blocks):
+        captured["blocks"] = list(extra_blocks)
+        return [{"role": "system",
+                 "content": "S\n" + "\n".join(extra_blocks)},
+                {"role": "user", "content": cxt.user_query}]
+
+    reception = AgentModule(module_code="reception", messages_builder=builder)
+    s = _mk_run_session(reception)
+    s.pattern.agent_hooks = {"on_agent_start": [lambda e: "店铺在售：A"]}
+
+    provider = _ScriptedProvider([{"content": "ok", "tool_calls": []}])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        run_agent(s, reception, s.cxt.metadata["llm_override"])
+
+    assert captured["blocks"] == ["店铺在售：A"]
+    assert "店铺在售：A" in provider.seen[0]["messages"][0]["content"]
+
+
+def test_run_agent_force_close_suffix_survives_custom_builder():
+    """force_close 后缀框架侧强制：builder 无 system 行则前置，有则追加。"""
+    from src.chat.loop import run_agent
+
+    def builder_no_system(module, cxt, extra_blocks):
+        return [{"role": "user", "content": cxt.user_query}]
+
+    reception = AgentModule(module_code="reception",
+                            messages_builder=builder_no_system)
+    s = _mk_run_session(reception)
+    provider = _ScriptedProvider([{"content": "收尾", "tool_calls": []}])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        run_agent(s, reception, s.cxt.metadata["llm_override"],
+                  force_close=True)
+    messages = provider.seen[0]["messages"]
+    assert messages[0] == {"role": "system",
+                           "content": "请直接回应用户，勿再移交。"}
+    assert messages[1] == {"role": "user", "content": "多少钱"}
+
+    def builder_with_system(module, cxt, extra_blocks):
+        return [{"role": "system", "content": "你是前台"},
+                {"role": "user", "content": cxt.user_query}]
+
+    reception2 = AgentModule(module_code="reception",
+                             messages_builder=builder_with_system)
+    s2 = _mk_run_session(reception2)
+    provider2 = _ScriptedProvider([{"content": "收尾", "tool_calls": []}])
+    with patch("src.chat.loop.build_provider", return_value=provider2):
+        run_agent(s2, reception2, s2.cxt.metadata["llm_override"],
+                  force_close=True)
+    assert provider2.seen[0]["messages"][0]["content"] == (
+        "你是前台\n请直接回应用户，勿再移交。")

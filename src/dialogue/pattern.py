@@ -14,6 +14,7 @@ class Pattern:
                  query: Optional[Any] = None,
                  post_recall: Optional[Any] = None,
                  agent_hooks: Optional[dict] = None,
+                 messages_builder: Optional[Any] = None,
                  **kwargs):
         self.code = code
         self.name = name
@@ -25,6 +26,11 @@ class Pattern:
         # agent loop hooks（pattern 级声明，module 层 agent_hooks 可整体替换；
         # 形态 {点位: [hook,...]}，消费方见 src/chat/agent_hooks.py）
         self.agent_hooks = agent_hooks
+
+        # AGENT messages 一体化构建器（pattern 级声明，module 层
+        # messages_builder 可覆写；签名 (module, cxt, extra_blocks) -> messages，
+        # 含 system 行组装，消费方见 src/chat/messages.py）
+        self.messages_builder = messages_builder
 
         # 管线槽位三层默认（node > module > pattern 中的 pattern 层）
         self.generate = generate

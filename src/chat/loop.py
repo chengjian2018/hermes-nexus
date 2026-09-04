@@ -35,16 +35,10 @@ from src.chat.agent_hooks import (
 from src.chat.messages import build_agent_messages
 from src.chat.session import Session
 from src.dialogue.base import (
-    DialogueContext,
     ModuleJumpEvent,
     encode_tool_call_content,
-    fill_prompt_template,
 )
 from src.llm.resolve import build_provider
-from src.prompt import (
-    AGENT_PROJECTION_RECALL_PROMPT,
-    AGENT_TEAM_RULES_PROMPT,
-)
 from src.tools.register import registry as tool_registry
 
 logger = logging.getLogger(__name__)
@@ -106,21 +100,13 @@ def run_agent(
     # 空声明时各挂载点零开销直通）
     hooks = resolve_agent_hooks(module, session.pattern)
 
-    # P1 on_agent_start：进 loop、build system prompt 前取数注入。片段经
-    # builder 拼入块结构（force_close 后缀之前），hook 不写 cxt
+    # P1 on_agent_start：进 loop、messages 组装前取数注入。片段经
+    # extra_blocks 送达 builder（契约要求包含），hook 不写 cxt
     fragments = collect_fragments(
         hooks,
         AgentStartEvent(session_id=cxt.session_id,
                         module_code=module.module_code, cxt=cxt),
     ) if hooks else []
-    system_prompt = _build_system_prompt(module, cxt, extra_blocks=fragments)
-    if force_close:
-        system_prompt = (system_prompt + "\n请直接回应用户，勿再移交。").strip()
-    if len(system_prompt) > _PROMPT_LENGTH_WARN:
-        logger.warning(
-            "Agent system_prompt 过长 (%d 字符): session=%s, module=%s（投影膨胀观测）",
-            len(system_prompt), cxt.session_id, module.module_code,
-        )
 
     own_tools = _resolve_tools(module, session.pattern)
     lent_schemas, lent_by = _resolve_lent_tools(module, session.pattern)
@@ -131,7 +117,14 @@ def run_agent(
     allowed_names = {t.get("function", {}).get("name", "")
                      for t in own_tools + lent_schemas}
 
-    messages = _build_messages(module, system_prompt, cxt)
+    # Messages 一体化构建（system 内容与列表装配同源）：
+    # module.messages_builder > pattern.messages_builder > 默认三段式
+    messages = build_agent_messages(module, cxt, pattern=session.pattern,
+                                    extra_blocks=fragments)
+    # force_close 收尾后缀框架侧强制（控制流语义，任何 builder 不可破坏）
+    if force_close:
+        _append_force_close_suffix(messages)
+    _warn_prompt_length(messages, cxt, module)
 
     model = llm_config["model"]
     temperature = llm_config.get("temperature", 0.7)
@@ -386,25 +379,8 @@ def _dispatch_tool_calls(
 
 
 # ---------------------------------------------------------------------------
-# Projection / transfer tool builders
+# Transfer tool builders（投影块构建已迁 src/chat/messages.py）
 # ---------------------------------------------------------------------------
-
-def build_projection_block(module, module_map) -> str:
-    """邻接投影块：每条 lend_knowledge 边一片（spec §4 §3.2）。"""
-    blocks = []
-    for link in module.sub_modules:
-        if not link.lend_knowledge:
-            continue
-        target = module_map.get(link.target)
-        if target is None:
-            continue
-        parts = [f"## 邻接能力：{target.module_name}（{target.module_code}）"]
-        parts.append(target.to_projection_text())
-        if link.lend_tools:
-            parts.append(f"- 可借工具：{', '.join(link.lend_tools)}")
-        blocks.append("\n".join(parts))
-    return "\n\n".join(blocks)
-
 
 def build_transfer_tools(module, module_map) -> list:
     """由 sub_modules 逐边生成 transfer 工具（spec §4 §3.3）。"""
@@ -436,53 +412,37 @@ def build_transfer_tools(module, module_map) -> list:
 
 # ---------------------------------------------------------------------------
 # System Prompt construction
+# （四块结构 + hooks 扩展块已迁 src/chat/messages.py 的 build_system_prompt，
+#  与 messages 一体化构建同源；本模块仅保留框架侧强制项）
 # ---------------------------------------------------------------------------
 
-def _build_system_prompt(module, cxt: DialogueContext,
-                         extra_blocks: Optional[List[str]] = None) -> str:
-    """四块结构 + hooks 扩展块：base_prompt + 投影块 + 回看块 + 任务/槽位。
+# force_close 收尾后缀（超跳数防死循环的控制流语义，任何 messages_builder
+# 不可破坏——run_agent 在 builder 返回后由 _append_force_close_suffix 强制）
+_FORCE_CLOSE_SUFFIX = "\n请直接回应用户，勿再移交。"
 
-    ``extra_blocks`` 为 on_agent_start hook 返回的注入片段（声明序，由
-    run_agent 收集）：非空时以 "## 扩展上下文" 单块拼在"已填充槽位"之后——
-    force_close 后缀在其后追加，长度告警覆盖注入后的真实长度。
-    """
-    parts = []
 
-    if module.base_prompt:
-        parts.append(module.base_prompt)
+def _append_force_close_suffix(messages: List[Dict[str, Any]]) -> None:
+    """追加收尾后缀到首条 system 行；无 system 行则前置一条。"""
+    for m in messages:
+        if m.get("role") == "system":
+            m["content"] = (m.get("content") or "") + _FORCE_CLOSE_SUFFIX
+            return
+    messages.insert(0, {"role": "system",
+                        "content": _FORCE_CLOSE_SUFFIX.strip()})
 
-    # 团队规则：只要存在 sub_modules 边（会生成 transfer 工具）就注入，
-    # 不依赖投影块非空——否则 lend_knowledge=False 的模块拿到 transfer 工具
-    # 却没有"transfer 轮不对用户说话"等规则
-    if module.sub_modules:
-        projection = build_projection_block(module, cxt.module_map)
-        if projection:
-            parts.append(projection)
-        parts.append(AGENT_TEAM_RULES_PROMPT)
 
-    # 回看块：仅当前模块就是当初的借方时注入，避免跨模块泄漏
-    served = cxt.metadata.get("served_by_projection")
-    if isinstance(served, dict) and served.get("module") == module.module_code:
-        parts.append(fill_prompt_template(AGENT_PROJECTION_RECALL_PROMPT, {
-            "projection_source": served.get("source", ""),
-        }))
-
-    task_info = cxt.metadata.get("task_info", {})
-    if task_info:
-        parts.append("\n## 任务信息")
-        for key, value in task_info.items():
-            parts.append(f"- {key}: {value}")
-
-    if cxt.filled_slots:
-        parts.append("\n## 已填充槽位")
-        parts.append(json.dumps(cxt.filled_slots, ensure_ascii=False, indent=2))
-
-    # hooks 注入块（on_agent_start 片段，声明序拼接）
-    if extra_blocks:
-        parts.append("\n## 扩展上下文")
-        parts.append("\n\n".join(extra_blocks))
-
-    return "\n".join(parts)
+def _warn_prompt_length(messages, cxt, module) -> None:
+    """system 行长度告警（投影膨胀观测；覆盖 hooks 注入与后缀后的真实长度）。"""
+    system_row = next(
+        (m for m in messages if m.get("role") == "system"), None)
+    if system_row is None:
+        return
+    length = len(system_row.get("content") or "")
+    if length > _PROMPT_LENGTH_WARN:
+        logger.warning(
+            "Agent system_prompt 过长 (%d 字符): session=%s, module=%s（投影膨胀观测）",
+            length, cxt.session_id, module.module_code,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -572,19 +532,6 @@ def _resolve_lent_tools(module, pattern):
             schemas.append(schema)
             lent_by[name] = link.target
     return schemas, lent_by
-
-
-# ---------------------------------------------------------------------------
-# Message list construction
-# ---------------------------------------------------------------------------
-
-def _build_messages(module, system_prompt: str, cxt) -> List[Dict[str, Any]]:
-    """Build the message list sent to the LLM.
-
-    经 build_agent_messages 入口：module.messages_builder 优先（可插拔），
-    未配置降级默认构建（system + user/assistant 历史，见 chat/messages.py）。
-    """
-    return build_agent_messages(module, system_prompt, cxt)
 
 
 # ---------------------------------------------------------------------------

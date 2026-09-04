@@ -515,7 +515,7 @@ def test_synthetic_error_row_replays_paired():
     ])
     _run(s, provider)
     s.cxt.turn_history_start = 0  # user 行下标（空 history 起步，hop 内行从 1 起）
-    msgs = default_build_messages("新问题", s.cxt)
+    msgs = default_build_messages(s.cxt.module_map["main"], s.cxt)
     asst = [m for m in msgs if m["role"] == "assistant" and m.get("tool_calls")]
     assert len(asst) == 1 and asst[0]["tool_calls"][0]["id"] == "c1"
     tool_rows = [m for m in msgs if m["role"] == "tool"]
@@ -540,7 +540,7 @@ def test_rewritten_round_replays_paired():
     ])
     _run(s, provider)
     s.cxt.turn_history_start = 0
-    msgs = default_build_messages("新问题", s.cxt)
+    msgs = default_build_messages(s.cxt.module_map["main"], s.cxt)
     asst = [m for m in msgs if m["role"] == "assistant" and m.get("tool_calls")]
     assert len(asst) == 1
     assert json.loads(

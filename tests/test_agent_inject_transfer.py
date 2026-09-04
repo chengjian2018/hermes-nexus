@@ -102,7 +102,7 @@ class ScriptedProvider:
 
 
 def test_projection_block_contains_knowledge_and_tools():
-    from src.chat.loop import build_projection_block
+    from src.chat.messages import build_projection_block
     s = _mk_session()
     block = build_projection_block(
         s.cxt.module_map["reception"], s.cxt.module_map)

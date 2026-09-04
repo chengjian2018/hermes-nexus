@@ -286,9 +286,10 @@ class FixedNLG(BaseNLG):
         3. 意图菜单节点     → 节点 base_nlg_prompt（XIANYU_*_NLG_PROMPT）
            + 议价上下文（price 意图）+ 买家消息 → 单次 LLM + 违禁词过滤
 
-    挂在模块级 generate dict 的 nlg 位（node 无覆盖时生效；_RouteNodeAdvance
-    已先切好节点，本 stage 读到的当前节点即命中菜单）。节点级 generate 的
-    nlg 优先于本 stage（node > module，stage_slots.py 三层解析）。
+    挂在模块级 generate dict 的 nlg 位（node 无覆盖时生效；chat 层跳转检测
+    在 nlu 部件后已推进菜单节点并刷新节点级 LLM 配置，本 stage 读到的当前
+    节点即命中菜单）。节点级 generate 的 nlg 优先于本 stage
+    （node > module，stage_slots.py 三层解析）。
     """
 
     stage_name = "fixed_nlg"

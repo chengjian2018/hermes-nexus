@@ -15,6 +15,41 @@ from typing import Any, Dict, List, Literal, Optional
 
 
 # ============================================================================
+# Module jump event (same-turn reroute primitive)
+# ============================================================================
+
+@dataclass
+class ModuleJumpEvent:
+    """一次模块跳转意图 —— 由 stage / agent 轮内产生，chat 层统一消费。
+
+    产生方（写入 ``cxt.actions``）：
+    - NLU 轮内检测：``nlu_result.jump_module`` 指向其他模块
+    - ROUTE 菜单节点配置：``node.jump_module``（next_node 命中后）
+    - AGENT transfer 工具调用：``transfer_to_{target}``
+
+    消费方（chat 层 hop 循环）：校验目标存在于 module_map 即重路由
+    （写 current_module_code、置空 current_node_code），淡化邻接边界。
+
+    同时保留 dict 形态动作（如 ``{"conversation_end": True}``）的兼容：
+    actions 列表内非本类型元素原样快照进 ChatResult.actions。
+    """
+
+    target_module_code: str
+    reason: str = ""      # 移交上下文：供目标模块承接（注入 prompt）
+    source: str = ""      # nlu_jump / route_menu / handoff_tool
+
+    def to_dict(self) -> Dict[str, Any]:
+        """观测形态：快照进 ChatResult.actions / cli 渲染用。"""
+        return {
+            "module_jump": {
+                "target": self.target_module_code,
+                "reason": self.reason,
+                "source": self.source,
+            }
+        }
+
+
+# ============================================================================
 # Pipeline stage base class
 # ============================================================================
 
@@ -79,11 +114,9 @@ class DialogueContext:
 
     Every PipelineStage receives and returns this object; all intermediate results are stored here.
 
-    # metadata 键约定（module dispatch 机制使用，见 dispatch.py）：
-    #   dispatch_graph       : Dict[str, Set[str]]  合法转移边（chat 启动时注入）
-    #   dispatch_log         : List[Dict]           本轮转移链（每轮开头清空）
-    #   handoff_context      : Dict                 最近一次转移的承接信息
+    # metadata 键约定（stage / chat 层自管理）：
     #   served_by_projection : Dict{module, source}  A 借投影答轮：借方模块与来源域
+    #   clarify              : Dict                  ClarifyStage 每轮自置自清
     """
 
     session_id: str
@@ -131,7 +164,9 @@ class DialogueContext:
     # Actions reserved for this turn (e.g. sends / transitions / external calls the reply should
     # trigger besides the text). Stages/handlers may append; the chat layer snapshots per turn
     # (see TurnLifecycle in src/chat/context_lifecycle.py — per-turn reset).
-    actions: List[Dict[str, Any]] = field(default_factory=list)
+    # 模块跳转动作用 ModuleJumpEvent 实例承载（chat 层 hop 循环消费后重路由），
+    # 其余 dict 形态动作原样快照进 ChatResult.actions。
+    actions: List[Any] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Convenience methods
@@ -266,6 +301,25 @@ class DialogueContext:
             if node is not None
             else "暂无后续节点信息"
         )
+
+    def format_jump_modules(self) -> str:
+        """Format the jumpable module list as prompt-ready text (slot: jump_modules).
+
+        列出 module_map 中除当前模块外的全部模块（编码 + 名称 + 描述），
+        供 NLU prompt 输出 jump_module 字段时参照。边界淡化：不问邻接图，
+        只要目标在 module_map 中即合法跳转。
+        """
+        parts = []
+        for code, module in self.module_map.items():
+            if code == self.current_module_code:
+                continue
+            name = getattr(module, "module_name", "") or code
+            desc = getattr(module, "module_description", "") or ""
+            seg = f"- {code}（{name}）"
+            if desc:
+                seg += f"：{desc}"
+            parts.append(seg)
+        return "\n".join(parts) if parts else "暂无可跳转模块"
 
     def format_answer_pattern(self) -> str:
         """Format the current node's answer examples as prompt-ready text (slot: answer_pattern)."""

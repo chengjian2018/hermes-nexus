@@ -1,4 +1,4 @@
-from typing import Optional, Any, Dict, Set
+from typing import Optional, Any
 
 
 class Pattern:
@@ -31,10 +31,9 @@ class Pattern:
         self.module_map = dict()
 
         # ------------------------------------------------------------------
-        # 转移图构建 + 注册期 fail fast（spec §2.4）
+        # 模块拓扑注册 + 注册期 fail fast（悬空/自环/越权配置，spec §2.4）
         # ------------------------------------------------------------------
         self.max_hops = int(kwargs.pop("max_hops", 2))
-        self.dispatch_graph: Dict[str, Set[str]] = {}
 
         if self.modules is not None:
             for module in self.modules:
@@ -47,8 +46,7 @@ class Pattern:
                     self.node_map[node.node_code] = node
 
             for module in self.modules:
-                edges: Set[str] = set()
-                # 1) sub_modules 邻接边
+                # 1) sub_modules 邻接边校验（transfer 工具 / 借出工具配置）
                 for link in module.sub_modules:
                     if link.target not in self.module_map:
                         raise ValueError(
@@ -66,8 +64,8 @@ class Pattern:
                             f"越权借出: {module.module_code} 借出配置无效: "
                             f"{sorted(unauthorized)} 不在 {link.target}.use_tools 中"
                         )
-                    edges.add(link.target)
-                # 2) ROUTE 菜单节点 jump_module 推导
+                # 2) 节点 jump_module 配置校验（跳转目标 fail fast；
+                #    运行期由 chat 层 _detect_jump_after_stage 消费，无邻接图）
                 for node in module.module_nodes:
                     jump_target = getattr(node, "jump_module", None)
                     if jump_target:
@@ -81,9 +79,6 @@ class Pattern:
                                 f"自环转移边: 节点 {node.node_code}.jump_module "
                                 f"→ {jump_target}（模块自环）"
                             )
-                        edges.add(jump_target)
-                if edges:
-                    self.dispatch_graph[module.module_code] = edges
 
             for key, value in kwargs.items():
                 setattr(self, key, value)

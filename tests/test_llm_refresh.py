@@ -23,7 +23,6 @@ def _launch(pattern, sessions, sid="s1"):
     session.pattern = pattern
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
-    session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
     session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions[sid] = session
     return session
@@ -105,16 +104,20 @@ def test_r3_refresh_after_node_resolution():
 
 
 def test_r4_route_menu_node_takes_effect_same_turn():
-    """R4：ROUTE 菜单命中切节点后当轮刷新（菜单节点配置驱动当轮 NLG）。"""
+    """R4：ROUTE 菜单命中切节点后当轮刷新（菜单节点配置驱动当轮 NLG）。
+
+    刷新点在 chat._detect_jump_after_stage（原 _RouteNodeAdvance 职责并入），
+    NLU 更新 nlu_result 后：先推进菜单节点 + R4 node 级刷新，再判跳转。
+    """
     menu = BaseNode(node_code="menu_a", node_name="菜单A",
-                    jump_module="m1", base_nlg_prompt="回答A")
+                    base_nlg_prompt="回答A")
     root = BaseNode(node_code="root", node_name="根")
     route = RouteModule(module_code="r1", module_name="r", module_description="d",
                         module_todo_description="t", sub_modules=[],
                         module_nodes=[root, menu])
-    agent_m = _fsm_pattern().module_map["m1"]
+    fsm_m = _fsm_pattern().module_map["m1"]
     pattern = Pattern(code="pr", name="t", description="t",
-                      entry_module_code="r1", modules=[route, agent_m])
+                      entry_module_code="r1", modules=[route, fsm_m])
     sessions = {}
     _launch(pattern, sessions, sid="s2")
     calls = []
@@ -129,18 +132,16 @@ def test_r4_route_menu_node_takes_effect_same_turn():
         def execute(self, ctx):
             ctx.nlg_result = {"content": "ok"}
             return ctx
-    import src.chat.chat as chat_mod
-    import src.dialogue.stage_slots as stage_slots_mod
-    pattern.stages = [_StubNLU(), stage_slots_mod._RouteNodeAdvance(), _StubNLG()]
-    # _RouteNodeAdvance 已迁入 stage_slots（R4 刷新直连 config.config），
-    # 双命名空间打 spy：chat（R1-R3）+ stage_slots（R4）
+    pattern.stages = [_StubNLU(), _StubNLG()]
+    # R1-R3 与 R4 刷新都经 chat 命名空间（R4 在 _detect_jump_after_stage 内）
     with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)), \
-         patch.object(stage_slots_mod, "get_llm_config",
-                      side_effect=_record_calls(calls)):
+         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s2", "选A")
     r4 = [c for c in calls if c["node_code"] == "menu_a"]
     assert r4, f"R4 应在菜单命中后按 node=menu_a 刷新，实际调用: {calls}"
+    # 菜单无 jump_module 配置 → 无模块跳转，留在路由模块
+    assert sessions["s2"].cxt.current_node_code == "root"  # 轮末重置回 root
+    assert sessions["s2"].cxt.current_module_code == "r1"
 
 
 def test_override_wins_and_survives_turns():

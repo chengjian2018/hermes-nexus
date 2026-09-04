@@ -27,7 +27,7 @@ FSM_NLU_DEFAULT_PROMPT = """## 任务描述
 
 ## 输出内容
 以json格式输出，示例格式：
-{"next_node": "xx", slots: {"slot1": "", "slot2": []}}
+{"next_node": "xx", "slots": {"slot1": "", "slot2": []}}
 解释：next_node必须在后续节点中存在，slots需要按照给定节点的slots模版进行抽取，示例格式仅做参考。
 
 ## 特殊情况：用户输入与当前节点待办无关
@@ -90,6 +90,9 @@ ROUTE_NLU_DEFAULT_PROMPT = """## 任务描述
 ### 后续节点信息
 {__next_node__}
 
+### 可跳转模块
+{__jump_modules__}
+
 ### 用户输入
 {__query__}
 
@@ -106,9 +109,18 @@ ROUTE_NLU_DEFAULT_PROMPT = """## 任务描述
 {__history__}
 
 ## 输出内容
-以json格式输出，示例格式：
-{"next_node": "xx", slots: {"slot1": "", "slot2": []}}
+以json格式输出，按匹配结果二选一：
+
+匹配到后续节点（当前模块内处理）：
+{"next_node": "xx", "slots": {"slot1": "", "slot2": []}}
 解释：next_node必须在后续节点中存在，slots需要按照给定节点的slots模版进行抽取，示例格式仅做参考。
+
+匹配到其他模块（移交目标模块处理）：
+{"next_node": "", "jump_module": "模块编码", "reason": "跳转原因与已收集信息摘要", "slots": {...}}
+解释：
+1. jump_module 必须是可跳转模块清单中的编码，且不得为当前模块。
+2. reason 供目标模块承接上下文（已收集的用户信息、跳转原因）。
+3. 仅当用户输入明确属于其他模块的处理域时才使用该输出，当前模块可处理时禁止使用。
 """
 
 ROUTE_NLG_DEFAULT_PROMPT = """## 任务描述
@@ -393,11 +405,6 @@ AGENT_TEAM_RULES_PROMPT = """## 团队协作规则
 1. 「邻接能力」块覆盖的问题：一句话能答或一次工具调用能解决的，直接以自己的身份回答，不要提及能力来源。
 2. 需要多轮深入流程（完整业务流程、复杂方案沟通）的，调用 transfer_to_XX 工具，reason 中带上已收集的用户信息。
 3. 调用 transfer 工具的那一次，不要对用户说任何话（包括"为您转接"）——接手方会直接回复用户，用户对这个切换无感知。
-"""
-
-AGENT_TAKEOVER_PROMPT = """## 承接上下文
-你从【{__from_module__}】接手了本对话。用户诉求与已有信息：{__reason__}
-请直接以自己的身份接续回复（可自然承接，如"看到您想……"），不要描述转接过程。
 """
 
 AGENT_PROJECTION_RECALL_PROMPT = """## 上一轮提示

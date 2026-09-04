@@ -2,15 +2,15 @@
 DialogueContext 字段生命周期管理 — 每轮必处理 / 跨轮保留 / 增量更新的唯一管理者。
 
 cxt 跨轮存活于 Session 上，字段的生命周期政策此前散落在 chat() 开头
-（pop dispatch_log / handoff_context）与各 handler 的转移逻辑里。本模块把
-政策收敛为声明式集合：改集合即改政策，不再散落。
+与各 handler 的转移逻辑里。本模块把政策收敛为声明式集合：改集合即改
+政策，不再散落。
 
 四类字段（见 TurnLifecycle 类属性）：
 - PERSISTENT     ：跨轮绝不删除（会话状态本体）
 - PER_TURN_RESET ：每轮开头重置（本轮临时产物；hop 之间绝不重置——
-                   dispatch_log 依赖同轮累积做回弹拒绝）
+                   actions 里的跳转事件依赖同轮存活至 hop 循环消费）
 - INCREMENTAL    ：增量更新（history 追加、filled_slots 合并），由本模块提供入口
-- STAGE_MANAGED  ：由 stage / dispatch 机制自管理，生命周期层不触碰
+- STAGE_MANAGED  ：由 stage 机制自管理，生命周期层不触碰
 """
 
 import logging
@@ -25,10 +25,9 @@ class TurnLifecycle:
     """DialogueContext 字段生命周期的唯一管理者。
 
     调用时序约定（chat 层编排器负责遵守）：
-    1. ``begin_turn``   — 每轮恰好一次，hop 循环之前（含同轮 dispatch 重入 hop）
-    2. ``bind_pattern`` — 每轮一次，pattern 校验通过后
-    3. ``merge_slots``  — FSM/ROUTE 转移阶段按需（增量合并 nlu 槽位）
-    4. ``end_turn``     — 每轮恰好一次，回复产出之后
+    1. ``begin_turn``   — 每轮恰好一次，hop 循环之前（含同轮跳转重入 hop）
+    2. ``merge_slots``  — FSM/ROUTE 转移阶段按需（增量合并 nlu 槽位）
+    3. ``end_turn``     — 每轮恰好一次，回复产出之后
 
     集合即政策：调整某字段的归属，改下方声明即可，不动流程代码。
     """
@@ -38,8 +37,8 @@ class TurnLifecycle:
     # 会话状态本体，误删即丢状态。
     PERSISTENT_FIELDS = (
         "history",              # 增量追加（end_turn），绝不整体清空
-        "current_module_code",  # 由 dispatch / handler 维护
-        "current_node_code",    # 由 dispatch / handler 维护
+        "current_module_code",  # 由跳转消费（chat 层 _apply_jump）维护
+        "current_node_code",    # 由跳转消费 / 节点转移维护
         "filled_slots",         # 增量合并（merge_slots）
         "task_basic_info",      # launch 时注入，全程只读
         "session_id",
@@ -47,7 +46,6 @@ class TurnLifecycle:
         "module_map",
     )
     PERSISTENT_METADATA_KEYS = (
-        "dispatch_graph",       # bind_pattern setdefault 注入
         "bargain_settings",
         "task_info",
         "llm_override",
@@ -62,17 +60,17 @@ class TurnLifecycle:
         "pre_recall_results",
         "rewritten_queries",
         "post_recall_results",
-        "actions",              # 动作通道每轮重建（chat 层轮末快照进 ChatResult）
+        "actions",              # 跳转事件/动作通道每轮重建（chat 层轮末快照进
+                                # ChatResult；ModuleJumpEvent 由 hop 循环消费后
+                                # 移除，非跳转动作留至轮末）
     )
     PER_TURN_METADATA_KEYS = (
-        "dispatch_log",         # 同轮累积做回弹拒绝 → 只在轮首清，hop 间不清
-        "handoff_context",      # 承接块为"首轮条件注入"：dispatch 同轮发生、B 当轮
-                                # 消费、下一轮开头清除 = 恰好只注入接手首轮
         "unified",
     )
 
-    # -- stage / dispatch 自管理：不触碰 --------------------------------------
-    # clarify 由 ClarifyStage 每轮自置自清；served_by_projection 由 dispatch() 维护。
+    # -- stage 自管理：轮首重置 ----------------------------------------------
+    # served_by_projection 由 agent 工具回执写入（借投影答轮记账）；
+    # clarify 由 ClarifyStage 每轮自置——两者均不应跨轮残留，轮首清空。
     STAGE_MANAGED_METADATA_KEYS = ("clarify", "served_by_projection")
 
     # ------------------------------------------------------------------
@@ -80,10 +78,10 @@ class TurnLifecycle:
     # ------------------------------------------------------------------
 
     def begin_turn(self, cxt: DialogueContext, user_query: str) -> None:
-        """轮首：覆写 user_query、重置每轮字段、清 dispatch 记账。
+        """轮首：覆写 user_query、重置每轮字段、清 stage 自管理记账。
 
         必须每轮恰好调用一次（hop 循环之前）；hop 之间绝不调用——
-        dispatch_log 的同轮累积是回弹拒绝的依据。
+        actions 里的跳转事件需同轮存活至 hop 循环消费。
         """
         cxt.user_query = user_query
 
@@ -93,19 +91,12 @@ class TurnLifecycle:
             setattr(cxt, field_name, [])
         for key in self.PER_TURN_METADATA_KEYS:
             cxt.metadata.pop(key, None)
+        for key in self.STAGE_MANAGED_METADATA_KEYS:
+            cxt.metadata.pop(key, None)
 
         logger.debug(
             "begin_turn: session=%s query=%r（每轮字段已重置）",
             cxt.session_id, user_query,
-        )
-
-    def bind_pattern(self, cxt: DialogueContext, pattern) -> None:
-        """注入 dispatch_graph（setdefault：launch / store 恢复路径均安全）。
-
-        无图时 dispatch 全拒绝、ROUTE 静默分发静默失效——与现状一致。
-        """
-        cxt.metadata.setdefault(
-            "dispatch_graph", getattr(pattern, "dispatch_graph", {}) or {}
         )
 
     def end_turn(self, cxt: DialogueContext, response_text: str) -> None:

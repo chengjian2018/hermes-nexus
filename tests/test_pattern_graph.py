@@ -1,4 +1,4 @@
-"""Pattern 转移图构建与注册期 fail fast 测试。"""
+"""Pattern 模块拓扑注册与注册期 fail fast 测试。"""
 
 import pytest
 
@@ -14,22 +14,15 @@ def _mk_pattern(modules, **kw):
     )
 
 
-def test_dispatch_graph_from_links():
+def test_module_map_and_node_map_registered():
     a = AgentModule(module_code="a", sub_modules=["b", ModuleLink(target="c")])
     b = AgentModule(module_code="b")
     c = FSMModule(module_code="c")
     p = _mk_pattern([a, b, c])
-    assert p.dispatch_graph == {"a": {"b", "c"}}
-
-
-def test_route_jump_module_derived_into_graph():
-    menu = BaseNode(node_code="menu_x", node_name="x", jump_module="b")
-    root = BaseNode(node_code="root", node_name="r", sub_nodes=["menu_x"])
-    route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
-    route_mod.type = type(route_mod).type  # 保持默认；推导只看 jump_module 属性
-    b = AgentModule(module_code="b")
-    p = _mk_pattern([route_mod, b])
-    assert "b" in p.dispatch_graph["rt"]
+    assert set(p.module_map) == {"a", "b", "c"}
+    # link 声明的邻接不产生运行期图（跳转检测只看 module_map 存在性），
+    # 仅做注册期校验
+    assert not hasattr(p, "dispatch_graph")
 
 
 def test_dangling_link_raises():
@@ -37,6 +30,15 @@ def test_dangling_link_raises():
     b = AgentModule(module_code="b")
     with pytest.raises(ValueError, match="悬空"):
         _mk_pattern([a, b])
+
+
+def test_dangling_jump_module_raises():
+    """节点 jump_module 指向不存在的模块 → 注册期悬空 fail fast。"""
+    menu = BaseNode(node_code="menu_x", node_name="x", jump_module="ghost")
+    root = BaseNode(node_code="root", node_name="r", sub_nodes=["menu_x"])
+    route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
+    with pytest.raises(ValueError, match="悬空"):
+        _mk_pattern([route_mod])
 
 
 def test_unauthorized_lend_raises():
@@ -62,7 +64,7 @@ def test_agent_to_fsm_link_allowed():
         BaseNode(node_code="f1", node_name="n1", is_end=True)
     ])
     p = _mk_pattern([a, f])
-    assert p.dispatch_graph["a"] == {"f"}
+    assert p.module_map["f"].type.value == "fsm"
 
 
 def test_max_hops_default_and_override():

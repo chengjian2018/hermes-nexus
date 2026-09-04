@@ -1,10 +1,10 @@
-"""run_agent：投影注入 / transfer 拦截 / tool 往返落盘测试。"""
+"""run_agent：投影注入 / transfer 跳转事件 / tool 往返落盘测试。"""
 
 import json
 from unittest.mock import patch
 
 from src.chat.session import Session
-from src.dialogue.base import DialogueContext, SessionMessage
+from src.dialogue.base import DialogueContext, ModuleJumpEvent, SessionMessage
 from src.dialogue.module import AgentModule, ModuleLink
 from src.dialogue.pattern import Pattern
 from src.tools.register import registry as tool_registry
@@ -83,7 +83,6 @@ def _mk_session():
     s.cxt.module_map = p.module_map
     s.cxt.node_map = p.node_map
     s.cxt.current_module_code = "reception"
-    s.cxt.metadata["dispatch_graph"] = p.dispatch_graph
     s.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     return s
 
@@ -124,7 +123,7 @@ def test_transfer_tools_generated_per_link():
 
 
 def test_run_agent_direct_reply_with_lent_tool():
-    """inject 路径：A 借工具答完 → TurnResult(reply, None) + lent_by 记账。"""
+    """inject 路径：A 借工具答完 → TurnResult(reply) + lent_by 记账。"""
     from src.chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "查下我的工单", stage="chat")
@@ -136,7 +135,7 @@ def test_run_agent_direct_reply_with_lent_tool():
     with patch("src.chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "您的工单已查到，预计明天完工。"
-    assert result.dispatch_event is None
+    assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
     assert s.cxt.metadata["served_by_projection"] == {
         "module": "reception", "source": "after_sales"}
     # tool 往返落 history
@@ -145,8 +144,9 @@ def test_run_agent_direct_reply_with_lent_tool():
     assert tool_msgs[0].metadata.get("lent_by") == "after_sales"
 
 
-def test_run_agent_transfer_returns_dispatch_event():
-    """transfer 路径：A 调 transfer 工具 → 立即返回 dispatch_event，reply 不出口。"""
+def test_run_agent_transfer_writes_jump_event():
+    """transfer 路径：A 调 transfer 工具 → 写 ModuleJumpEvent 到 cxt.actions，
+    reply 为空不出口；状态转移交由 chat 层 hop 循环消费（run_agent 不改状态）。"""
     from src.chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "我要投诉整个售后流程", stage="chat")
@@ -158,31 +158,21 @@ def test_run_agent_transfer_returns_dispatch_event():
     with patch("src.chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply is None or result.reply == ""
-    assert result.dispatch_event is not None
-    assert result.dispatch_event.target_module_code == "after_sales"
-    assert result.dispatch_event.reason == "售后投诉"
-    # 状态已由 run_agent 内部 dispatch() 转移
-    assert s.cxt.current_module_code == "after_sales"
-
-
-def test_takeover_block_injected_for_target():
-    """承接块：transfer 后目标模块首轮 prompt 含承接上下文。"""
-    from src.chat.loop import run_agent
-    s = _mk_session()
-    s.cxt.current_module_code = "after_sales"
-    s.cxt.metadata["handoff_context"] = {"from": "reception", "reason": "售后投诉"}
-    s.cxt.add_message("user", "我要投诉整个售后流程", stage="chat")
-    provider = ScriptedProvider([
-        {"content": "看到您要投诉，我先记录一下。", "tool_calls": []},
-    ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
-        result = run_agent(s, s.cxt.module_map["after_sales"], s.cxt.metadata["llm_override"])
-    assert "reception" in provider.seen[0]["messages"][0]["content"]
-    assert "售后投诉" in provider.seen[0]["messages"][0]["content"]
+    events = [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
+    assert len(events) == 1
+    assert events[0].target_module_code == "after_sales"
+    assert events[0].reason == "售后投诉"
+    assert events[0].source == "handoff_tool"
+    # 状态未由 run_agent 转移（chat 层消费事件时才转移）
+    assert s.cxt.current_module_code == "reception"
+    # A 的 content 不出口但保留进 history（suppressed）
+    suppressed = [m for m in s.cxt.history
+                  if m.role == "assistant" and m.metadata.get("suppressed")]
+    assert len(suppressed) == 1
 
 
 def test_run_agent_transfer_rejected_backfills_error_and_continues():
-    """transfer 被 dispatch 拒绝（非法目标）→ 错误回填 tool result，继续 loop 普通回复。"""
+    """transfer 目标不存在于 module_map → 错误回填 tool result，继续 loop 普通回复。"""
     from src.chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "我要办个神奇业务", stage="chat")
@@ -195,18 +185,18 @@ def test_run_agent_transfer_rejected_backfills_error_and_continues():
     with patch("src.chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "好的，我直接为您处理。"
-    assert result.dispatch_event is None
-    # 状态未变
+    # 状态未变、无跳转事件
     assert s.cxt.current_module_code == "reception"
+    assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
     # 错误回填 tool 消息落 history
     tool_msgs = [m for m in s.cxt.history if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert tool_msgs[0].metadata.get("tool_name") == "transfer_to_ghost"
-    assert "转移被拒绝" in tool_msgs[0].content
+    assert "转移目标不存在" in tool_msgs[0].content
     # LLM 第二轮收到了回填的 tool 结果
     second = provider.seen[1]["messages"]
     assert second[-1]["role"] == "tool"
-    assert "转移被拒绝" in second[-1]["content"]
+    assert "转移目标不存在" in second[-1]["content"]
     # 失败路径 content 不 suppress
     assistant_msgs = [m for m in s.cxt.history
                       if m.role == "assistant" and m.metadata.get("suppressed")]
@@ -229,71 +219,18 @@ def test_lent_tools_respect_pattern_acl():
     assert lent_by["mock_lent_tool"] == "after_sales"
 
 
-def test_handoff_context_cleared_next_turn():
-    """I-2：承接块仅首轮注入，下一轮开头 chat() 清除 handoff_context。"""
-    from src.chat.chat import chat as chat_fn
-    from src.chat.session import Session
-    from src.dialogue.module import AgentModule, ModuleLink
-    from src.dialogue.pattern import Pattern
-
-    after_sales = AgentModule(
-        module_code="after_sales", module_name="售后维保",
-        module_description="售后", module_todo_description="售后流程",
-        sub_modules=["reception"])
-    reception = AgentModule(
-        module_code="reception", module_name="前台", module_description="接待",
-        sub_modules=[ModuleLink(target="after_sales")])
-    p = Pattern(code="p3", name="t", description="t",
-                entry_module_code="reception", modules=[reception, after_sales])
-    s = Session(session_id="s3", pattern_code="p3")
-    s.pattern = p
-    s.cxt.module_map = p.module_map
-    s.cxt.node_map = p.node_map
-    s.cxt.metadata["dispatch_graph"] = p.dispatch_graph
-    s.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
-    sessions = {"s3": s}
-
-    provider = ScriptedProvider([
-        # A：transfer
-        {"content": "转接中", "tool_calls": [{"id": "c1", "function": {
-            "name": "transfer_to_after_sales",
-            "arguments": '{"reason": "售后深入"}'}}]},
-        # B 首轮：承接
-        {"content": "看到您有售后需求。", "tool_calls": []},
-        # B 第二轮：不应再有承接块
-        {"content": "好的，具体说说。", "tool_calls": []},
-    ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
-        chat_fn(query="帮我处理售后", session_id="s3", all_sessions=sessions)
-        assert "承接上下文" in provider.seen[1]["messages"][0]["content"]
-        chat_fn(query="还要改期", session_id="s3", all_sessions=sessions)
-    second_prompt = provider.seen[2]["messages"][0]["content"]
-    assert "承接上下文" not in second_prompt
-    assert "售后深入" not in second_prompt
-
-
 def test_projection_recall_scoped_to_borrower():
-    """I-3：回看块仅在借方自身轮次注入；dispatch 离开借方后键被清除。"""
+    """I-3：回看块仅在借方自身轮次注入（served_by_projection 轮首重置）。"""
     from src.chat.loop import run_agent
     s = _mk_session()
     s.cxt.metadata["served_by_projection"] = {
         "module": "reception", "source": "after_sales"}
-    # 模拟借答后 dispatch 回 source 模块：reception → after_sales 合法
-    from src.dialogue.dispatch import ModuleDispatch, dispatch
-    assert dispatch(s.cxt, ModuleDispatch(target_module_code="after_sales",
-                                          source="handoff_tool")) is True
-    # 离开借方 → 键被清除
-    assert "served_by_projection" not in s.cxt.metadata
-    # 借方自身轮次仍注入回看块
-    s2 = _mk_session()
-    s2.cxt.metadata["served_by_projection"] = {
-        "module": "reception", "source": "after_sales"}
-    s2.cxt.add_message("user", "继续", stage="chat")
+    s.cxt.add_message("user", "继续", stage="chat")
     provider = ScriptedProvider([
         {"content": "好的，继续为您处理。", "tool_calls": []},
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
-        run_agent(s2, s2.cxt.module_map["reception"], s2.cxt.metadata["llm_override"])
+        run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert "上一轮提示" in provider.seen[0]["messages"][0]["content"]
 
 
@@ -319,7 +256,7 @@ def test_rejected_transfer_backfills_all_tool_calls():
     tool_msgs = [m for m in second if m.get("role") == "tool"]
     assert len(tool_msgs) == 2
     assert {m["tool_call_id"] for m in tool_msgs} == {"c1", "c2"}
-    assert "转移被拒绝" in tool_msgs[1]["content"]
+    assert "转移目标不存在" in tool_msgs[1]["content"]
     # 两个 tool 结果都落 history
     hist_tools = [m for m in s.cxt.history if m.role == "tool"]
     assert len(hist_tools) == 2
@@ -341,3 +278,28 @@ def test_force_close_no_transfer_tools_and_prompt():
     tool_names = [t["function"]["name"] for t in first["tools"]]
     assert not any(n.startswith("transfer_to_") for n in tool_names)
     assert "勿再移交" in first["messages"][0]["content"]
+
+
+def test_chat_hop_consumes_transfer_event_same_turn():
+    """transfer 事件经 chat 层 hop 循环消费：目标模块同轮续答。"""
+    from src.chat.chat import chat as chat_fn
+
+    s = _mk_session()
+    sessions = {"s": s}
+    provider = ScriptedProvider([
+        # A（reception）：transfer
+        {"content": "转接中", "tool_calls": [{"id": "c1", "function": {
+            "name": "transfer_to_after_sales",
+            "arguments": '{"reason": "售后深入"}'}}]},
+        # B（after_sales）同轮续答
+        {"content": "看到您有售后需求，已为您登记。", "tool_calls": []},
+    ])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        text = chat_fn(query="帮我处理售后", session_id="s", all_sessions=sessions)
+    assert text == "看到您有售后需求，已为您登记。"
+    # 状态已转移到目标模块（hop 消费后）
+    assert s.cxt.current_module_code == "after_sales"
+    # 事件已被消费（actions 无 ModuleJumpEvent 残留）
+    assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
+    # B 的回复入口走 agent loop（两次 LLM 调用：A transfer + B 答复）
+    assert len(provider.seen) == 2

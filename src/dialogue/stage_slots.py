@@ -10,11 +10,12 @@ generate 双形态与惰性子部件（核心设计）：
 - 配置形态：单 stage（如 unified，一次调用自写 nlu_result/nlg_result）或
   dict {"nlu": s1, "nlg": s2}（恰含两键且值合法，缺一即整层非法）
 - GenerateSlot 不在解析时绑定具体 stage，而是展开为结构：
-    ROUTE             → [nlu部件, _RouteNodeAdvance, nlg部件]
+    ROUTE             → [nlu部件,                     nlg部件]
     FSM+enable_clarify → [nlu部件, ClarifyStage,       nlg部件]
     FSM 默认           → [nlu部件,                     nlg部件]
-  两个子部件在**各自执行时刻**独立做三层解析——ROUTE 下 nlg 部件在
-  advance 切到菜单节点后解析，菜单节点级 nlg 当轮生效（时机修复）；
+  两个子部件在**各自执行时刻**独立做三层解析——ROUTE 下 chat 层的跳转检测
+  （chat._detect_jump_after_stage）在 nlu 部件后推进菜单节点并刷新节点级
+  LLM 配置，nlg 部件在节点切换后解析，菜单节点级 nlg 当轮生效（时机修复）；
   FSM 下 ClarifyStage 先置 metadata["clarify"] 再跑 NLG，澄清语义不变。
   single 形态只由 nlu 部件执行一次，nlg 部件对 single 恒 no-op：
   - root single + 菜单 dict：nlg 部件重新解析取菜单 dict，root 的 single
@@ -193,50 +194,6 @@ class _GenerateNLGPart(PipelineStage):
             return ctx
         return nlg.execute(ctx)
 
-
-# ============================================================================
-# ROUTE 菜单推进（自 chat.py 迁入；R4 刷新语义不变）
-# ============================================================================
-
-class _RouteNodeAdvance(PipelineStage):
-    """ROUTE-only stage: advance to the intent-menu node selected by NLU.
-
-    Runs between the generate nlu/nlg parts so the reply is generated from
-    the selected menu node's config instead of the root's. The selection is
-    validated against the route module's own node list; invalid selections
-    keep the current node (root) unchanged.
-    """
-
-    stage_name = "route_advance"
-
-    def execute(self, ctx: DialogueContext) -> DialogueContext:
-        module = (
-            ctx.module_map.get(ctx.current_module_code)
-            if ctx.current_module_code
-            else None
-        )
-        if module is None or getattr(module, "type", None) != ModuleType.ROUTE:
-            return ctx
-
-        next_node_code = (ctx.nlu_result or {}).get("next_node", "")
-        if next_node_code and any(
-            n.node_code == next_node_code for n in module.module_nodes
-        ):
-            logger.info(
-                "ROUTE 命中菜单节点: %s → %s",
-                ctx.current_node_code,
-                next_node_code,
-            )
-            ctx.current_node_code = next_node_code
-            # R4：菜单节点 node 级 LLM 配置当轮生效（spec §4；pattern_code
-            # 取 R1 写入的 metadata，ROUTE 每轮从 root 出发永不定居菜单节点）
-            ctx.llm_config = get_llm_config(
-                pattern_code=ctx.metadata.get("pattern_code", ""),
-                module_code=ctx.current_module_code or "",
-                node_code=next_node_code,
-                override=ctx.metadata.get("llm_override"),
-            )
-        return ctx
 
 
 # ============================================================================

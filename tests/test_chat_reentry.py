@@ -1,4 +1,4 @@
-"""chat 层重入循环：same-turn transfer / ROUTE 静默分发 / 防环强制收尾。"""
+"""chat 层重入循环：same-turn transfer / ROUTE 跳转 / 超跳数强制收尾。"""
 
 from unittest.mock import patch
 
@@ -28,7 +28,6 @@ def _launch(pattern, sessions, sid="s1"):
     session.pattern = pattern
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
-    session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
     session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions[sid] = session
     return session
@@ -73,7 +72,7 @@ def test_max_hops_exceeded_force_close():
 
 
 def test_force_close_route_returns_nonempty_reply():
-    """I-4：max_hops=1，agent transfer 进 ROUTE 后强制收尾——跳过 dispatch
+    """I-4：max_hops=1，agent transfer 进 ROUTE 后强制收尾——跳过跳转检测
     （含 jump_module 命中），消费 NLG 回复，不产生空回复。"""
     from src.dialogue.module import RouteModule
     from src.dialogue.node import BaseNode
@@ -120,10 +119,10 @@ def test_force_close_route_returns_nonempty_reply():
     ])
     with patch("src.chat.loop.build_provider", return_value=provider):
         reply = _chat(sessions, "sr", "我想买车")
-    # force_close 落在 ROUTE：不重跑 dispatch（否则 menu_buy 命中 buy_agent → 空回复）
+    # force_close 落在 ROUTE：不触发跳转（否则 menu_buy 命中 buy_agent → 空回复）
     assert isinstance(reply, str) and reply, f"force_close 后回复不应为空: {reply!r}"
     assert reply == "购车咨询由我来介绍吧"
     assert sessions["sr"].cxt.current_module_code == "router"
-    # force_close 跳过 dispatch 但仍重置回 root：菜单节点无 sub_nodes，
+    # force_close 跳过跳转但仍重置回 root：菜单节点无 sub_nodes，
     # 若留在 menu_buy，下一轮 RouteNLU 候选为空 → 路由卡死
     assert sessions["sr"].cxt.current_node_code == "route_root"

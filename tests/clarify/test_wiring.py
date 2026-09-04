@@ -62,8 +62,8 @@ class TestBuildStages:
         names = [s.stage_name for s in
                  resolve_stage(GenerateSlot(), ctx, route, None)]
 
-        assert names == ["generate_nlu_part", "route_advance",
-                         "generate_nlg_part"]
+        # ROUTE 与 FSM 默认同形：菜单节点推进/跳转检测由 chat 层在 nlu 部件后做
+        assert names == ["generate_nlu_part", "generate_nlg_part"]
 
 
 class TestNlgSkipGuard:

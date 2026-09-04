@@ -161,10 +161,10 @@ class TestExpandShortVerbose:
 
 class _FakeCxt:
     def __init__(self, nlu=None, nlg=None, agent=None, recall=None,
-                 dispatch_log=None):
+                 actions=None):
         self.nlu_result, self.nlg_result, self.agent_result = nlu, nlg, agent
         self._recall = recall
-        self.metadata = {"dispatch_log": dispatch_log} if dispatch_log else {}
+        self.actions = actions or []
 
     def format_recall_info(self):
         return self._recall
@@ -181,10 +181,10 @@ class TestRenderVerboseFull:
         assert '"next_node": "n2"' in out
         assert '"content": "hi"' in out
 
-    def test_dispatch_log_rendered(self):
-        cxt = _FakeCxt(dispatch_log=[{"to": "m2"}])
+    def test_actions_rendered(self):
+        cxt = _FakeCxt(actions=[{"conversation_end": True}])
         out = cli.render_verbose_full(cxt)
-        assert "dispatch_log" in out and "m2" in out
+        assert "actions" in out and "conversation_end" in out
 
     def test_non_serializable_falls_back_to_repr(self):
         class Weird:

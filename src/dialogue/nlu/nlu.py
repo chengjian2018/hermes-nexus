@@ -12,7 +12,6 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
-from src.clarify.stage import CLARIFY_NODE_CODE
 
 from src.dialogue.base import (
     DialogueContext,
@@ -213,6 +212,7 @@ class BaseNLU(PipelineStage, ABC):
         return {
             "cur_node": cxt.format_cur_node(stage="nlu"),
             "next_node": cxt.format_next_nodes(),
+            "jump_modules": cxt.format_jump_modules(),
             "query": cxt.user_query,
             "query_rewrite": cxt.format_rewritten_queries(),
             "recall_info": cxt.format_recall_info(),
@@ -259,8 +259,7 @@ class FSMNLU(BaseNLU):
     def execute(self, ctx: DialogueContext) -> DialogueContext:
         prompt = self.prompt_build(ctx)
         nlu_result = self._execute_with_retry(prompt, ctx.llm_config)
-        if nlu_result.get("next_node", "") not in ctx.node_map:
-            nlu_result.update({"next_node": CLARIFY_NODE_CODE})
+        ctx.nlu_result = nlu_result
         logger.info(
             "FSM NLU 完成: session=%s, next_node=%s",
             ctx.session_id,

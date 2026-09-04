@@ -26,7 +26,8 @@ class AgentRunner(Protocol):
 
     实现方约定：
     - 输入：session（含 cxt 历史/槽位）、模块、已解析的 llm_config
-    - 输出：TurnResult（reply 与 dispatch_event 互斥；actions 预留）
+    - 输出：TurnResult（reply 即回复；移交轮 reply 为空、跳转事件写入
+      cxt.actions，由 chat 层 hop 循环消费）
     - force_close=True 时不产生新的转移（max_hops 耗尽强制收尾）
     """
 

@@ -101,7 +101,7 @@ def render_verbose_summary(before: Dict[str, Any], after: Dict[str, Any]) -> str
 
 
 def render_verbose_full(cxt) -> str:
-    """-vv 层：完整 nlu/nlg JSON、recall、dispatch_log、agent tool 调用。"""
+    """-vv 层：完整 nlu/nlg JSON、recall、actions、agent tool 调用。"""
     lines: List[str] = [dim("  ── context ──")]
 
     if getattr(cxt, "nlu_result", None):
@@ -115,10 +115,15 @@ def render_verbose_full(cxt) -> str:
     if recall and (recall_info := recall()):
         lines.append(dim("  recall: " + recall_info.replace("\n", " | ")))
 
-    meta = getattr(cxt, "metadata", None) or {}
-    dispatch_log = meta.get("dispatch_log")
-    if dispatch_log:
-        lines.append(dim("  dispatch_log: " + _safe_json(dispatch_log)))
+    actions = getattr(cxt, "actions", None) or []
+    if actions:
+        from src.dialogue.base import ModuleJumpEvent
+
+        rendered = [
+            item.to_dict() if isinstance(item, ModuleJumpEvent) else item
+            for item in actions
+        ]
+        lines.append(dim("  actions: " + _safe_json(rendered)))
 
     return "\n".join(lines)
 

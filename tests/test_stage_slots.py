@@ -178,7 +178,8 @@ def test_generate_expansion_shapes_by_stage_name():
     route = _route_module()
     ctx = _ctx(module_code="r1")
     names = [s.stage_name for s in resolve_stage(GenerateSlot(), ctx, route, None)]
-    assert names == ["generate_nlu_part", "route_advance", "generate_nlg_part"]
+    # ROUTE 与 FSM 默认同形：菜单节点推进/跳转检测由 chat 层在 nlu 部件后做
+    assert names == ["generate_nlu_part", "generate_nlg_part"]
 
 
 def test_generate_parts_execute_dict_from_node_layer():
@@ -226,7 +227,7 @@ def test_generate_all_layers_empty_falls_to_builtin():
     names = [type(p).__name__ for p in
              resolve_stage(GenerateSlot(), _ctx(module_code="r1"),
                            _route_module(), None)]
-    assert names == ["_GenerateNLUPart", "_RouteNodeAdvance", "_GenerateNLGPart"]
+    assert names == ["_GenerateNLUPart", "_GenerateNLGPart"]
     # FSM builtin 冒烟：nlu part 解析出 FSMNLU（monkeypatch 其 execute 免 LLM）
     orig = FSMNLU.execute
     FSMNLU.execute = lambda self, ctx: ran.append(("builtin", "fsm_nlu")) or ctx
@@ -283,7 +284,8 @@ def test_generate_single_same_stage_at_root_and_menu_runs_once():
 
 def test_generate_single_menu_stage_skipped_until_next_turn():
     """single 恒由 nlu 部件执行一次：root 层 dict 的 nlu 在 nlu 部件执行后
-    advance 切菜单，菜单层是 single → nlg 部件 no-op（菜单版下轮生效）。"""
+    chat 层检测切菜单（此处手动模拟），菜单层是 single → nlg 部件 no-op
+    （菜单版下轮生效）。"""
     ctx = _ctx(node_code="root", module_code="r1")
     ctx.node_map["root"] = BaseNode(
         node_code="root", node_name="根",
@@ -295,8 +297,10 @@ def test_generate_single_menu_stage_skipped_until_next_turn():
     ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
     module.module_nodes = [ctx.node_map["root"], ctx.node_map["menu_a"]]
 
-    for part in resolve_stage(GenerateSlot(), ctx, module, None):
-        part.execute(ctx)
+    parts = resolve_stage(GenerateSlot(), ctx, module, None)
+    parts[0].execute(ctx)            # nlu 部件（root 层 dict 的 nlu）
+    ctx.current_node_code = "menu_a"  # 模拟 chat 层跳转检测推进菜单节点
+    parts[1].execute(ctx)            # nlg 部件（菜单层 single → no-op）
 
     # root dict nlu 在 nlu 部件执行；菜单 single 当轮不执行（root_nlg 也不执行，
     # nlg 部件重新解析到的是菜单层 single → no-op）
@@ -322,7 +326,8 @@ def test_generate_pattern_layer_used_when_node_module_unset():
 # ============================================================================
 
 def test_route_menu_node_nlg_resolves_after_advance():
-    """ROUTE：root 执行 nlu，advance 切菜单后 nlg 部件按菜单节点层解析。"""
+    """ROUTE：root 执行 nlu，chat 层检测切菜单（此处手动模拟）后 nlg 部件
+    按菜单节点层解析（时机修复核心断言）。"""
     ctx = _ctx(node_code="root", module_code="r1")
     ctx.node_map["root"] = BaseNode(
         node_code="root", node_name="根",
@@ -331,15 +336,17 @@ def test_route_menu_node_nlg_resolves_after_advance():
         node_code="menu_a", node_name="菜单A",
         generate={"nlu": _Marker("menu_nlu"), "nlg": _Marker("menu_nlg")})
     ctx.module_map = {"r1": _route_module()}
-    # advance 需要 nlu_result 指向合法菜单节点
+    # 检测需要 nlu_result 指向合法菜单节点
     ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
     ctx.module_map["r1"].module_nodes = [
         ctx.node_map["root"], ctx.node_map["menu_a"]]
 
-    for stage in resolve_stage(GenerateSlot(), ctx, ctx.module_map["r1"], None):
-        stage.execute(ctx)
+    parts = resolve_stage(GenerateSlot(), ctx, ctx.module_map["r1"], None)
+    parts[0].execute(ctx)            # nlu 部件（root 层）
+    ctx.current_node_code = "menu_a"  # 模拟 chat 层跳转检测推进菜单节点
+    parts[1].execute(ctx)            # nlg 部件（菜单层）
 
-    # nlu 来自 root 层；advance 已切节点；nlg 来自 menu_a 层（时机修复）
+    # nlu 来自 root 层；节点已切；nlg 来自 menu_a 层（时机修复）
     assert ran == [("root", "root_nlu"), ("menu_a", "menu_nlg")]
     assert ctx.current_node_code == "menu_a"
 
@@ -397,7 +404,6 @@ def _launch(pattern, sessions, sid="s1"):
     session.pattern = pattern
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
-    session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
     session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions[sid] = session
     return session
@@ -425,14 +431,46 @@ def test_fsm_node_level_generate_via_default_skeleton():
 
 
 def test_route_menu_node_generate_nlg_same_turn_e2e():
-    """ROUTE e2e：菜单节点级 nlg 在 advance 切换后当轮生效（时机修复）。
+    """ROUTE e2e：菜单节点级 nlg 在跳转检测切节点后当轮生效（时机修复）。
 
-    旧实现 stages 在 root 时刻构建，菜单节点 nlg 永不生效（ran 为空）。
+    菜单无 jump_module → 检测只推进节点不跳模块，nlg 部件按菜单层解析。
     """
     class _SelectingNLU(_Marker):
         """root 层 nlu：记录执行并写出指向菜单节点的 nlu_result
-        （advance 按 next_node 切节点，与 test_llm_refresh._StubNLU 同构）。"""
+        （chat 层检测按 next_node 推进节点，与 test_llm_refresh._StubNLU 同构）。"""
 
+        def execute(self, ctx):
+            super().execute(ctx)
+            ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
+            return ctx
+
+    menu = BaseNode(node_code="menu_a", node_name="菜单A",
+                    generate={"nlu": _Marker("menu_nlu"),
+                              "nlg": _Marker("menu_nlg")})
+    root = BaseNode(node_code="root", node_name="根",
+                    generate={"nlu": _SelectingNLU("root_nlu"),
+                              "nlg": _Marker("root_nlg")},
+                    sub_nodes=["menu_a"])
+    route = RouteModule(module_code="r1", module_name="r",
+                        module_description="d", module_todo_description="t",
+                        sub_modules=[], module_nodes=[root, menu])
+    pattern = Pattern(code="pr", name="t", description="t",
+                      entry_module_code="r1", modules=[route])
+    sessions = {}
+    _launch(pattern, sessions)
+    with patch("src.chat.loop.build_provider"):
+        _chat(sessions, "s1", "选A")
+
+    # root 轮：nlu 用 root 层、检测切 menu_a 后 nlg 用 menu 层（时机修复点）
+    assert ran == [("root", "root_nlu"), ("menu_a", "menu_nlg")]
+    # 无 jump_module → 不跳模块，轮末重置回 root
+    assert sessions["s1"].cxt.current_module_code == "r1"
+
+
+def test_route_menu_jump_module_silent_dispatch_e2e():
+    """ROUTE e2e：菜单节点配置 jump_module → 检测后中断剩余 stages（源模块
+    静默，nlg 不执行），chat 层 hop 消费跳转到目标模块同轮续答。"""
+    class _SelectingNLU(_Marker):
         def execute(self, ctx):
             super().execute(ctx)
             ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
@@ -458,12 +496,12 @@ def test_route_menu_node_generate_nlg_same_turn_e2e():
     sessions = {}
     _launch(pattern, sessions)
     with patch("src.chat.loop.build_provider"):
-        _chat(sessions, "s1", "选A")
+        reply = _chat(sessions, "s1", "选A")
 
-    # root 轮：nlu 用 root 层、advance 切 menu_a 后 nlg 用 menu 层（本轮修复点）
-    # 随后静默分发 → m1 同轮重入：f1 的 nlu/nlg
-    assert ran == [("root", "root_nlu"), ("menu_a", "menu_nlg"),
-                   ("f1", "f1_nlu"), ("f1", "f1_nlg")]
+    # root nlu 后检测到 menu_a.jump_module=m1 → 中断（root_nlg/menu_nlg 不执行）
+    # m1 同轮续答：f1 的 nlu/nlg
+    assert ran == [("root", "root_nlu"), ("f1", "f1_nlu"), ("f1", "f1_nlg")]
+    assert sessions["s1"].cxt.current_module_code == "m1"
 
 
 def test_pattern_stages_verbatim_and_mixed_slots():

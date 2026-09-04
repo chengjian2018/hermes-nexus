@@ -69,7 +69,20 @@ class ClarifyStage(PipelineStage):
 
     @staticmethod
     def _is_triggered(ctx: DialogueContext) -> bool:
+        """触发判定：next_node == clarify。
+
+        NLU 输出的 next_node 不在 node_map（非法编码，且拓扑已注入非空）
+        时回落为 clarify——由澄清兜底承接，而不是静默保持当前节点。
+        """
         nlu_result = ctx.nlu_result or {}
+        next_node = nlu_result.get("next_node", "")
+        if (ctx.node_map and next_node
+                and next_node not in ctx.node_map):
+            logger.warning(
+                "NLU next_node '%s' 不在 node_map，回落 clarify 兜底",
+                next_node,
+            )
+            nlu_result["next_node"] = CLARIFY_NODE_CODE
         return nlu_result.get("next_node") == CLARIFY_NODE_CODE
 
     @staticmethod

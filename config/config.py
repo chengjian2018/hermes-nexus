@@ -65,6 +65,13 @@ DEFAULT_SESSION_DB_PATH = "data/dialogue.db"
 # 知识库 SQLite 文件缺省路径（商品/客服知识，scope 隔离）
 DEFAULT_KNOWLEDGE_DB_PATH = "data/knowledge.db"
 
+# 会话历史压缩：估算 token 超过阈值时触发（0 = 关闭）。估算公式为字符近似
+# （CJK×2 + 其他×0.25，每条消息 +4），非精确 tokenizer
+DEFAULT_SESSION_COMPRESS_TOKEN_THRESHOLD = 6000
+
+# 压缩后保留的最近消息条数（含 tool 行）
+DEFAULT_SESSION_COMPRESS_RETAIN_COUNT = 12
+
 
 # ============================================================================
 # 配置加载
@@ -255,6 +262,13 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
         "session_db_path": raw.get("session_db_path", DEFAULT_SESSION_DB_PATH),
         # 知识库 SQLite 路径（可选，缺省 data/knowledge.db）
         "knowledge_db_path": raw.get("knowledge_db_path", DEFAULT_KNOWLEDGE_DB_PATH),
+        # 会话历史压缩（可选；阈值 0 = 关闭，缺省 6000 / 保留 12 条）
+        "session_compress_token_threshold": int(raw.get(
+            "session_compress_token_threshold",
+            DEFAULT_SESSION_COMPRESS_TOKEN_THRESHOLD)),
+        "session_compress_retain_count": int(raw.get(
+            "session_compress_retain_count",
+            DEFAULT_SESSION_COMPRESS_RETAIN_COUNT)),
         # 后续可扩展其他节点，如: "dialogue", "logging", "storage" 等
     }
 
@@ -341,3 +355,12 @@ def get_knowledge_db_path(config_path: str = "") -> str:
     Equivalent to ``load_config(config_path)["knowledge_db_path"]``.
     """
     return load_config(config_path)["knowledge_db_path"]
+
+
+def get_session_compress_config(config_path: str = "") -> tuple:
+    """便捷方法：返回 (压缩 token 阈值, 保留条数)；阈值 0 = 关闭。"""
+    cfg = load_config(config_path)
+    return (
+        cfg["session_compress_token_threshold"],
+        cfg["session_compress_retain_count"],
+    )

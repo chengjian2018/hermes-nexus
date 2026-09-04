@@ -35,6 +35,7 @@ import logging
 from typing import TYPE_CHECKING, Dict, Optional
 
 from config.config import get_llm_config
+from src.chat.compression import maybe_compress
 from src.chat.context_lifecycle import TurnLifecycle
 from src.chat.loop import TurnResult, run_agent  # noqa: F401（兼容再导出）
 from src.chat.response import ChatResult, build_chat_result
@@ -530,6 +531,11 @@ def chat_turn(
     except Exception as e:
         logger.error("加载 LLM 配置失败: %s", e)
         return ChatResult(text=f"LLM 配置加载失败: {e}")
+
+    # 历史压缩（store 未启用/阈值 0/条数不足静默跳过；复用 R1 刚刷新的
+    # llm_config 做摘要；失败绝不阻断对话）。必须在 add user 之前——
+    # 压缩会重建 history 并修正 turn_history_start
+    maybe_compress(session, store)
 
     # Record user message
     session.cxt.add_message("user", query, stage="chat")

@@ -23,10 +23,14 @@ from src.chat.agent_hooks import (
     AgentStartEvent,
     LLMCallEvent,
     LLMResponseEvent,
+    ToolCallEvent,
+    ToolResultEvent,
     TransferEvent,
     collect_fragments,
     fire,
     resolve_agent_hooks,
+    rewrite_tool_call,
+    rewrite_tool_result,
 )
 from src.chat.messages import build_agent_messages
 from src.chat.session import Session
@@ -122,6 +126,10 @@ def run_agent(
     lent_schemas, lent_by = _resolve_lent_tools(module, session.pattern)
     transfer_tools = [] if force_close else build_transfer_tools(module, cxt.module_map)
     tools = own_tools + lent_schemas + transfer_tools
+    # 主流程校验/ P4 守卫的本轮可用集合（own + lent；transfer 工具不在内——
+    # transfer 轮不走工具派发，改名走私前缀由守卫与校验双重拦截）
+    allowed_names = {t.get("function", {}).get("name", "")
+                     for t in own_tools + lent_schemas}
 
     messages = _build_messages(module, system_prompt, cxt)
 
@@ -189,28 +197,13 @@ def run_agent(
                     "[transfer] 目标 %s 不在 module_map 中，错误回填继续 loop",
                     target,
                 )
-                messages.append({"role": "assistant", "content": content or None,
-                                 "tool_calls": tool_calls})
-                cxt.add_message(
-                    "assistant",
-                    encode_tool_call_content(content or "", tool_calls),
-                    stage="agent",
-                )
                 err = json.dumps(
                     {"error": "转移目标不存在，请直接回应用户"},
                     ensure_ascii=False)
-                for tc in tool_calls:
-                    name = tc.get("function", {}).get("name", "")
-                    if name.startswith(TRANSFER_TOOL_PREFIX):
-                        result_content = err
-                    else:
-                        result_content = _execute_tool(name, _parse_args(tc))
-                    cxt.add_message("tool", result_content, stage="agent",
-                                    metadata={"tool_name": name,
-                                              "tool_call_id": tc.get("id", "")})
-                    messages.append({"role": "tool",
-                                     "tool_call_id": tc.get("id", ""),
-                                     "content": result_content})
+                _dispatch_tool_calls(
+                    cxt, module, messages, content, tool_calls,
+                    hooks, allowed_names, lent_by, round_idx,
+                    transfer_error=err)
                 continue
 
             # transfer 命中：写跳转事件，本模块静默移交（content 不出口但
@@ -254,29 +247,10 @@ def run_agent(
                     transfer_target=target))
             return TurnResult()
 
-        # 普通工具调用：执行、落 history、回填
-        messages.append({"role": "assistant", "content": content or None,
-                         "tool_calls": tool_calls})
-        cxt.add_message(
-            "assistant",
-            encode_tool_call_content(content or "", tool_calls),
-            stage="agent",
-        )
-        for tc in tool_calls:
-            name = tc.get("function", {}).get("name", "")
-            args = _parse_args(tc)
-            tool_result = _execute_tool(name, args)
-            source = lent_by.get(name)
-            if source:
-                cxt.metadata["served_by_projection"] = {
-                    "module": module.module_code, "source": source,
-                }
-            metadata = {"tool_name": name, "tool_call_id": tc.get("id", "")}
-            if source:
-                metadata["lent_by"] = source
-            cxt.add_message("tool", tool_result, stage="agent", metadata=metadata)
-            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                             "content": tool_result})
+        # 普通工具调用：P4 改写 → 主流程校验 → 执行 → P5 改写 → 落 history
+        _dispatch_tool_calls(
+            cxt, module, messages, content, tool_calls,
+            hooks, allowed_names, lent_by, round_idx)
 
     logger.warning(
         "Agent loop 达到最大轮次 %d，强制终止: session=%s",
@@ -289,6 +263,126 @@ def run_agent(
             rounds=_MAX_TOOL_ROUNDS, outcome="max_rounds",
             reply="抱歉，处理超时，请稍后重试。"))
     return TurnResult(reply="抱歉，处理超时，请稍后重试。")
+
+
+# ---------------------------------------------------------------------------
+# Tool round dispatch (P4/P5 + 主流程工具名校验)
+# ---------------------------------------------------------------------------
+
+def _dispatch_tool_calls(
+    cxt, module, messages, content, tool_calls, hooks, allowed_names,
+    lent_by, round_idx, transfer_error=None,
+) -> None:
+    """工具轮统一派发：P4 改写 → 校验 → 落 assistant 载荷 → 执行 → P5 → 落 tool 行。
+
+    时序（规则 4）：先 P4 链式改写并应用回 tc（args 重序列化进
+    ``tc["function"]["arguments"]``——原地改写 LLM 返回的 tc dict，使
+    in-loop messages / history 载荷 / 执行三处共用改写后单一事实源），
+    再落 assistant JSON 载荷；``tool_call_id`` 永不改（协议配对命脉）。
+
+    主流程最终校验（规则 2 权威检查点）：最终 name ∉ allowed_names 一律
+    **不执行**，tool 行回填带可用工具清单的错误信息（模型下一轮自纠；
+    亦封堵 dispatch 只查注册不查 ACL 的旁路），metadata 沿用合成行约定
+    ``{"synthetic": True}``。P5 只对真实 ``_execute_tool`` 结果触发，不对
+    合成/回填串触发。
+
+    transfer_error 非空 = transfer 目标非法的错误回填分支：transfer 条
+    （前缀判定已先行，规则 1 不可改写、不执行）回填该错误串，普通条照常
+    走 P4/校验/执行/P5 全流程。
+
+    审计 metadata：改写发生时 ``rewritten=True`` +
+    ``original_call``（P4，name/args 原值）/ ``original_result``（P5，原串）。
+    """
+    session_id = cxt.session_id
+    module_code = module.module_code
+
+    # 1. P4 链式改写 → 应用回 tc（transfer 条跳过：判定已先行）
+    rewrite_audits = {}
+    for idx, tc in enumerate(tool_calls):
+        name = tc.get("function", {}).get("name", "")
+        if transfer_error is not None and name.startswith(TRANSFER_TOOL_PREFIX):
+            continue
+        parsed_args = _parse_args(tc)
+        if hooks:
+            event = ToolCallEvent(
+                session_id=session_id, module_code=module_code,
+                round_idx=round_idx, tool_name=name, args=parsed_args)
+            final_name, final_args, original = rewrite_tool_call(
+                hooks, event, allowed_names,
+                reserved_prefix=TRANSFER_TOOL_PREFIX)
+        else:
+            final_name, final_args, original = name, parsed_args, None
+        if final_name != name:
+            tc["function"]["name"] = final_name
+        if final_args is not parsed_args:
+            try:
+                tc["function"]["arguments"] = json.dumps(
+                    final_args, ensure_ascii=False)
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    "[hooks] 改写后 args 无法序列化，保留原串: %s", e)
+        if original is not None:
+            rewrite_audits[idx] = original
+
+    # 2. assistant 载荷（改写后实况；id 不动保证回放配对）
+    messages.append({"role": "assistant", "content": content or None,
+                     "tool_calls": tool_calls})
+    cxt.add_message(
+        "assistant",
+        encode_tool_call_content(content or "", tool_calls),
+        stage="agent",
+    )
+
+    # 3. 逐 tc：校验 → 执行（合法）/错误回填（非法、transfer 条）→ P5 → 落行
+    for idx, tc in enumerate(tool_calls):
+        name = tc.get("function", {}).get("name", "")
+        call_id = tc.get("id", "")
+        metadata = {"tool_name": name, "tool_call_id": call_id}
+
+        if transfer_error is not None and name.startswith(TRANSFER_TOOL_PREFIX):
+            result_content = transfer_error
+        elif name not in allowed_names:
+            logger.warning(
+                "[tools] 工具 '%s' 不在本轮可用集合中，拦截不执行"
+                "（幻觉/越权调用，错误回填供模型自纠）", name,
+            )
+            result_content = json.dumps({
+                "error": (
+                    f"工具 '{name}' 不存在或本轮不可用。"
+                    f"可用工具：{sorted(allowed_names)}。"
+                    f"请从可用工具中重新选择，或直接回应用户。"
+                ),
+            }, ensure_ascii=False)
+            metadata["synthetic"] = True
+        else:
+            tool_result = _execute_tool(name, _parse_args(tc))
+            result_original = None
+            if hooks:
+                event = ToolResultEvent(
+                    session_id=session_id, module_code=module_code,
+                    round_idx=round_idx, tool_name=name,
+                    tool_call_id=call_id, result=tool_result)
+                tool_result, result_original = rewrite_tool_result(hooks, event)
+            result_content = tool_result
+
+            source = lent_by.get(name)
+            if source:
+                cxt.metadata["served_by_projection"] = {
+                    "module": module_code, "source": source,
+                }
+                metadata["lent_by"] = source
+            if result_original is not None:
+                metadata["rewritten"] = True
+                metadata["original_result"] = result_original
+
+        if idx in rewrite_audits:
+            metadata["rewritten"] = True
+            metadata["original_call"] = rewrite_audits[idx]
+
+        cxt.add_message("tool", result_content, stage="agent",
+                        metadata=metadata)
+        messages.append({"role": "tool", "tool_call_id": call_id,
+                         "content": result_content})
 
 
 # ---------------------------------------------------------------------------

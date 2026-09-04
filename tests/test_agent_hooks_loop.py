@@ -41,18 +41,61 @@ tool_registry.register(
 )
 
 
+def _alt_handler(args, **kwargs):
+    return json.dumps({"ok": True, "tool": "hook_alt_tool", "args": args},
+                      ensure_ascii=False)
+
+
+tool_registry.register(
+    name="hook_alt_tool",
+    toolset="test_hooks",
+    schema={
+        "name": "hook_alt_tool",
+        "description": "hooks 测试改名目标工具",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string", "description": "城市"}},
+        },
+    },
+    handler=_alt_handler,
+    allowed_patterns={"ph": ["main"]},
+)
+
+
+def _locked_handler(args, **kwargs):
+    return json.dumps({"ok": True, "tool": "hook_locked_tool"},
+                      ensure_ascii=False)
+
+
+tool_registry.register(
+    name="hook_locked_tool",
+    toolset="test_hooks",
+    schema={
+        "name": "hook_locked_tool",
+        "description": "已注册但仅授权其他 pattern 的工具（ACL 锁定）",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string", "description": "城市"}},
+        },
+    },
+    handler=_locked_handler,
+    allowed_patterns={"other_pattern": ["main"]},
+)
+
+
 def _mk_hooks_session(pattern_hooks=None, module_hooks=None,
                       with_transfer=False):
     main = AgentModule(
         module_code="main",
         module_name="主模块",
         module_description="主模块描述",
-        use_tools=["hook_echo_tool"],
+        use_tools=["hook_echo_tool", "hook_alt_tool"],
         agent_hooks=module_hooks,
         sub_modules=["peer"] if with_transfer else None,
     )
     peer = AgentModule(module_code="peer", module_name="同侪",
-                       module_description="同侪模块", use_tools=["hook_echo_tool"])
+                       module_description="同侪模块",
+                       use_tools=["hook_echo_tool", "hook_alt_tool"])
     p = Pattern(code="ph", name="t", description="t",
                 entry_module_code="main", modules=[main, peer],
                 agent_hooks=pattern_hooks)
@@ -250,3 +293,287 @@ def test_route_module_turn_does_not_fire_agent_hooks():
         result = chat_turn("你好", "shr", {"shr": s})
     assert result.text == "静态回复"
     assert fired == []
+
+
+# ---------------------------------------------------------------------------
+# P4：工具调用改写（args / name）与三处一致性
+# ---------------------------------------------------------------------------
+
+def _tool_rows(cxt):
+    return [m for m in cxt.history if m.role == "tool"]
+
+
+def _assistant_rows(cxt):
+    return [m for m in cxt.history if m.role == "assistant"]
+
+
+def test_p4_args_rewrite_consistent_across_execution_payload_feed():
+    """args 改写三处一致：执行参数 / history assistant 载荷 / 回填 messages；
+    tool 行审计 original_call；tool_call_id 不变。"""
+    from src.chat.agent_hooks import RewriteToolCall
+
+    def fix(e):
+        return RewriteToolCall(args={"city": "杭州"})
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_call": [fix]})
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments='{"city": "北京"}')]},
+        {"content": "done", "tool_calls": []},
+    ])
+    result = _run(s, provider)
+    assert result.reply == "done"
+
+    # 执行侧：工具收到改写后 args
+    rows = _tool_rows(s.cxt)
+    assert json.loads(rows[0].content)["args"] == {"city": "杭州"}
+
+    # 载荷侧：assistant 行记改写后 args，id 原样（规则 3）
+    payload = json.loads(_assistant_rows(s.cxt)[0].content)
+    call = payload["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"city": "杭州"}
+    assert call["id"] == "c1"
+
+    # 回填侧：次轮 in-loop messages 与载荷一致
+    asst_row = next(m for m in provider.seen[1]["messages"]
+                    if m["role"] == "assistant" and m.get("tool_calls"))
+    assert json.loads(
+        asst_row["tool_calls"][0]["function"]["arguments"]) == {"city": "杭州"}
+
+    # 审计
+    assert rows[0].metadata.get("rewritten") is True
+    assert rows[0].metadata.get("original_call") == {
+        "name": "hook_echo_tool", "args": {"city": "北京"}}
+
+
+def test_p4_name_rewrite_to_allowed_tool_executes_target():
+    from src.chat.agent_hooks import RewriteToolCall
+
+    def rename(e):
+        return RewriteToolCall(name="hook_alt_tool")
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_call": [rename]})
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments="{}")]},
+        {"content": "done", "tool_calls": []},
+    ])
+    result = _run(s, provider)
+    assert result.reply == "done"
+    rows = _tool_rows(s.cxt)
+    # 实际执行的是改名后的工具，metadata 溯源跟随最终 name
+    assert json.loads(rows[0].content)["tool"] == "hook_alt_tool"
+    assert rows[0].metadata["tool_name"] == "hook_alt_tool"
+    payload = json.loads(_assistant_rows(s.cxt)[0].content)
+    assert payload["tool_calls"][0]["function"]["name"] == "hook_alt_tool"
+
+
+def test_p4_rename_to_locked_tool_rejected():
+    """改名目标已注册但未授权本 pattern（ACL 锁定）→ 拒绝改名、原名执行。"""
+    from src.chat.agent_hooks import RewriteToolCall
+
+    def rename(e):
+        return RewriteToolCall(name="hook_locked_tool")
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_call": [rename]})
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments="{}")]},
+        {"content": "done", "tool_calls": []},
+    ])
+    _run(s, provider)
+    rows = _tool_rows(s.cxt)
+    assert json.loads(rows[0].content)["tool"] == "hook_echo_tool"
+    assert rows[0].metadata["tool_name"] == "hook_echo_tool"
+    payload = json.loads(_assistant_rows(s.cxt)[0].content)
+    assert payload["tool_calls"][0]["function"]["name"] == "hook_echo_tool"
+
+
+def test_p4_rename_to_transfer_prefix_rejected():
+    from src.chat.agent_hooks import RewriteToolCall
+    from src.dialogue.base import ModuleJumpEvent
+
+    def rename(e):
+        return RewriteToolCall(name="transfer_to_peer")
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_call": [rename]})
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments="{}")]},
+        {"content": "done", "tool_calls": []},
+    ])
+    result = _run(s, provider)
+    assert result.reply == "done"
+    assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
+    assert json.loads(_tool_rows(s.cxt)[0].content)["tool"] == "hook_echo_tool"
+
+
+def test_p4_hook_failure_executes_original():
+    def boom(e):
+        raise RuntimeError("fix bug")
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_call": [boom]})
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments='{"city": "北京"}')]},
+        {"content": "done", "tool_calls": []},
+    ])
+    _run(s, provider)
+    rows = _tool_rows(s.cxt)
+    assert json.loads(rows[0].content)["args"] == {"city": "北京"}
+    assert "rewritten" not in rows[0].metadata
+
+
+# ---------------------------------------------------------------------------
+# P5：工具结果改写
+# ---------------------------------------------------------------------------
+
+def test_p5_result_rewrite_feeds_llm_and_history():
+    def redact(e):
+        return e.result.replace("北京", "***")
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_result": [redact]})
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments='{"city": "北京"}')]},
+        {"content": "done", "tool_calls": []},
+    ])
+    result = _run(s, provider)
+    assert result.reply == "done"
+    rows = _tool_rows(s.cxt)
+    assert "北京" not in rows[0].content and "***" in rows[0].content
+    # 回填给模型同为脱敏后结果（不分叉）
+    tool_row = next(m for m in provider.seen[1]["messages"]
+                    if m["role"] == "tool")
+    assert "北京" not in tool_row["content"]
+    # 审计
+    assert rows[0].metadata.get("rewritten") is True
+    assert "北京" in rows[0].metadata.get("original_result", "")
+
+
+def test_p5_hook_failure_keeps_original_result():
+    def boom(e):
+        raise RuntimeError("redact bug")
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_result": [boom]})
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments='{"city": "北京"}')]},
+        {"content": "done", "tool_calls": []},
+    ])
+    _run(s, provider)
+    assert "北京" in _tool_rows(s.cxt)[0].content
+    assert "rewritten" not in _tool_rows(s.cxt)[0].metadata
+
+
+# ---------------------------------------------------------------------------
+# 主流程工具名校验：幻觉名自纠闭环
+# ---------------------------------------------------------------------------
+
+def test_hallucinated_name_backfills_error_with_tools_list():
+    """未注册幻觉名：拦截不执行，回填含可用工具清单，模型次轮自纠。"""
+    s = _mk_hooks_session()
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [
+            _tool_call(name="no_such_tool", arguments="{}")]},
+        {"content": "改好了，直接回答。", "tool_calls": []},
+    ])
+    result = _run(s, provider)
+    assert result.reply == "改好了，直接回答。"
+    rows = _tool_rows(s.cxt)
+    error = json.loads(rows[0].content)["error"]
+    assert "no_such_tool" in error
+    assert "hook_echo_tool" in error and "hook_alt_tool" in error
+    assert rows[0].metadata.get("synthetic") is True
+    # 回填给模型的串同款（自纠信号）
+    tool_row = next(m for m in provider.seen[1]["messages"]
+                    if m["role"] == "tool")
+    assert "no_such_tool" in tool_row["content"]
+
+
+def test_registered_but_unauthorized_name_intercepted():
+    """已注册未授权（ACL 旁路封堵）：拦截，handler 未执行（错误 JSON 而非产物）。"""
+    s = _mk_hooks_session()
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [
+            _tool_call(name="hook_locked_tool", arguments="{}")]},
+        {"content": "直接回答。", "tool_calls": []},
+    ])
+    result = _run(s, provider)
+    assert result.reply == "直接回答。"
+    rows = _tool_rows(s.cxt)
+    payload = json.loads(rows[0].content)
+    assert "不存在或本轮不可用" in payload["error"]
+    assert "ok" not in payload          # locked 工具 handler 未产出
+    assert rows[0].metadata.get("synthetic") is True
+
+
+def test_synthetic_error_row_replays_paired():
+    """幻觉轮的合成 tool 行：回放配对完整，不降级 untrusted。"""
+    from src.chat.messages import default_build_messages
+
+    s = _mk_hooks_session()
+    s.cxt.user_query = "查天气"
+    s.cxt.add_message("user", "查天气", stage="chat")
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [
+            _tool_call(name="no_such_tool", arguments="{}")]},
+        {"content": "直接回答。", "tool_calls": []},
+    ])
+    _run(s, provider)
+    s.cxt.turn_history_start = 0  # user 行下标（空 history 起步，hop 内行从 1 起）
+    msgs = default_build_messages("新问题", s.cxt)
+    asst = [m for m in msgs if m["role"] == "assistant" and m.get("tool_calls")]
+    assert len(asst) == 1 and asst[0]["tool_calls"][0]["id"] == "c1"
+    tool_rows = [m for m in msgs if m["role"] == "tool"]
+    assert len(tool_rows) == 1 and tool_rows[0]["tool_call_id"] == "c1"
+    assert not any("untrusted" in (m.get("content") or "") for m in msgs)
+
+
+def test_rewritten_round_replays_paired():
+    """改写轮的 history：回放协议化（assistant.tool_calls + tool 行配对）。"""
+    from src.chat.agent_hooks import RewriteToolCall
+    from src.chat.messages import default_build_messages
+
+    def fix(e):
+        return RewriteToolCall(args={"city": "杭州"})
+
+    s = _mk_hooks_session(pattern_hooks={"on_tool_call": [fix]})
+    s.cxt.user_query = "查天气"
+    s.cxt.add_message("user", "查天气", stage="chat")
+    provider = ScriptedProvider([
+        {"content": None, "tool_calls": [_tool_call(arguments='{"city": "北京"}')]},
+        {"content": "done", "tool_calls": []},
+    ])
+    _run(s, provider)
+    s.cxt.turn_history_start = 0
+    msgs = default_build_messages("新问题", s.cxt)
+    asst = [m for m in msgs if m["role"] == "assistant" and m.get("tool_calls")]
+    assert len(asst) == 1
+    assert json.loads(
+        asst[0]["tool_calls"][0]["function"]["arguments"]) == {"city": "杭州"}
+    assert len([m for m in msgs if m["role"] == "tool"]) == 1
+    assert not any("untrusted" in (m.get("content") or "") for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# transfer 错误回填分支：普通条照常走 P4/P5，transfer 条不走
+# ---------------------------------------------------------------------------
+
+def test_invalid_transfer_branch_fires_p4_p5_on_normal_tools_only():
+    calls = []
+    s = _mk_hooks_session(with_transfer=True, pattern_hooks={
+        "on_tool_call": [lambda e: calls.append(("p4", e.tool_name))],
+        "on_tool_result": [lambda e: calls.append(("p5", e.tool_name))],
+    })
+    provider = ScriptedProvider([
+        {"content": "尝试移交", "tool_calls": [
+            _tool_call(cid="t1", name="transfer_to_ghost",
+                       arguments='{"reason": "不存在"}'),
+            _tool_call(cid="t2", name="hook_echo_tool"),
+        ]},
+        {"content": "直接处理。", "tool_calls": []},
+    ])
+    result = _run(s, provider)
+    assert result.reply == "直接处理。"
+    assert ("p4", "hook_echo_tool") in calls
+    assert ("p5", "hook_echo_tool") in calls
+    assert all(n != "transfer_to_ghost" for _, n in calls)
+    by_id = {m.metadata["tool_call_id"]: m for m in _tool_rows(s.cxt)}
+    assert "转移目标不存在" in by_id["t1"].content
+    assert json.loads(by_id["t2"].content)["ok"] is True
+    # P5 不触发于回填串：transfer 条只有一次 P4/P5 记录都没有
+    assert calls.count(("p4", "hook_echo_tool")) == 1

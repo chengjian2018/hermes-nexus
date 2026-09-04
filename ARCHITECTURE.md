@@ -39,9 +39,13 @@ flowchart TB
 
     subgraph 应用层
         xianyuagent["dialogue/xianyu_agent_route.py<br/>(闲鱼客服 pattern<br/>复刻 xianyu-auto-reply)"]
-        tools["tools/calculator_tool.py<br/>weather_tool.py"]
+        kbagent["dialogue/knowledge_agent_route.py<br/>(知识库客服 pattern<br/>工具调用型 AGENT)"]
+        tools["tools/calculator_tool.py<br/>weather_tool.py<br/>knowledge_tool.py"]
+        kbs["tools/knowledge_store.py<br/>(SQLite 知识库<br/>scope 隔离)"]
         clarify["src/clarify/<br/>偏题澄清"]
     end
+    kbagent -.-> preg
+    kbs -.-> tools
     xianyuagent -.-> preg
     tools -.-> treg
 ```
@@ -57,9 +61,9 @@ flowchart TB
   chat 编排器统一消费（无 dispatch 原语 / 邻接图 / 回弹拒绝——目标存在于 `module_map`
   即合法，边界淡化，agent transfer 与 ROUTE 菜单分发同构）。**事件只由两个入口产生**：
   - **ROUTE 跳到新模块**（stage 循环内每个 stage 执行后检测，
-    `chat._detect_jump_after_stage`，仅 ROUTE 模块）：先按 `nlu_result.next_node`
-    推进菜单节点并做 R4 节点级 LLM 配置当轮刷新；随后两类跳转来源——
-    `nlu_result.jump_module`（NLU 直接输出，prompt 契约见
+    `chat.ModuleJumpChannel.detect_after_stage`，仅 ROUTE 模块）：先按
+    `nlu_result.next_node` 推进菜单节点并做 R4 节点级 LLM 配置当轮刷新；
+    随后两类跳转来源——`nlu_result.jump_module`（NLU 直接输出，prompt 契约见
     ROUTE_NLU_DEFAULT_PROMPT 的 `{__jump_modules__}` 清单）优先，其次推进后节点的
     `node.jump_module` 配置。命中即合并槽位、写事件、**中断剩余 stages**（源模块静默，
     NLG 不执行）
@@ -67,8 +71,8 @@ flowchart TB
     module_map 时错误回填 tool result 继续 loop）
   - **FSM 不产生事件**：clarify 在循环内由 ClarifyStage 处理（覆写 nlg_result，
     不出循环），节点跳转由轮末 `_fsm_node_transition` 处理
-  - **消费**（`chat_turn` 的 hop 循环）：`_pop_jump_event` 取出（消费即移除）→
-    `_apply_jump` 写 `current_module_code`、置空 `current_node_code` → 目标模块同轮
+  - **消费**（`chat_turn` 的 hop 循环）：`ModuleJumpChannel.pop` 取出（消费即移除）→
+    `reroute` 写 `current_module_code`、置空 `current_node_code` → 目标模块同轮
     续答；跳到 AGENT/FSM 后目标模块跨轮承接后续轮次（agent 靠 history、FSM 靠
     节点位置），不回路由——只有当前还停在 ROUTE 模块的轮次才轮末重置回 root
     （菜单节点无 sub_nodes，不重置则下一轮路由候选为空）。
@@ -138,12 +142,14 @@ flowchart TB
 | `build_agent_messages(module, system_prompt, cxt)` | `chat/messages.py` | AGENT 模块 LLM messages 构建入口：`module.messages_builder`（`(system_prompt, cxt) -> messages`，system_prompt 为终态含 force_close 后缀）优先；未设/不可调用（告警）降级 `default_build_messages`（system + user/assistant 历史）。自定义 builder 遵守不可信数据纪律：外部文本不写入 system 角色 |
 | `TurnLifecycle` 字段集合 | `chat/context_lifecycle.py` | cxt 字段生命周期唯一管理者：PERSISTENT / PER_TURN_RESET / INCREMENTAL / STAGE_MANAGED 四类声明式集合 + begin_turn / end_turn / merge_slots |
 | `SessionStore` | `chat/store.py` | launch/轮末落盘、startup 恢复、审计查询；实例由 main.py 注入，非全局单例 |
+| `KnowledgeStore` | `tools/knowledge_store.py` | 知识库（商品/客服知识）连接持有者：scope 隔离（`{channel}:{account_id}`）、jieba 分词 LIKE 检索、`format_result` 消毒（untrusted 包裹，提示注入防御边界）；`get_knowledge_store()` 懒持有，main.py lifespan 释放；路径配置 `knowledge_db_path`（缺省 `data/knowledge.db`）。**已知债务**：工具的 `account_id` 是 LLM 参数（从系统提示「任务信息」抄写）而非可信注入，真实渠道接入时需演进为 dispatch 侧身份注入 |
 | `ChannelSpec` 协议 + `build_channel_router(spec, ops)` | `channel/base.py` `channel/webhooks.py` | 外部消息源适配的唯一形态：渠道声明差异 + 通用 handler 共性流程；`registry.register()` 自注册（AST 发现），main.py `discover_builtin_channels()` + `build_channel_routers(EngineOps(...))` 接线 |
 
 ## 什么代码放哪
 
 - 新业务对话流程 → `src/dialogue/<name>_route.py`，模块级 `registry.register()`
-- 新工具 → `src/tools/<name>_tool.py`，自动被 AST 发现
+- 新工具 → `src/tools/<name>_tool.py`，自动被 AST 发现；工具需要持久化存储时照 `knowledge_store.py` idiom（原生 sqlite3 + 锁 + WAL，scope 隔离，输出过 `_clean_untrusted` 消毒）
+- 知识库填充演示数据 → `.venv/bin/python cli.py knowledge-seed --scope="xianyu:<account_id>"`（幂等）
 - 新 LLM provider → `src/llm/<name>_provider.py`
 - 新外部消息渠道（channel）→ `src/channel/<name>.py`，实现 ChannelSpec（`payload_model`/`parse`/`build_reply` + 环境变量声明）并模块级 `registry.register()`，AST 自动发现，main.py 无需改动；默认 pattern/token 走环境变量（如 `XIANYU_CHANNEL_PATTERN`）
 - 新管线阶段 → `src/dialogue/<stage>.py` 继承 `PipelineStage`

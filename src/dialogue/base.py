@@ -8,9 +8,12 @@ and context passing consistent.
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -79,20 +82,32 @@ class SessionMessage:
     """Standardized session message format.
 
     All messages produced by stages use this format to keep session storage consistent.
+
+    tool 轨迹字段（跨轮完整回放给 LLM，见 chat/messages.py 回放守卫）：
+    - ``tool_call_id``：tool 行关联的 LLM tool_call id
+    - ``tool_calls``：assistant 行的 OpenAI 原生 tool_calls 列表（结构化原样存）
+    - role ``summary``：历史压缩产生的 LLM 摘要行（回放时 user 角色 untrusted 包裹）
     """
 
-    role: Literal["system", "user", "assistant", "tool"]
+    role: Literal["system", "user", "assistant", "tool", "summary"]
     content: str
     stage: str = ""  # source stage: pre_recall / query_rewrite / nlu / nlg / agent / state_update
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "role": self.role,
             "content": self.content,
             "stage": self.stage,
             "metadata": self.metadata,
         }
+        if self.tool_call_id is not None:
+            d["tool_call_id"] = self.tool_call_id
+        if self.tool_calls is not None:
+            d["tool_calls"] = self.tool_calls
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SessionMessage":
@@ -101,6 +116,8 @@ class SessionMessage:
             content=d.get("content", ""),
             stage=d.get("stage", ""),
             metadata=d.get("metadata", {}),
+            tool_call_id=d.get("tool_call_id"),
+            tool_calls=d.get("tool_calls"),
         )
 
 
@@ -124,6 +141,14 @@ class DialogueContext:
 
     # Session history (standardized message list)
     history: List[SessionMessage] = field(default_factory=list)
+
+    # 本轮 user 行在 history 中的下标（begin_turn 快照于 add user 之前；
+    # default_build_messages 以此切分跨轮历史 / 显式 query / 本轮 hop 内行）
+    turn_history_start: int = 0
+
+    # 逐条 write-through 落库钩子（SessionStore.attach 注入；None = 未启用）。
+    # 异常在 add_message 侧吞掉记日志，绝不阻断对话
+    message_sink: Optional[Any] = None
 
     # Recall results before query rewrite
     pre_recall_results: List[Dict[str, Any]] = field(default_factory=list)
@@ -178,21 +203,37 @@ class DialogueContext:
         content: str,
         stage: str = "",
         metadata: Optional[Dict[str, Any]] = None,
+        tool_call_id: Optional[str] = None,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Append a standardized message to history."""
-        self.history.append(
-            SessionMessage(
-                role=role,
-                content=content,
-                stage=stage,
-                metadata=metadata or {},
-            )
+        msg = SessionMessage(
+            role=role,
+            content=content,
+            stage=stage,
+            metadata=metadata or {},
+            tool_call_id=tool_call_id,
+            tool_calls=tool_calls,
         )
+        self.history.append(msg)
+        if self.message_sink is not None:
+            try:
+                self.message_sink(msg)
+            except Exception:
+                logger.exception(
+                    "message_sink 写入失败（不影响对话）: session=%s role=%s stage=%s",
+                    self.session_id, msg.role, msg.stage,
+                )
 
     def format_history(self, max_turns: int = 10) -> str:
         """Format the last N turns as text for prompt injection."""
-        # Keep only user and assistant messages, drop system / tool etc.
-        filtered = [msg for msg in self.history if msg.role in ("user", "assistant")]
+        # Keep only user and assistant messages with content, drop system /
+        # tool / summary and tool-call turns whose assistant content is empty
+        filtered = [
+            msg
+            for msg in self.history
+            if msg.role in ("user", "assistant") and msg.content
+        ]
         recent = filtered[-max_turns * 2 :]  # user + assistant come in pairs
         if not recent:
             return "（暂无历史对话）"

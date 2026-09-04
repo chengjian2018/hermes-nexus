@@ -79,6 +79,8 @@ class BaseModule:
             ``(system_prompt, cxt) -> messages`` 列表；未设置走默认构建
             （system + user/assistant 历史），不可调用时告警降级默认
             （消费方见 src/chat/messages.py）。
+        agent_hooks: agent loop hooks 声明（``{点位: [hook,...]}``），
+            非空时整体替换 pattern 级声明（消费方见 src/chat/agent_hooks.py）。
         generate/pre_recall/query/post_recall: 管线槽位配置（node 级最高优先级）。
         enable_clarify: dual-track clarify switch; when True the FSM module
             integrates ClarifyStage (see src/clarify/).
@@ -104,6 +106,7 @@ class BaseModule:
         post_recall: Optional[Any] = None,
         agent_stage: Optional[Any] = None,
         messages_builder: Optional[Any] = None,
+        agent_hooks: Optional[Any] = None,
         enable_clarify: bool = False,
         is_end: Optional[bool] = False,
         answer_examples: Optional[List[str]] = None,
@@ -135,6 +138,10 @@ class BaseModule:
         # AGENT 模块 messages 构建器槽位（消费方在 src/chat/messages.py，
         # 与 agent_stage 同为 module 级可插拔组件声明）
         self.messages_builder = messages_builder
+
+        # agent loop hooks 槽位：非空时整体替换 pattern 级声明（不 merge，
+        # 同 stage 槽位语义；形态与消费方见 src/chat/agent_hooks.py）
+        self.agent_hooks = agent_hooks
 
         # 双轨澄清开关：FSM 模块开启后接入 ClarifyStage（详见 src/clarify/）
         self.enable_clarify = enable_clarify

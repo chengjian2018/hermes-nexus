@@ -380,43 +380,47 @@ def test_migrate_adds_tool_columns_to_legacy_db(tmp_path):
             " VALUES ('s1', 'user', '旧数据', 'chat', '{}', 1.0)")
     conn.close()
 
-    store = SessionStore(db)  # _migrate 补列
-    probe = sqlite3.connect(db)
-    probe.row_factory = sqlite3.Row
-    cols = {
-        r["name"] for r in probe.execute("PRAGMA table_info(messages)").fetchall()
-    }
-    probe.close()
-    assert {"tool_call_id", "tool_calls"} <= cols
+    store = SessionStore(db)  # 打开即用（载荷方案无需迁移）
     msgs = store.get_messages("s1")
     assert msgs is not None and msgs[0]["content"] == "旧数据"
-    assert msgs[0]["tool_call_id"] is None and msgs[0]["tool_calls"] is None
     store.close()
 
 
-def test_append_message_roundtrip_with_tool_fields(tmp_path):
-    """append_message：tool 行带 id、assistant 行带 tool_calls、普通行缺省。"""
+def test_messages_table_has_no_tool_columns(tmp_path):
+    """载荷方案零表结构变更：messages 只有七列，tool 轨迹走 content/metadata。"""
+    store = SessionStore(str(tmp_path / "t.db"))
+    store.close()
+    probe = sqlite3.connect(str(tmp_path / "t.db"))
+    cols = {r[1] for r in probe.execute("PRAGMA table_info(messages)").fetchall()}
+    probe.close()
+    assert cols == {"id", "session_id", "launch_epoch", "role", "content",
+                    "stage", "metadata", "created_at"}
+
+
+def test_append_message_tool_payload_roundtrip(tmp_path):
+    """append_message：工具轮 JSON 载荷 + tool 行 metadata.tool_call_id 往返。"""
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
 
+    from src.dialogue.base import SessionMessage, decode_tool_call_content, encode_tool_call_content
     tool_calls = [{"id": "call_1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
-    from src.dialogue.base import SessionMessage
     store.append_message(session, SessionMessage(
-        role="assistant", content="", stage="agent", tool_calls=tool_calls))
+        role="assistant",
+        content=encode_tool_call_content("查询中", tool_calls),
+        stage="agent"))
     store.append_message(session, SessionMessage(
-        role="tool", content="22 度", stage="agent", tool_call_id="call_1"))
+        role="tool", content="22 度", stage="agent",
+        metadata={"tool_call_id": "call_1"}))
     store.append_message(session, SessionMessage(
         role="user", content="谢谢", stage="chat"))
 
     history = store.get_history("s1")
     assert len(history) == 3
-    assert history[0].tool_calls == tool_calls
-    assert history[0].tool_call_id is None
-    assert history[1].tool_call_id == "call_1"
-    assert history[1].tool_calls is None
-    assert history[2].tool_call_id is None and history[2].tool_calls is None
+    assert decode_tool_call_content(history[0].content) == ("查询中", tool_calls)
+    assert history[1].metadata["tool_call_id"] == "call_1"
+    assert history[2].metadata == {}
     store.close()
 
 
@@ -438,20 +442,21 @@ def test_append_message_writes_current_epoch(tmp_path):
 
 
 def test_replace_history_summary_first_and_retained_kept(tmp_path):
-    """压缩重排：summary 行排最前，retained 消息保序保留（含 tool 字段）。"""
+    """压缩重排：summary 行排最前，retained 消息保序保留（载荷原样往返）。"""
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
-    from src.dialogue.base import SessionMessage
+    from src.dialogue.base import SessionMessage, decode_tool_call_content, encode_tool_call_content
     tool_calls = [{"id": "c1", "function": {"name": "t"}}]
     session.cxt.history = [
         SessionMessage(role="user", content="旧问题1", stage="chat"),
         SessionMessage(role="assistant", content="旧回答1", stage="chat"),
         SessionMessage(role="user", content="新问题", stage="chat"),
-        SessionMessage(role="assistant", content="", stage="agent",
-                       tool_calls=tool_calls),
+        SessionMessage(role="assistant",
+                       content=encode_tool_call_content("查一下", tool_calls),
+                       stage="agent"),
         SessionMessage(role="tool", content="工具结果", stage="agent",
-                       tool_call_id="c1"),
+                       metadata={"tool_call_id": "c1"}),
         SessionMessage(role="assistant", content="新回答", stage="chat"),
     ]
     # DB 与内存对齐（write-through 语义下由 append_message 落）
@@ -465,10 +470,9 @@ def test_replace_history_summary_first_and_retained_kept(tmp_path):
     assert history[0].role == "summary"
     assert history[0].content == "此前对话要点：买手机"
     assert history[0].stage == "compress"
-    assert [m.content for m in history[1:]] == [
-        "新问题", "", "工具结果", "新回答"]
-    assert history[2].tool_calls == tool_calls
-    assert history[3].tool_call_id == "c1"
+    assert decode_tool_call_content(history[2].content) == ("查一下", tool_calls)
+    assert history[3].metadata["tool_call_id"] == "c1"
+    assert history[4].content == "新回答"
     store.close()
 
 

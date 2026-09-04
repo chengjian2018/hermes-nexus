@@ -48,13 +48,16 @@ def test_default_omits_system_entry_when_prompt_empty():
 
 
 def test_paired_tool_trace_replayed_as_protocol():
-    """配对完整的 tool 轨迹按 OpenAI 协议原样回放。"""
+    """配对完整的 tool 轨迹按 OpenAI 协议原样回放（载荷 → 协议行）。"""
+    from src.dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
     cxt = DialogueContext(session_id="s", user_query="北京天气怎么样")
     cxt.add_message("user", "查下天气", stage="chat")
-    cxt.add_message("assistant", "查询中", stage="agent", tool_calls=tool_calls)
-    cxt.add_message("tool", "晴 22 度", stage="agent", tool_call_id="c1")
+    cxt.add_message("assistant", encode_tool_call_content("查询中", tool_calls),
+                    stage="agent")
+    cxt.add_message("tool", "晴 22 度", stage="agent",
+                    metadata={"tool_call_id": "c1"})
     cxt.add_message("assistant", "北京晴 22 度", stage="chat")
     cxt.add_message("user", "北京天气怎么样", stage="chat")
     cxt.turn_history_start = 4
@@ -70,11 +73,13 @@ def test_paired_tool_trace_replayed_as_protocol():
 
 
 def test_broken_pair_degrades_to_plain_text():
-    """配对断裂（tool 行丢失）：assistant 降级纯文本。"""
+    """配对断裂（tool 行丢失）：assistant 降级纯文本（取载荷内层文本）。"""
+    from src.dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
     cxt = DialogueContext(session_id="s", user_query="q")
-    cxt.add_message("assistant", "查询中", stage="agent", tool_calls=tool_calls)
+    cxt.add_message("assistant", encode_tool_call_content("查询中", tool_calls),
+                    stage="agent")
     # 缺失 c1 的 tool 行，直接接普通 assistant
     cxt.add_message("assistant", "结果如下", stage="chat")
     cxt.add_message("user", "q", stage="chat")
@@ -89,11 +94,13 @@ def test_broken_pair_degrades_to_plain_text():
 
 
 def test_trailing_pending_assistant_degrades():
-    """段末尾 pending 未配对的 assistant(tool_calls)：降级纯文本。"""
+    """段末尾 pending 未配对的 assistant 工具轮：降级纯文本。"""
+    from src.dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
     cxt = DialogueContext(session_id="s", user_query="q")
-    cxt.add_message("assistant", "", stage="agent", tool_calls=tool_calls)
+    cxt.add_message("assistant", encode_tool_call_content("", tool_calls),
+                    stage="agent")
     cxt.add_message("user", "q", stage="chat")
     cxt.turn_history_start = 1
 

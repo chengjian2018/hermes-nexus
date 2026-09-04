@@ -44,8 +44,6 @@ CREATE TABLE IF NOT EXISTS messages (
     content    TEXT NOT NULL,
     stage      TEXT NOT NULL DEFAULT '',
     metadata   TEXT NOT NULL DEFAULT '{}',
-    tool_call_id TEXT,
-    tool_calls TEXT NOT NULL DEFAULT '[]',
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
@@ -62,21 +60,7 @@ class SessionStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
-        self._migrate()
         self._conn.commit()
-
-    def _migrate(self) -> None:
-        """存量库补列：messages 缺 tool_call_id / tool_calls 则 ALTER ADD（幂等）。"""
-        cols = {
-            r["name"] for r in
-            self._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        if "tool_call_id" not in cols:
-            self._conn.execute(
-                "ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
-        if "tool_calls" not in cols:
-            self._conn.execute(
-                "ALTER TABLE messages ADD COLUMN tool_calls TEXT NOT NULL DEFAULT '[]'")
 
     def close(self) -> None:
         with self._lock:
@@ -181,9 +165,8 @@ class SessionStore:
             epoch = self._current_epoch(session.session_id)
             self._conn.execute(
                 """INSERT INTO messages
-                   (session_id, launch_epoch, role, content, stage, metadata,
-                    tool_call_id, tool_calls, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (session_id, launch_epoch, role, content, stage, metadata, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session.session_id,
                     epoch,
@@ -191,19 +174,19 @@ class SessionStore:
                     msg.content,
                     msg.stage,
                     json.dumps(msg.metadata or {}, ensure_ascii=False),
-                    msg.tool_call_id,
-                    json.dumps(msg.tool_calls, ensure_ascii=False)
-                    if msg.tool_calls is not None else "[]",
                     time.time(),
                 ),
             )
 
     def get_history(self, session_id: str) -> List[SessionMessage]:
-        """当代 epoch 全量消息按 id 升序重建（压缩前 DB/内存对齐校验用）。"""
+        """当代 epoch 全量消息按 id 升序重建（压缩前 DB/内存对齐校验用）。
+
+        tool 轨迹在 content/metadata 载荷里原样往返（无需专列）。
+        """
         with self._lock:
             epoch = self._current_epoch(session_id)
             rows = self._conn.execute(
-                """SELECT role, content, stage, metadata, tool_call_id, tool_calls
+                """SELECT role, content, stage, metadata
                    FROM messages WHERE session_id = ? AND launch_epoch = ?
                    ORDER BY id""",
                 (session_id, epoch),
@@ -214,8 +197,6 @@ class SessionStore:
                     content=r["content"],
                     stage=r["stage"],
                     metadata=json.loads(r["metadata"] or "{}"),
-                    tool_call_id=r["tool_call_id"],
-                    tool_calls=json.loads(r["tool_calls"] or "[]") or None,
                 )
                 for r in rows
             ]
@@ -249,22 +230,18 @@ class SessionStore:
             )
             rows = [(
                 session.session_id, epoch, "summary", summary_text, "compress",
-                "{}", None, "[]", now,
+                "{}", now,
             )]
             for msg in session.cxt.history[keep_idx:]:
                 rows.append((
                     session.session_id, epoch, msg.role, msg.content, msg.stage,
                     json.dumps(msg.metadata or {}, ensure_ascii=False),
-                    msg.tool_call_id,
-                    json.dumps(msg.tool_calls, ensure_ascii=False)
-                    if msg.tool_calls is not None else "[]",
                     now,
                 ))
             self._conn.executemany(
                 """INSERT INTO messages
-                   (session_id, launch_epoch, role, content, stage, metadata,
-                    tool_call_id, tool_calls, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (session_id, launch_epoch, role, content, stage, metadata, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
 
@@ -291,9 +268,8 @@ class SessionStore:
             restored: List[Tuple[Session, float]] = []
             for row in rows:
                 msgs = self._conn.execute(
-                    """SELECT role, content, stage, metadata, tool_call_id, tool_calls
-                       FROM messages
-                       WHERE session_id = ? AND launch_epoch = ? ORDER BY id""",
+                    "SELECT role, content, stage, metadata FROM messages"
+                    " WHERE session_id = ? AND launch_epoch = ? ORDER BY id",
                     (row["session_id"], row["launch_epoch"]),
                 ).fetchall()
                 session = Session(
@@ -312,8 +288,6 @@ class SessionStore:
                         content=m["content"],
                         stage=m["stage"],
                         metadata=json.loads(m["metadata"] or "{}"),
-                        tool_call_id=m["tool_call_id"],
-                        tool_calls=json.loads(m["tool_calls"] or "[]") or None,
                     )
                     for m in msgs
                 ]
@@ -358,8 +332,7 @@ class SessionStore:
             if exists is None:
                 return None
             rows = self._conn.execute(
-                """SELECT id, launch_epoch, role, content, stage, metadata,
-                          tool_call_id, tool_calls, created_at
+                """SELECT id, launch_epoch, role, content, stage, metadata, created_at
                    FROM messages WHERE session_id = ? ORDER BY id""",
                 (session_id,),
             ).fetchall()
@@ -367,6 +340,5 @@ class SessionStore:
             for r in rows:
                 d = dict(r)
                 d["metadata"] = json.loads(d["metadata"] or "{}")
-                d["tool_calls"] = json.loads(d["tool_calls"] or "[]") or None
                 messages.append(d)
             return messages

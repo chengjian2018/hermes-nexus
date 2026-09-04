@@ -12,7 +12,10 @@
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List
 
-from src.dialogue.base import DialogueContext, SessionMessage
+from src.dialogue.base import (
+    SessionMessage,
+    decode_tool_call_content,
+)
 from src.llm.resolve import build_provider
 from src.prompt import HISTORY_SUMMARY_PROMPT
 
@@ -39,13 +42,11 @@ def _estimate_text(text: str) -> int:
 
 
 def estimate_tokens(history: List[SessionMessage]) -> int:
-    """消息列表总 token 估算：各条 content/tool_calls + 每条 4 overhead。"""
+    """消息列表总 token 估算：各条 content（含工具轮 JSON 载荷）+ 每条 4。"""
     total = 0
     for msg in history:
         total += 4
         total += _estimate_text(msg.content)
-        if msg.tool_calls:
-            total += _estimate_text(str(msg.tool_calls))
     return total
 
 
@@ -65,15 +66,15 @@ def should_compress(
 def _snap_to_pair_boundary(history: List[SessionMessage], split: int) -> int:
     """split 向前吸附到 assistant(tool_calls) 配对 run 的起点。
 
-    若 split 落在某 tool 行上（其 run 起点是前面的 assistant(tool_calls)
-    行），把 split 回退到该 assistant 行之前——界外不留下配对残段。
+    若 split 落在某 tool 行上（其 run 起点是前面的 assistant 工具轮），
+    把 split 回退到该 assistant 行之前——界外不留下配对残段。
     """
     while 0 < split < len(history) and history[split].role == "tool":
         start = split - 1
         while (start >= 0 and history[start].role == "tool"):
             start -= 1
         if (start >= 0 and history[start].role == "assistant"
-                and history[start].tool_calls):
+                and decode_tool_call_content(history[start].content) is not None):
             split = start
         else:
             break
@@ -81,16 +82,21 @@ def _snap_to_pair_boundary(history: List[SessionMessage], split: int) -> int:
 
 
 def _build_summary_input(history: List[SessionMessage], end_idx: int) -> str:
-    """旧消息拼接成摘要请求文本（role 标注 + 单条截断）。"""
+    """旧消息拼接成摘要请求文本（role 标注 + 单条截断）。
+
+    assistant 工具轮 content 是 JSON 载荷：取内层文本 + 标注调用的工具名。
+    """
     lines = []
     for msg in history[:end_idx]:
         content = (msg.content or "")[:_SUMMARY_MSG_TRUNCATE]
-        if msg.role == "assistant" and msg.tool_calls:
+        decoded = decode_tool_call_content(msg.content) if msg.role == "assistant" else None
+        if decoded is not None:
+            text, tool_calls = decoded
             names = ",".join(
                 tc.get("function", {}).get("name", "?")
-                for tc in msg.tool_calls
+                for tc in tool_calls
             )
-            content = f"{content} [调用工具: {names}]".strip()
+            content = f"{text} [调用工具: {names}]".strip()
         lines.append(f"[{msg.role}]: {content}")
     return "\n".join(lines)
 

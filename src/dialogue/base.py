@@ -11,7 +11,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +83,11 @@ class SessionMessage:
 
     All messages produced by stages use this format to keep session storage consistent.
 
-    tool 轨迹字段（跨轮完整回放给 LLM，见 chat/messages.py 回放守卫）：
-    - ``tool_call_id``：tool 行关联的 LLM tool_call id
-    - ``tool_calls``：assistant 行的 OpenAI 原生 tool_calls 列表（结构化原样存）
+    tool 轨迹约定（跨轮完整回放给 LLM，见 chat/messages.py 回放守卫）——
+    不新增独立字段/表列，全部骑在现有 JSON 通道上：
+    - assistant 工具轮：content 为 ``{"content": str, "tool_calls": [...]}``
+      JSON 载荷（``encode_tool_call_content`` 编码 / ``decode`` 解析）
+    - tool 行：``metadata["tool_call_id"]`` 关联 LLM tool_call id
     - role ``summary``：历史压缩产生的 LLM 摘要行（回放时 user 角色 untrusted 包裹）
     """
 
@@ -93,21 +95,14 @@ class SessionMessage:
     content: str
     stage: str = ""  # source stage: pre_recall / query_rewrite / nlu / nlg / agent / state_update
     metadata: Dict[str, Any] = field(default_factory=dict)
-    tool_call_id: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        d = {
+        return {
             "role": self.role,
             "content": self.content,
             "stage": self.stage,
             "metadata": self.metadata,
         }
-        if self.tool_call_id is not None:
-            d["tool_call_id"] = self.tool_call_id
-        if self.tool_calls is not None:
-            d["tool_calls"] = self.tool_calls
-        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SessionMessage":
@@ -116,9 +111,37 @@ class SessionMessage:
             content=d.get("content", ""),
             stage=d.get("stage", ""),
             metadata=d.get("metadata", {}),
-            tool_call_id=d.get("tool_call_id"),
-            tool_calls=d.get("tool_calls"),
         )
+
+
+def encode_tool_call_content(
+    content: str, tool_calls: List[Dict[str, Any]]
+) -> str:
+    """assistant 工具轮 content 的 JSON 载荷编码（Customer-Agent 同款约定）。"""
+    return json.dumps(
+        {"content": content, "tool_calls": tool_calls}, ensure_ascii=False)
+
+
+def decode_tool_call_content(
+    content: str,
+) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """解析 assistant 行 JSON 载荷 → ``(文本, tool_calls)``；非工具轮返回 None。
+
+    非工具轮判定：非 JSON / 无 ``tool_calls`` 键 / 空列表（loop 只在
+    tool_calls 非空时编码，空列表视为普通文本行）。
+    """
+    if not content or not content.lstrip().startswith("{"):
+        return None
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict) or not payload.get("tool_calls"):
+        return None
+    calls = payload["tool_calls"]
+    if not isinstance(calls, list):
+        return None
+    return str(payload.get("content") or ""), calls
 
 
 # ============================================================================
@@ -203,17 +226,18 @@ class DialogueContext:
         content: str,
         stage: str = "",
         metadata: Optional[Dict[str, Any]] = None,
-        tool_call_id: Optional[str] = None,
-        tool_calls: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """Append a standardized message to history."""
+        """Append a standardized message to history.
+
+        tool 轨迹走 content/metadata 载荷（见 SessionMessage docstring）：
+        assistant 工具轮 content 先经 ``encode_tool_call_content`` 编码；
+        tool 行的 ``tool_call_id`` 放 metadata。
+        """
         msg = SessionMessage(
             role=role,
             content=content,
             stage=stage,
             metadata=metadata or {},
-            tool_call_id=tool_call_id,
-            tool_calls=tool_calls,
         )
         self.history.append(msg)
         if self.message_sink is not None:
@@ -227,13 +251,23 @@ class DialogueContext:
 
     def format_history(self, max_turns: int = 10) -> str:
         """Format the last N turns as text for prompt injection."""
-        # Keep only user and assistant messages with content, drop system /
-        # tool / summary and tool-call turns whose assistant content is empty
-        filtered = [
-            msg
-            for msg in self.history
-            if msg.role in ("user", "assistant") and msg.content
-        ]
+        # Keep only user and assistant messages with displayable text, drop
+        # system / tool / summary. assistant 工具轮 content 为 JSON 载荷，
+        # 取内层文本（内层为空则整行跳过——工具轮通常无对用户说话）
+        lines: List[str] = []
+        for msg in self.history:
+            if msg.role not in ("user", "assistant"):
+                continue
+            text = msg.content
+            decoded = decode_tool_call_content(msg.content)
+            if decoded is not None:
+                text = decoded[0]
+            if text:
+                lines.append(f"{msg.role}: {text}")
+        recent = lines[-max_turns * 2 :]  # user + assistant come in pairs
+        if not recent:
+            return "（暂无历史对话）"
+        return "\n".join(recent)
         recent = filtered[-max_turns * 2 :]  # user + assistant come in pairs
         if not recent:
             return "（暂无历史对话）"

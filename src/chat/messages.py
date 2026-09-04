@@ -29,6 +29,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
+from src.dialogue.base import decode_tool_call_content
+
 if TYPE_CHECKING:
     from src.dialogue.base import DialogueContext
 
@@ -53,9 +55,13 @@ def _clean_untrusted(text: str, tag: str) -> str:
 def _replay_segment(segment: List[Any]) -> List[Dict[str, Any]]:
     """守卫回放一段 history：tool 轨迹配对完整则协议化回放，断裂则降级。
 
+    tool 轨迹载荷（见 SessionMessage docstring）：assistant 工具轮 content
+    为 JSON 载荷（``decode_tool_call_content`` 解析）；tool 行 id 在
+    ``metadata["tool_call_id"]``。
+
     规则：
     - user / 纯文本 assistant → 原样
-    - assistant 带 tool_calls → 期待紧随的连续 tool 行 id 集合精确匹配；
+    - assistant 工具轮 → 期待紧随的连续 tool 行 id 集合精确匹配；
       匹配则协议行 + tool 行回放；缺失/错配则整段降级（assistant 退纯
       文本、已缓冲的 tool 行转 untrusted 包裹）
     - 孤儿 tool 行（无前置配对，含存量无 tool_call_id 旧行）→ user 角色
@@ -64,7 +70,7 @@ def _replay_segment(segment: List[Any]) -> List[Dict[str, Any]]:
     - system → 过滤
     """
     out: List[Dict[str, Any]] = []
-    # 配对缓冲：assistant(tool_calls) 行 + 其已配对的 tool 行，配对完成才 flush
+    # 配对缓冲：assistant 工具轮 + 其已配对的 tool 行，配对完成才 flush
     buffered: List[Dict[str, Any]] = []
     pending_ids: set = set()
     pending_content: str = ""
@@ -95,23 +101,26 @@ def _replay_segment(segment: List[Any]) -> List[Dict[str, Any]]:
             out.append({"role": "user", "content": msg.content})
             continue
         if msg.role == "assistant":
-            if msg.tool_calls:
-                buffered = [{"role": "assistant", "content": msg.content or None,
-                             "tool_calls": msg.tool_calls}]
-                pending_ids = {tc.get("id") for tc in msg.tool_calls}
-                pending_content = msg.content
+            decoded = decode_tool_call_content(msg.content)
+            if decoded is not None:
+                text, tool_calls = decoded
+                buffered = [{"role": "assistant", "content": text or None,
+                             "tool_calls": tool_calls}]
+                pending_ids = {tc.get("id") for tc in tool_calls}
+                pending_content = text
             else:
                 out.append({"role": "assistant", "content": msg.content})
             continue
         if msg.role == "tool":
-            if not pending_ids or msg.tool_call_id not in pending_ids:
+            call_id = (msg.metadata or {}).get("tool_call_id")
+            if not pending_ids or call_id not in pending_ids:
                 out.append({"role": "user",
                             "content": _clean_untrusted(msg.content, "历史工具结果")})
                 continue
             buffered.append({"role": "tool",
-                             "tool_call_id": msg.tool_call_id or "",
+                             "tool_call_id": call_id or "",
                              "content": msg.content})
-            pending_ids.discard(msg.tool_call_id)
+            pending_ids.discard(call_id)
             if not pending_ids:  # 配对完成
                 out.extend(buffered)
                 buffered = []

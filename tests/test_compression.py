@@ -30,14 +30,14 @@ def test_estimate_tokens_cjk_and_ascii():
     assert estimate_tokens([SessionMessage(role="user", content="你好吗abcd")]) == 11
 
 
-def test_estimate_tokens_includes_tool_calls():
+def test_estimate_tokens_tool_payload_in_content():
+    """工具轮载荷在 content 里，天然计入估算（比空文本行大）。"""
+    from src.dialogue.base import encode_tool_call_content
     plain = SessionMessage(role="user", content="q")
-    with_calls = SessionMessage(
-        role="assistant", content="",
-        tool_calls=[{"id": "c1", "function": {"name": "weather",
-                                               "arguments": "{}"}}],
-    )
-    assert (estimate_tokens([plain, with_calls])
+    payload = encode_tool_call_content(
+        "", [{"id": "c1", "function": {"name": "weather", "arguments": "{}"}}])
+    with_payload = SessionMessage(role="assistant", content=payload)
+    assert (estimate_tokens([plain, with_payload])
             > estimate_tokens([plain, SessionMessage(role="assistant",
                                                      content="")]))
 
@@ -56,12 +56,15 @@ def test_should_compress_boundaries():
 # ---------------------------------------------------------------------------
 
 def test_snap_keeps_tool_pair_together():
-    """split 落在 tool 行上：吸附到其 assistant(tool_calls) run 起点。"""
+    """split 落在 tool 行上：吸附到其 assistant 工具轮起点。"""
+    from src.dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "function": {"name": "t"}}]
     history = [
         SessionMessage(role="user", content="q1"),
-        SessionMessage(role="assistant", content="查", tool_calls=tool_calls),
-        SessionMessage(role="tool", content="r1", tool_call_id="c1"),
+        SessionMessage(role="assistant",
+                       content=encode_tool_call_content("查", tool_calls)),
+        SessionMessage(role="tool", content="r1",
+                       metadata={"tool_call_id": "c1"}),
         SessionMessage(role="assistant", content="答"),
         SessionMessage(role="user", content="q2"),
     ]
@@ -72,8 +75,9 @@ def test_snap_keeps_tool_pair_together():
 
 
 def test_snap_no_assistant_run_before_tool_keeps_split():
-    """tool 行前面没有 assistant(tool_calls) run：吸附无处可回，保持原 split。"""
-    history = [SessionMessage(role="tool", content="r", tool_call_id="c1")]
+    """tool 行前面没有 assistant 工具轮：吸附无处可回，保持原 split。"""
+    history = [SessionMessage(role="tool", content="r",
+                              metadata={"tool_call_id": "c1"})]
     assert _snap_to_pair_boundary(history, 1) == 1
 
 

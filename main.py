@@ -279,8 +279,6 @@ class MessageItem(BaseModel):
     content: str
     stage: str
     metadata: Dict[str, Any] = {}
-    tool_call_id: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
     created_at: float
     action: Dict[str, str] = {}
 

@@ -116,7 +116,8 @@ flowchart TB
 - **SessionStore**：SQLite 消息事实源（`chat/store.py`）。消息逐条 write-through：
   `attach(session)` 挂接 `cxt.message_sink` → `add_message` 即时落库（中途 crash
   不丢轮内消息；sink 异常吞掉不阻断对话）；轮末 `save_snapshot` 只回写 sessions
-  状态快照。messages 表含 tool 轨迹列（tool_call_id/tool_calls，存量库自动补列）；
+  状态快照。tool 轨迹不占表列：assistant 工具轮 content 为 JSON 载荷
+  （`encode_tool_call_content`）、tool 行 id 在 metadata（零表结构变更，存量库直开）；
   `replace_history` 为压缩重排原语（对齐校验 + summary 行置顶 + retained 重插）。
   重启恢复/审计查询同前；治理仍在内存
 - **历史压缩（chat/compression.py）**：估算 token（CJK×2 + 其他×0.25 字符近似）
@@ -147,7 +148,7 @@ flowchart TB
 |---|---|---|
 | `PipelineStage.execute(ctx)` | `dialogue/base.py` | 所有 stage 的唯一接口 |
 | `resolve_stage(stage, ctx, module, pattern)` | `dialogue/stage_slots.py` | 槽位三层延迟解析器（node > module > pattern；校验整层降级；generate 双形态展开为惰性子部件） |
-| `DialogueContext` 字段 | `dialogue/base.py` | stage 间数据交换全部经由 ctx，不另开通道。history 为 `SessionMessage`（role/content/stage/metadata + tool 轨迹字段 tool_call_id/tool_calls，role 含 summary 压缩行）；`turn_history_start` 由 begin_turn 快照（三段式构建的切分依据）；`message_sink` 由 SessionStore.attach 注入（add_message 逐条 write-through，异常吞掉） |
+| `DialogueContext` 字段 | `dialogue/base.py` | stage 间数据交换全部经由 ctx，不另开通道。history 为 `SessionMessage`（role/content/stage/metadata；role 含 summary 压缩行）。tool 轨迹载荷：assistant 工具轮 content 为 `{"content", "tool_calls"}` JSON（`encode_tool_call_content`/`decode_tool_call_content`）、tool 行 `metadata["tool_call_id"]`；`turn_history_start` 由 begin_turn 快照（三段式构建的切分依据）；`message_sink` 由 SessionStore.attach 注入（add_message 逐条 write-through，异常吞掉） |
 | `ModuleJumpEvent` | `dialogue/base.py` | 模块跳转事件（target_module_code/reason/source）：stage 循环检测 / agent transfer 写入 `cxt.actions`，chat 层 hop 循环消费重路由；`to_dict()` 为观测形态 |
 | `registry.register()` 自注册 | `dialogue/register.py` `tools/register.py` `llm/register.py` | 应用层接入框架的唯一方式（AST 扫描发现） |
 | `build_provider(llm_config)` | `llm/resolve.py` | 所有 LLM 调用的统一入口 |

@@ -1,51 +1,46 @@
-"""SessionMessage 数据类扩展 —— tool 轨迹字段 + summary role + sink 透传。"""
+"""SessionMessage —— tool 轨迹 JSON 载荷 + summary role + sink 透传。"""
 
-from src.dialogue.base import DialogueContext, SessionMessage
+from src.dialogue.base import (
+    DialogueContext,
+    SessionMessage,
+    decode_tool_call_content,
+    encode_tool_call_content,
+)
 
 
 # ---------------------------------------------------------------------------
-# 字段默认值与序列化
+# 载荷编码/解码
 # ---------------------------------------------------------------------------
 
-def test_new_fields_default_none():
-    msg = SessionMessage(role="user", content="你好")
-    assert msg.tool_call_id is None
-    assert msg.tool_calls is None
+TOOL_CALLS = [{
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "weather", "arguments": "{\"city\": \"北京\"}"},
+}]
 
 
-def test_to_dict_roundtrip_with_tool_fields():
-    tool_calls = [{
-        "id": "call_1",
-        "type": "function",
-        "function": {"name": "weather", "arguments": "{\"city\": \"北京\"}"},
-    }]
-    msg = SessionMessage(
-        role="assistant", content="", stage="agent",
-        tool_calls=tool_calls,
-    )
-    restored = SessionMessage.from_dict(msg.to_dict())
-    assert restored.tool_calls == tool_calls
-    assert restored.role == "assistant"
-    assert restored.stage == "agent"
+def test_encode_decode_roundtrip():
+    payload = encode_tool_call_content("查询中", TOOL_CALLS)
+    decoded = decode_tool_call_content(payload)
+    assert decoded == ("查询中", TOOL_CALLS)
 
 
-def test_to_dict_omits_none_tool_fields():
-    d = SessionMessage(role="user", content="你好").to_dict()
-    assert "tool_call_id" not in d
-    assert "tool_calls" not in d
+def test_decode_plain_content_returns_none():
+    assert decode_tool_call_content("你好") is None
+    assert decode_tool_call_content("") is None
+    assert decode_tool_call_content("[已移交至模块 X]") is None  # 非工具轮文本
 
 
-def test_from_dict_tolerates_missing_tool_fields():
-    msg = SessionMessage.from_dict({"role": "tool", "content": "{}"})
-    assert msg.tool_call_id is None
-    assert msg.tool_calls is None
+def test_decode_json_without_tool_calls_returns_none():
+    # JSON 但无 tool_calls 键（普通 JSON 回复不误判）
+    assert decode_tool_call_content('{"content": "你好"}') is None
+    # 空列表视为普通文本（loop 只在 tool_calls 非空时编码）
+    assert decode_tool_call_content('{"content": "你好", "tool_calls": []}') is None
 
 
-def test_from_dict_restores_tool_call_id():
-    msg = SessionMessage.from_dict({
-        "role": "tool", "content": "22 度", "tool_call_id": "call_9",
-    })
-    assert msg.tool_call_id == "call_9"
+def test_decode_malformed_json_returns_none():
+    assert decode_tool_call_content('{"content": "截断...') is None
+    assert decode_tool_call_content(None) is None
 
 
 def test_summary_role_is_valid():
@@ -53,18 +48,20 @@ def test_summary_role_is_valid():
     assert msg.to_dict()["role"] == "summary"
 
 
-# ---------------------------------------------------------------------------
-# add_message 透传
-# ---------------------------------------------------------------------------
+def test_to_from_dict_shape_unchanged():
+    """载荷方案下 SessionMessage 序列化保持四字段（轨迹在 content 内）。"""
+    msg = SessionMessage(role="assistant",
+                         content=encode_tool_call_content("", TOOL_CALLS),
+                         stage="agent")
+    d = msg.to_dict()
+    assert set(d) == {"role", "content", "stage", "metadata"}
+    restored = SessionMessage.from_dict(d)
+    assert decode_tool_call_content(restored.content) == ("", TOOL_CALLS)
 
-def test_add_message_passes_tool_fields():
-    cxt = DialogueContext(session_id="s1", user_query="q")
-    tool_calls = [{"id": "c1", "function": {"name": "t"}}]
-    cxt.add_message("assistant", "", stage="agent", tool_calls=tool_calls)
-    cxt.add_message("tool", "ok", stage="agent", tool_call_id="c1")
-    assert cxt.history[0].tool_calls == tool_calls
-    assert cxt.history[1].tool_call_id == "c1"
 
+# ---------------------------------------------------------------------------
+# add_message + sink
+# ---------------------------------------------------------------------------
 
 def test_message_sink_receives_appended_message():
     received = []
@@ -86,16 +83,27 @@ def test_message_sink_failure_does_not_break_dialogue():
 
 
 # ---------------------------------------------------------------------------
-# format_history 过滤（tool 轮 assistant 空行不进业务模板）
+# format_history：工具轮 JSON 载荷取内层文本
 # ---------------------------------------------------------------------------
 
-def test_format_history_skips_empty_content():
+def test_format_history_decodes_tool_payload():
     cxt = DialogueContext(session_id="s1", user_query="q")
     cxt.add_message("user", "你好", stage="chat")
-    cxt.add_message("assistant", "", stage="agent",
-                    tool_calls=[{"id": "c1", "function": {"name": "t"}}])
-    cxt.add_message("assistant", "在的～", stage="chat")
+    cxt.add_message(
+        "assistant", encode_tool_call_content("", TOOL_CALLS), stage="agent")
+    cxt.add_message("tool", "晴 22 度", stage="agent",
+                    metadata={"tool_call_id": "call_1"})
+    cxt.add_message(
+        "assistant",
+        encode_tool_call_content("先查一下天气", TOOL_CALLS),
+        stage="agent")
+    cxt.add_message("assistant", "北京晴 22 度", stage="chat")
+
     formatted = cxt.format_history()
     assert "你好" in formatted
-    assert "在的～" in formatted
-    assert formatted.count("assistant:") == 1
+    assert "北京晴 22 度" in formatted
+    assert "先查一下天气" in formatted      # 工具轮内层文本可见
+    assert "tool_calls" not in formatted     # 载荷原文不泄漏
+    lines = formatted.split("\n")
+    assert "tool: 晴 22 度" not in lines     # tool 行不进业务模板
+    assert formatted.count("assistant:") == 2  # 内层为空的工具轮不占行

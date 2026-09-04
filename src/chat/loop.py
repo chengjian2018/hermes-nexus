@@ -21,6 +21,7 @@ from src.chat.session import Session
 from src.dialogue.base import (
     DialogueContext,
     ModuleJumpEvent,
+    encode_tool_call_content,
     fill_prompt_template,
 )
 from src.llm.resolve import build_provider
@@ -149,8 +150,11 @@ def run_agent(
                 )
                 messages.append({"role": "assistant", "content": content or None,
                                  "tool_calls": tool_calls})
-                cxt.add_message("assistant", content, stage="agent",
-                                tool_calls=tool_calls)
+                cxt.add_message(
+                    "assistant",
+                    encode_tool_call_content(content or "", tool_calls),
+                    stage="agent",
+                )
                 err = json.dumps(
                     {"error": "转移目标不存在，请直接回应用户"},
                     ensure_ascii=False)
@@ -161,8 +165,8 @@ def run_agent(
                     else:
                         result_content = _execute_tool(name, _parse_args(tc))
                     cxt.add_message("tool", result_content, stage="agent",
-                                    metadata={"tool_name": name},
-                                    tool_call_id=tc.get("id", ""))
+                                    metadata={"tool_name": name,
+                                              "tool_call_id": tc.get("id", "")})
                     messages.append({"role": "tool",
                                      "tool_call_id": tc.get("id", ""),
                                      "content": result_content})
@@ -172,9 +176,12 @@ def run_agent(
             # 保留进 history），chat 层消费事件重路由到目标模块同轮续答。
             # 该响应的每个 tool_call 都合成 tool 行（transfer 条记移交、其余
             # 记未执行），保证下一轮回放时 assistant.tool_calls 全配对
-            cxt.add_message("assistant", content, stage="agent",
-                            metadata={"suppressed": True},
-                            tool_calls=tool_calls)
+            cxt.add_message(
+                "assistant",
+                encode_tool_call_content(content or "", tool_calls),
+                stage="agent",
+                metadata={"suppressed": True},
+            )
             for tc in tool_calls:
                 name = tc.get("function", {}).get("name", "")
                 if name.startswith(TRANSFER_TOOL_PREFIX):
@@ -182,8 +189,9 @@ def run_agent(
                 else:
                     synthetic = "[未执行：本轮已移交]"
                 cxt.add_message("tool", synthetic, stage="agent",
-                                metadata={"synthetic": True, "tool_name": name},
-                                tool_call_id=tc.get("id", ""))
+                                metadata={"synthetic": True,
+                                          "tool_name": name,
+                                          "tool_call_id": tc.get("id", "")})
             cxt.actions.append(ModuleJumpEvent(
                 target_module_code=target,
                 reason=transfer_reason,
@@ -198,8 +206,11 @@ def run_agent(
         # 普通工具调用：执行、落 history、回填
         messages.append({"role": "assistant", "content": content or None,
                          "tool_calls": tool_calls})
-        cxt.add_message("assistant", content, stage="agent",
-                        tool_calls=tool_calls)
+        cxt.add_message(
+            "assistant",
+            encode_tool_call_content(content or "", tool_calls),
+            stage="agent",
+        )
         for tc in tool_calls:
             name = tc.get("function", {}).get("name", "")
             args = _parse_args(tc)
@@ -209,11 +220,10 @@ def run_agent(
                 cxt.metadata["served_by_projection"] = {
                     "module": module.module_code, "source": source,
                 }
-            metadata = {"tool_name": name}
+            metadata = {"tool_name": name, "tool_call_id": tc.get("id", "")}
             if source:
                 metadata["lent_by"] = source
-            cxt.add_message("tool", tool_result, stage="agent", metadata=metadata,
-                            tool_call_id=tc.get("id", ""))
+            cxt.add_message("tool", tool_result, stage="agent", metadata=metadata)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "content": tool_result})
 

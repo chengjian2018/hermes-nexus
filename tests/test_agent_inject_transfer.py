@@ -306,12 +306,13 @@ def test_chat_hop_consumes_transfer_event_same_turn():
 
 
 # ---------------------------------------------------------------------------
-# tool 轨迹完整记录（跨轮回放的配对基础）
+# tool 轨迹完整记录（载荷形态：assistant 工具轮 content JSON + tool 行 metadata id）
 # ---------------------------------------------------------------------------
 
 def test_tool_round_ids_paired_in_history():
-    """普通工具轮：assistant(tool_calls) 与 tool 行 id 一一配对落 history。"""
+    """普通工具轮：assistant 载荷 tool_calls 与 tool 行 metadata id 一一配对。"""
     from src.chat.loop import run_agent
+    from src.dialogue.base import decode_tool_call_content
     s = _mk_session()
     s.cxt.add_message("user", "查下我的工单", stage="chat")
     provider = ScriptedProvider([
@@ -323,16 +324,22 @@ def test_tool_round_ids_paired_in_history():
         run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
 
     hist = [m for m in s.cxt.history if m.stage == "agent"]
-    assistant_calls = [m for m in hist if m.role == "assistant" and m.tool_calls]
+    assistant_calls = [m for m in hist
+                       if m.role == "assistant"
+                       and decode_tool_call_content(m.content) is not None]
     assert len(assistant_calls) == 1
-    call_ids = {tc["id"] for tc in assistant_calls[0].tool_calls}
-    tool_ids = {m.tool_call_id for m in hist if m.role == "tool"}
+    text, calls = decode_tool_call_content(assistant_calls[0].content)
+    assert text == "查询中"
+    call_ids = {tc["id"] for tc in calls}
+    tool_ids = {m.metadata.get("tool_call_id")
+                for m in hist if m.role == "tool"}
     assert call_ids == tool_ids == {"c1"}
 
 
 def test_transfer_turn_synthesizes_all_tool_results():
     """transfer 轮：同响应混合普通工具 + transfer，全部合成 tool 行且 id 全配对。"""
     from src.chat.loop import run_agent
+    from src.dialogue.base import decode_tool_call_content
     s = _mk_session()
     s.cxt.add_message("user", "查完给我转售后", stage="chat")
     provider = ScriptedProvider([
@@ -351,11 +358,13 @@ def test_transfer_turn_synthesizes_all_tool_results():
     suppressed = [m for m in s.cxt.history
                   if m.role == "assistant" and m.metadata.get("suppressed")]
     assert len(suppressed) == 1
-    assert len(suppressed[0].tool_calls) == 2
+    text, calls = decode_tool_call_content(suppressed[0].content)
+    assert text == "好的，查完就转"
+    assert len(calls) == 2
 
     synthetic = [m for m in s.cxt.history if m.role == "tool"]
     assert len(synthetic) == 2  # 每个tool call 一条，全配对
-    assert {m.tool_call_id for m in synthetic} == {"c1", "c2"}
+    assert {m.metadata.get("tool_call_id") for m in synthetic} == {"c1", "c2"}
     assert all(m.metadata.get("synthetic") for m in synthetic)
     moved = [m for m in synthetic if m.content.startswith("[已移交至模块")]
     skipped = [m for m in synthetic if m.content.startswith("[未执行")]
@@ -363,8 +372,9 @@ def test_transfer_turn_synthesizes_all_tool_results():
 
 
 def test_rejected_transfer_records_tool_calls_on_assistant():
-    """幻觉目标错误回填路径：assistant 行带 tool_calls、tool 行带 id。"""
+    """幻觉目标错误回填路径：assistant 载荷带 tool_calls、tool 行带 id。"""
     from src.chat.loop import run_agent
+    from src.dialogue.base import decode_tool_call_content
     s = _mk_session()
     s.cxt.add_message("user", "我要办个神奇业务", stage="chat")
     provider = ScriptedProvider([
@@ -377,8 +387,11 @@ def test_rejected_transfer_records_tool_calls_on_assistant():
 
     agent_hist = [m for m in s.cxt.history if m.stage == "agent"]
     call_assistants = [m for m in agent_hist
-                       if m.role == "assistant" and m.tool_calls]
+                       if m.role == "assistant"
+                       and decode_tool_call_content(m.content) is not None]
     assert len(call_assistants) == 1
-    assert call_assistants[0].tool_calls[0]["id"] == "c1"
+    text, calls = decode_tool_call_content(call_assistants[0].content)
+    assert text == "尝试移交"
+    assert calls[0]["id"] == "c1"
     tools = [m for m in agent_hist if m.role == "tool"]
-    assert tools[0].tool_call_id == "c1"
+    assert tools[0].metadata["tool_call_id"] == "c1"

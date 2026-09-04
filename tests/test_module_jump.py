@@ -1,6 +1,6 @@
 """ModuleJumpEvent 机制：stage 循环内检测 + hop 消费重路由。
 
-覆盖 chat._detect_jump_after_stage 的三类来源与容错：
+覆盖 chat.ModuleJumpChannel.detect_after_stage 的三类来源与容错：
 - NLU 直接输出 jump_module 字段（nlu_jump）
 - next_node 命中节点的 jump_module 配置（route_menu，先推进菜单 + R4）
 - 目标不存在 / 自环 → 忽略继续跑剩余 stages（LLM 幻觉容错）
@@ -8,7 +8,7 @@
 
 from unittest.mock import patch
 
-from src.chat.chat import _detect_jump_after_stage
+from src.chat.chat import ModuleJumpChannel
 from src.chat.session import Session
 from src.dialogue.base import DialogueContext, ModuleJumpEvent, PipelineStage
 from src.dialogue.module import AgentModule, FSMModule, ModuleLink, RouteModule
@@ -77,7 +77,7 @@ def _chat(sessions, sid, query):
 
 
 # ============================================================================
-# _detect_jump_after_stage 单测（离线）
+# ModuleJumpChannel.detect_after_stage 单测（离线）
 # ============================================================================
 
 class TestDetectJump:
@@ -93,7 +93,7 @@ class TestDetectJump:
         ctx.module_map = {"r1": object(), "m1": object()}
         ctx.nlu_result = {"next_node": "", "jump_module": "m1",
                           "reason": "售后", "slots": {}}
-        event = _detect_jump_after_stage(ctx, _route_mod(), before_nlu=None)
+        event = ModuleJumpChannel.detect_after_stage(ctx, _route_mod(), before_nlu=None)
         assert event is not None
         assert event.target_module_code == "m1"
         assert event.source == "nlu_jump"
@@ -110,7 +110,7 @@ class TestDetectJump:
         route = RouteModule(module_code="r1", module_name="r",
                             module_description="d", module_todo_description="t",
                             module_nodes=[root, menu])
-        event = _detect_jump_after_stage(ctx, route, before_nlu=None)
+        event = ModuleJumpChannel.detect_after_stage(ctx, route, before_nlu=None)
         assert event is not None
         assert event.target_module_code == "m1"
         assert event.source == "route_menu"
@@ -121,21 +121,21 @@ class TestDetectJump:
         ctx = self._ctx()
         ctx.module_map = {"r1": object(), "m1": object()}
         ctx.nlu_result = {"next_node": "", "jump_module": "r1", "slots": {}}
-        assert _detect_jump_after_stage(ctx, _route_mod(), None) is None
+        assert ModuleJumpChannel.detect_after_stage(ctx, _route_mod(), None) is None
 
     def test_unknown_target_ignored(self):
         """目标不在 module_map（LLM 幻觉）→ 忽略。"""
         ctx = self._ctx()
         ctx.module_map = {"r1": object()}
         ctx.nlu_result = {"next_node": "", "jump_module": "ghost", "slots": {}}
-        assert _detect_jump_after_stage(ctx, _route_mod(), None) is None
+        assert ModuleJumpChannel.detect_after_stage(ctx, _route_mod(), None) is None
 
     def test_unchanged_nlu_result_skipped(self):
         """nlu_result 未被本 stage 更新（同对象）→ 不检测（hop 续答防误检）。"""
         ctx = self._ctx()
         ctx.module_map = {"r1": object(), "m1": object()}
         ctx.nlu_result = {"jump_module": "m1", "slots": {}}
-        assert _detect_jump_after_stage(ctx, _route_mod(), ctx.nlu_result) is None
+        assert ModuleJumpChannel.detect_after_stage(ctx, _route_mod(), ctx.nlu_result) is None
 
 
 def _route_mod():

@@ -336,3 +336,155 @@ def test_get_messages_missing_session(tmp_path):
     store = SessionStore(str(tmp_path / "t.db"))
     assert store.get_messages("nope") is None
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# 迁移 + 逐条 write-through + 压缩原语
+# ---------------------------------------------------------------------------
+
+def test_migrate_adds_tool_columns_to_legacy_db(tmp_path):
+    """旧 schema 建库（无 tool 列）→ 打开即补列，旧数据可读。"""
+    db = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.executescript("""
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                pattern_code TEXT NOT NULL,
+                launch_epoch INTEGER NOT NULL DEFAULT 0,
+                request_id TEXT,
+                task_info TEXT NOT NULL DEFAULT '{}',
+                current_module_code TEXT,
+                current_node_code TEXT,
+                filled_slots TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                last_active_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                launch_epoch INTEGER NOT NULL DEFAULT 0,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                stage TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            );
+        """)
+        conn.execute(
+            "INSERT INTO sessions (session_id, pattern_code, created_at, last_active_at)"
+            " VALUES ('s1', 'xianyu_agent', 1.0, 1.0)")
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, stage, metadata, created_at)"
+            " VALUES ('s1', 'user', '旧数据', 'chat', '{}', 1.0)")
+    conn.close()
+
+    store = SessionStore(db)  # _migrate 补列
+    probe = sqlite3.connect(db)
+    probe.row_factory = sqlite3.Row
+    cols = {
+        r["name"] for r in probe.execute("PRAGMA table_info(messages)").fetchall()
+    }
+    probe.close()
+    assert {"tool_call_id", "tool_calls"} <= cols
+    msgs = store.get_messages("s1")
+    assert msgs is not None and msgs[0]["content"] == "旧数据"
+    assert msgs[0]["tool_call_id"] is None and msgs[0]["tool_calls"] is None
+    store.close()
+
+
+def test_append_message_roundtrip_with_tool_fields(tmp_path):
+    """append_message：tool 行带 id、assistant 行带 tool_calls、普通行缺省。"""
+    store = SessionStore(str(tmp_path / "t.db"))
+    session = make_session()
+    store.create_session(session)
+
+    tool_calls = [{"id": "call_1", "type": "function",
+                   "function": {"name": "weather", "arguments": "{}"}}]
+    from src.dialogue.base import SessionMessage
+    store.append_message(session, SessionMessage(
+        role="assistant", content="", stage="agent", tool_calls=tool_calls))
+    store.append_message(session, SessionMessage(
+        role="tool", content="22 度", stage="agent", tool_call_id="call_1"))
+    store.append_message(session, SessionMessage(
+        role="user", content="谢谢", stage="chat"))
+
+    history = store.get_history("s1")
+    assert len(history) == 3
+    assert history[0].tool_calls == tool_calls
+    assert history[0].tool_call_id is None
+    assert history[1].tool_call_id == "call_1"
+    assert history[1].tool_calls is None
+    assert history[2].tool_call_id is None and history[2].tool_calls is None
+    store.close()
+
+
+def test_append_message_writes_current_epoch(tmp_path):
+    """重 launch 后 append_message 落当代 epoch，get_history 只取当代。"""
+    store = SessionStore(str(tmp_path / "t.db"))
+    session = make_session()
+    store.create_session(session)
+    from src.dialogue.base import SessionMessage
+    store.append_message(session, SessionMessage(
+        role="user", content="第一代消息", stage="chat"))
+    store.create_session(session)  # epoch 0 → 1
+    store.append_message(session, SessionMessage(
+        role="user", content="第二代消息", stage="chat"))
+
+    history = store.get_history("s1")
+    assert [m.content for m in history] == ["第二代消息"]
+    store.close()
+
+
+def test_replace_history_summary_first_and_retained_kept(tmp_path):
+    """压缩重排：summary 行排最前，retained 消息保序保留（含 tool 字段）。"""
+    store = SessionStore(str(tmp_path / "t.db"))
+    session = make_session()
+    store.create_session(session)
+    from src.dialogue.base import SessionMessage
+    tool_calls = [{"id": "c1", "function": {"name": "t"}}]
+    session.cxt.history = [
+        SessionMessage(role="user", content="旧问题1", stage="chat"),
+        SessionMessage(role="assistant", content="旧回答1", stage="chat"),
+        SessionMessage(role="user", content="新问题", stage="chat"),
+        SessionMessage(role="assistant", content="", stage="agent",
+                       tool_calls=tool_calls),
+        SessionMessage(role="tool", content="工具结果", stage="agent",
+                       tool_call_id="c1"),
+        SessionMessage(role="assistant", content="新回答", stage="chat"),
+    ]
+    # DB 与内存对齐（write-through 语义下由 append_message 落）
+    for msg in session.cxt.history:
+        store.append_message(session, msg)
+
+    store.replace_history(session, "此前对话要点：买手机", keep_idx=2)
+
+    history = store.get_history("s1")
+    assert len(history) == 5
+    assert history[0].role == "summary"
+    assert history[0].content == "此前对话要点：买手机"
+    assert history[0].stage == "compress"
+    assert [m.content for m in history[1:]] == [
+        "新问题", "", "工具结果", "新回答"]
+    assert history[2].tool_calls == tool_calls
+    assert history[3].tool_call_id == "c1"
+    store.close()
+
+
+def test_replace_history_mismatch_leaves_db_untouched(tmp_path):
+    """DB/内存行数不齐：抛 RuntimeError，事务回滚，DB 原样未动。"""
+    import pytest
+    store = SessionStore(str(tmp_path / "t.db"))
+    session = make_session()
+    store.create_session(session)
+    from src.dialogue.base import SessionMessage
+    store.append_message(session, SessionMessage(
+        role="user", content="DB 里的消息", stage="chat"))
+    # 内存 history 为空 → 不齐
+
+    with pytest.raises(RuntimeError):
+        store.replace_history(session, "摘要", keep_idx=0)
+
+    history = store.get_history("s1")
+    assert len(history) == 1 and history[0].content == "DB 里的消息"
+    store.close()

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS messages (
     content    TEXT NOT NULL,
     stage      TEXT NOT NULL DEFAULT '',
     metadata   TEXT NOT NULL DEFAULT '{}',
+    tool_call_id TEXT,
+    tool_calls TEXT NOT NULL DEFAULT '[]',
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
@@ -58,7 +60,21 @@ class SessionStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """存量库补列：messages 缺 tool_call_id / tool_calls 则 ALTER ADD（幂等）。"""
+        cols = {
+            r["name"] for r in
+            self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "tool_call_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
+        if "tool_calls" not in cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN tool_calls TEXT NOT NULL DEFAULT '[]'")
 
     def close(self) -> None:
         with self._lock:
@@ -155,6 +171,115 @@ class SessionStore:
             )
 
     # ------------------------------------------------------------------
+    # 逐条 write-through（DB 事实源）+ 压缩原语
+    # ------------------------------------------------------------------
+
+    def _current_epoch(self, session_id: str) -> int:
+        """查 session 当代 epoch（无行视为 0；须持有 self._lock）。"""
+        row = self._conn.execute(
+            "SELECT launch_epoch FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return row["launch_epoch"] if row is not None else 0
+
+    def append_message(self, session: Session, msg: SessionMessage) -> None:
+        """单条消息即时落库（message_sink 的写侧，add_message 逐条触发）。
+
+        epoch 写时查询（与 save_turn 同 idiom）：内存逐出后重 launch 的在途轮
+        会落到新代，与现状批量写的偏差同类，非本次引入。
+        """
+        with self._lock, self._conn:
+            epoch = self._current_epoch(session.session_id)
+            self._conn.execute(
+                """INSERT INTO messages
+                   (session_id, launch_epoch, role, content, stage, metadata,
+                    tool_call_id, tool_calls, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session.session_id,
+                    epoch,
+                    msg.role,
+                    msg.content,
+                    msg.stage,
+                    json.dumps(msg.metadata or {}, ensure_ascii=False),
+                    msg.tool_call_id,
+                    json.dumps(msg.tool_calls, ensure_ascii=False)
+                    if msg.tool_calls is not None else "[]",
+                    time.time(),
+                ),
+            )
+
+    def get_history(self, session_id: str) -> List[SessionMessage]:
+        """当代 epoch 全量消息按 id 升序重建（压缩前 DB/内存对齐校验用）。"""
+        with self._lock:
+            epoch = self._current_epoch(session_id)
+            rows = self._conn.execute(
+                """SELECT role, content, stage, metadata, tool_call_id, tool_calls
+                   FROM messages WHERE session_id = ? AND launch_epoch = ?
+                   ORDER BY id""",
+                (session_id, epoch),
+            ).fetchall()
+            return [
+                SessionMessage(
+                    role=r["role"],
+                    content=r["content"],
+                    stage=r["stage"],
+                    metadata=json.loads(r["metadata"] or "{}"),
+                    tool_call_id=r["tool_call_id"],
+                    tool_calls=json.loads(r["tool_calls"] or "[]") or None,
+                )
+                for r in rows
+            ]
+
+    def replace_history(
+        self, session: Session, summary_text: str, keep_idx: int
+    ) -> None:
+        """压缩重排：删当代全部 → 插 summary 行 → 重插 ``history[keep_idx:]``。
+
+        单事务；先做 DB 行数与 ``len(cxt.history)`` 对齐校验，不齐抛
+        ``RuntimeError``（事务回滚，DB 原样），调用方捕获后放弃压缩——
+        对不齐的历史绝不删。retained 行 id 会重排（AUTOINCREMENT 无法
+        插到前面），summary 天然排最前。
+        """
+        now = time.time()
+        with self._lock, self._conn:
+            epoch = self._current_epoch(session.session_id)
+            count = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM messages"
+                " WHERE session_id = ? AND launch_epoch = ?",
+                (session.session_id, epoch),
+            ).fetchone()["n"]
+            if count != len(session.cxt.history):
+                raise RuntimeError(
+                    f"DB/内存消息数不齐，放弃压缩: session={session.session_id}"
+                    f" db={count} mem={len(session.cxt.history)}"
+                )
+            self._conn.execute(
+                "DELETE FROM messages WHERE session_id = ? AND launch_epoch = ?",
+                (session.session_id, epoch),
+            )
+            rows = [(
+                session.session_id, epoch, "summary", summary_text, "compress",
+                "{}", None, "[]", now,
+            )]
+            for msg in session.cxt.history[keep_idx:]:
+                rows.append((
+                    session.session_id, epoch, msg.role, msg.content, msg.stage,
+                    json.dumps(msg.metadata or {}, ensure_ascii=False),
+                    msg.tool_call_id,
+                    json.dumps(msg.tool_calls, ensure_ascii=False)
+                    if msg.tool_calls is not None else "[]",
+                    now,
+                ))
+            self._conn.executemany(
+                """INSERT INTO messages
+                   (session_id, launch_epoch, role, content, stage, metadata,
+                    tool_call_id, tool_calls, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+
+    # ------------------------------------------------------------------
     # 重启恢复
     # ------------------------------------------------------------------
 
@@ -177,8 +302,9 @@ class SessionStore:
             restored: List[Tuple[Session, float]] = []
             for row in rows:
                 msgs = self._conn.execute(
-                    "SELECT role, content, stage, metadata FROM messages"
-                    " WHERE session_id = ? AND launch_epoch = ? ORDER BY id",
+                    """SELECT role, content, stage, metadata, tool_call_id, tool_calls
+                       FROM messages
+                       WHERE session_id = ? AND launch_epoch = ? ORDER BY id""",
                     (row["session_id"], row["launch_epoch"]),
                 ).fetchall()
                 session = Session(
@@ -197,6 +323,8 @@ class SessionStore:
                         content=m["content"],
                         stage=m["stage"],
                         metadata=json.loads(m["metadata"] or "{}"),
+                        tool_call_id=m["tool_call_id"],
+                        tool_calls=json.loads(m["tool_calls"] or "[]") or None,
                     )
                     for m in msgs
                 ]
@@ -241,7 +369,8 @@ class SessionStore:
             if exists is None:
                 return None
             rows = self._conn.execute(
-                """SELECT id, launch_epoch, role, content, stage, metadata, created_at
+                """SELECT id, launch_epoch, role, content, stage, metadata,
+                          tool_call_id, tool_calls, created_at
                    FROM messages WHERE session_id = ? ORDER BY id""",
                 (session_id,),
             ).fetchall()
@@ -249,5 +378,6 @@ class SessionStore:
             for r in rows:
                 d = dict(r)
                 d["metadata"] = json.loads(d["metadata"] or "{}")
+                d["tool_calls"] = json.loads(d["tool_calls"] or "[]") or None
                 messages.append(d)
             return messages

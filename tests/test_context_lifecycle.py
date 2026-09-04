@@ -88,6 +88,17 @@ class TestBeginTurn:
         assert cxt.nlu_result is None
         assert len(cxt.history) == 2  # 旧user + assistant回复1；q2 的 user 消息由 chat 层入
 
+    def test_turn_history_start_snapshots_history_length(self):
+        """begin_turn 快照 turn_history_start（add user 之前的 history 长度）。"""
+        cxt = _make_cxt()  # 已含 1 条 user
+        lc = TurnLifecycle()
+        lc.begin_turn(cxt, "q1")
+        assert cxt.turn_history_start == 1
+        cxt.add_message("user", "q1", stage="chat")
+        lc.end_turn(cxt, "回复1")
+        lc.begin_turn(cxt, "q2")
+        assert cxt.turn_history_start == 3  # 旧user + q1 + 回复1
+
 
 class TestEndTurn:
     def test_appends_assistant_message(self):

@@ -82,8 +82,13 @@ class TurnLifecycle:
 
         必须每轮恰好调用一次（hop 循环之前）；hop 之间绝不调用——
         actions 里的跳转事件需同轮存活至 hop 循环消费。
+
+        另快照 ``turn_history_start = len(history)``（add user 之前的长度）：
+        default_build_messages 以此切分跨轮历史 / 显式 query / 本轮 hop 内行。
+        该标记为 begin_turn 的派生轮次标记，不入下方四类集合。
         """
         cxt.user_query = user_query
+        cxt.turn_history_start = len(cxt.history)
 
         for field_name in self.PER_TURN_RESULT_FIELDS:
             setattr(cxt, field_name, None)

@@ -9,6 +9,8 @@ Supports:
   the chat layer consumes the event and reroutes (no adjacency check /
   rebound rejection; target existence in module_map is the only guard)
 - Tool round-trips recorded into DialogueContext history
+- Pluggable hooks at loop points (pattern.agent_hooks declaration; events,
+  dispatch and guard semantics see src/chat/agent_hooks.py)
 """
 
 import json
@@ -16,6 +18,16 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from src.chat.agent_hooks import (
+    AgentEndEvent,
+    AgentStartEvent,
+    LLMCallEvent,
+    LLMResponseEvent,
+    TransferEvent,
+    collect_fragments,
+    fire,
+    resolve_agent_hooks,
+)
 from src.chat.messages import build_agent_messages
 from src.chat.session import Session
 from src.dialogue.base import (
@@ -86,7 +98,18 @@ def run_agent(
     cxt = session.cxt
     provider = build_provider(llm_config)
 
-    system_prompt = _build_system_prompt(module, cxt)
+    # agent loop hooks（pattern 级声明，module 层 agent_hooks 整体替换；
+    # 空声明时各挂载点零开销直通）
+    hooks = resolve_agent_hooks(module, session.pattern)
+
+    # P1 on_agent_start：进 loop、build system prompt 前取数注入。片段经
+    # builder 拼入块结构（force_close 后缀之前），hook 不写 cxt
+    fragments = collect_fragments(
+        hooks,
+        AgentStartEvent(session_id=cxt.session_id,
+                        module_code=module.module_code, cxt=cxt),
+    ) if hooks else []
+    system_prompt = _build_system_prompt(module, cxt, extra_blocks=fragments)
     if force_close:
         system_prompt = (system_prompt + "\n请直接回应用户，勿再移交。").strip()
     if len(system_prompt) > _PROMPT_LENGTH_WARN:
@@ -112,6 +135,12 @@ def run_agent(
             round_idx + 1, cxt.session_id, module.module_code, len(tools),
         )
 
+        # P2 on_llm_call：每轮 LLM 调用前（messages 引用传递，只读纪律）
+        if hooks:
+            fire(hooks, "on_llm_call", LLMCallEvent(
+                session_id=cxt.session_id, module_code=module.module_code,
+                round_idx=round_idx, messages=messages, model=model))
+
         if tools:
             result = provider.chat_completion(
                 messages=messages, model=model, temperature=temperature,
@@ -126,9 +155,21 @@ def run_agent(
         content = result.get("content", "") or ""
         tool_calls = result.get("tool_calls", []) or []
 
+        # P3 on_llm_response：每轮 LLM 返回后（content/tool_calls 已解析）
+        if hooks:
+            fire(hooks, "on_llm_response", LLMResponseEvent(
+                session_id=cxt.session_id, module_code=module.module_code,
+                round_idx=round_idx, content=content,
+                tool_calls=tool_calls))
+
         # 无工具调用 → inject 原语：直接回答
         if not tool_calls:
             logger.info("Agent loop 完成，共 %d 轮", round_idx + 1)
+            # P7 on_agent_end：直接答出口
+            if hooks:
+                fire(hooks, "on_agent_end", AgentEndEvent(
+                    session_id=cxt.session_id, module_code=module.module_code,
+                    rounds=round_idx + 1, outcome="reply", reply=content))
             return TurnResult(reply=content)
 
         # 本轮工具调用里是否含 transfer
@@ -201,6 +242,16 @@ def run_agent(
                 "[transfer] %s → %s（事件已写入 actions，移交 chat 层）",
                 module.module_code, target,
             )
+            # P6 on_transfer + P7 on_agent_end：移交出口
+            if hooks:
+                fire(hooks, "on_transfer", TransferEvent(
+                    session_id=cxt.session_id, module_code=module.module_code,
+                    round_idx=round_idx, target=target,
+                    reason=transfer_reason))
+                fire(hooks, "on_agent_end", AgentEndEvent(
+                    session_id=cxt.session_id, module_code=module.module_code,
+                    rounds=round_idx + 1, outcome="transfer",
+                    transfer_target=target))
             return TurnResult()
 
         # 普通工具调用：执行、落 history、回填
@@ -231,6 +282,12 @@ def run_agent(
         "Agent loop 达到最大轮次 %d，强制终止: session=%s",
         _MAX_TOOL_ROUNDS, cxt.session_id,
     )
+    # P7 on_agent_end：超轮次出口
+    if hooks:
+        fire(hooks, "on_agent_end", AgentEndEvent(
+            session_id=cxt.session_id, module_code=module.module_code,
+            rounds=_MAX_TOOL_ROUNDS, outcome="max_rounds",
+            reply="抱歉，处理超时，请稍后重试。"))
     return TurnResult(reply="抱歉，处理超时，请稍后重试。")
 
 
@@ -287,8 +344,14 @@ def build_transfer_tools(module, module_map) -> list:
 # System Prompt construction
 # ---------------------------------------------------------------------------
 
-def _build_system_prompt(module, cxt: DialogueContext) -> str:
-    """四块结构：base_prompt + 投影块 + 回看块 + 任务/槽位。"""
+def _build_system_prompt(module, cxt: DialogueContext,
+                         extra_blocks: Optional[List[str]] = None) -> str:
+    """四块结构 + hooks 扩展块：base_prompt + 投影块 + 回看块 + 任务/槽位。
+
+    ``extra_blocks`` 为 on_agent_start hook 返回的注入片段（声明序，由
+    run_agent 收集）：非空时以 "## 扩展上下文" 单块拼在"已填充槽位"之后——
+    force_close 后缀在其后追加，长度告警覆盖注入后的真实长度。
+    """
     parts = []
 
     if module.base_prompt:
@@ -319,6 +382,11 @@ def _build_system_prompt(module, cxt: DialogueContext) -> str:
     if cxt.filled_slots:
         parts.append("\n## 已填充槽位")
         parts.append(json.dumps(cxt.filled_slots, ensure_ascii=False, indent=2))
+
+    # hooks 注入块（on_agent_start 片段，声明序拼接）
+    if extra_blocks:
+        parts.append("\n## 扩展上下文")
+        parts.append("\n\n".join(extra_blocks))
 
     return "\n".join(parts)
 

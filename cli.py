@@ -448,17 +448,16 @@ def _snapshot(cxt) -> Dict[str, Any]:
 
 def run_turn(session: Session, query: str, sessions: Dict[str, Session],
              store: Optional[SessionStore], verbose: int = 0) -> str:
-    """执行一轮对话：快照 → chat() → 落盘 → verbose 渲染。"""
+    """执行一轮对话：快照 → chat() → 轮末快照回写 → verbose 渲染。"""
     before = _snapshot(session.cxt)
-    start_idx = len(session.cxt.history)
 
-    reply = chat_turn(query, session.session_id, sessions)
+    reply = chat_turn(query, session.session_id, sessions, store=store)
 
     if store is not None:
         try:
-            store.save_turn(session, start_idx)
+            store.save_snapshot(session)
         except Exception:
-            logging.getLogger(__name__).exception("落盘失败（不影响对话）")
+            logging.getLogger(__name__).exception("轮末快照失败（不影响对话）")
 
     if verbose >= 1:
         summary = render_verbose_summary(before, _snapshot(session.cxt))
@@ -505,6 +504,7 @@ def _find_or_create(session_id: str, pattern_code: str,
                         restored.cxt.metadata["llm_override"] = picked
                 print(green(f"已恢复会话 {session_id} "
                             f"({restored.pattern_code})，继续对话"))
+                store.attach(restored)  # 恢复会话重挂 write-through
                 sessions[session_id] = restored
                 return restored
 
@@ -512,6 +512,7 @@ def _find_or_create(session_id: str, pattern_code: str,
     sessions[session_id] = session
     if store is not None:
         store.create_session(session)
+        store.attach(session)
     return session
 
 
@@ -611,6 +612,7 @@ def _do_reset(session: Session, sessions: Dict[str, Session], store, verbose: in
     sessions[session.session_id] = new_session
     if store is not None:
         store.create_session(new_session)  # 同 id 视为新一代（launch_epoch+1）
+        store.attach(new_session)
     print(green(f"会话已重置: {session.session_id}"))
     return new_session
 
@@ -633,6 +635,7 @@ def _do_new(arg: str, sessions: Dict[str, Session], store, llm_overrides, verbos
     sessions[new_id] = new_session
     if store is not None:
         store.create_session(new_session)
+        store.attach(new_session)
     print(green(f"新会话: {new_id} ({code})"))
     return new_session
 

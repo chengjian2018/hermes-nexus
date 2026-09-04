@@ -147,6 +147,7 @@ def _restore_sessions() -> int:
             session.pattern = pattern
             session.cxt.module_map = pattern.module_map
             session.cxt.node_map = pattern.node_map
+            store.attach(session)  # 恢复会话重挂 write-through（放入内存前）
             with _sessions_lock:
                 all_sessions[session.session_id] = session
                 _session_last_active[session.session_id] = time.monotonic() - (
@@ -278,6 +279,8 @@ class MessageItem(BaseModel):
     content: str
     stage: str
     metadata: Dict[str, Any] = {}
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
     created_at: float
     action: Dict[str, str] = {}
 
@@ -340,12 +343,15 @@ def _launch_session_core(
         all_sessions[session_id] = session
         _touch_session(session_id)
 
-    # 审计落盘（内存登记成功后）；失败仅记日志，不阻断 launch
+    # 审计落盘（内存登记成功后）；失败仅记日志，不阻断 launch。
+    # attach 无条件执行——create_session 失败时 sink 写失败本就被吞，
+    # DB 中途恢复后消息不丢
     if store is not None:
         try:
             store.create_session(session)
         except Exception:
             logger.exception("会话落盘失败: session=%s", session_id)
+        store.attach(session)
 
     return session, "0", f"对话任务发起成功: session_id={session_id}"
 
@@ -367,18 +373,19 @@ def _run_chat_turn_core(
 
     锁外执行（LLM 调用耗时长，不能阻塞其他请求）；chat 内部按 session_id
     重取会话，持有本地 session 引用仅供落盘快照，即便本轮处理中被并发逐出
-    也不影响本次对话。异常路径同样落盘（与成功路径一致）。
+    也不影响本次对话。异常路径同样落盘（与成功路径一致）。消息已由 sink
+    逐条即时落库，轮末只回写状态快照。
 
     Returns:
         (reply, error)：正常时 error 为 None；reply 为 None 仅出现在异常路径。
     """
-    start_idx = len(session.cxt.history)
     error: Optional[Exception] = None
     try:
         response_text = chat(
             query=query,
             session_id=session.session_id,
             all_sessions=all_sessions,
+            store=store,
         )
     except Exception as e:
         logger.exception("对话处理异常")
@@ -386,9 +393,9 @@ def _run_chat_turn_core(
 
     if store is not None:
         try:
-            store.save_turn(session, start_idx)
+            store.save_snapshot(session)
         except Exception:
-            logger.exception("会话轮末落盘失败: session=%s", session.session_id)
+            logger.exception("会话轮末快照失败: session=%s", session.session_id)
 
     if error is not None:
         return None, error

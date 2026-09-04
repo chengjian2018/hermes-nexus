@@ -116,7 +116,11 @@ def test_chat_turn_incremental_append(client, store, registry_guard):
 
 
 def test_store_failure_does_not_block(client, store, registry_guard, monkeypatch):
-    """DB 写失败：仅记日志，chat 响应不受影响。"""
+    """DB 写失败：仅记日志，chat 响应不受影响。
+
+    逐条 write-through 语义下单条 append_message 失败即被 sink 吞掉；
+    轮末 save_snapshot 失败同样不阻断。
+    """
     register_fake_provider()
     launch(client, "audit-degraded")
     _use_fake_llm("audit-degraded")
@@ -124,7 +128,8 @@ def test_store_failure_does_not_block(client, store, registry_guard, monkeypatch
     def boom(*args, **kwargs):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(store, "save_turn", boom)
+    monkeypatch.setattr(store, "append_message", boom)
+    monkeypatch.setattr(store, "save_snapshot", boom)
     body = chat(client, "audit-degraded", "你好")
     assert body["status"] is True, body["message"]
 
@@ -229,6 +234,29 @@ def test_restart_recovery_restores_and_continues(client, store, registry_guard):
     msgs = store.get_messages("rs-1")
     assert len(msgs) == count_before + 2  # user + assistant
     assert msgs[count_before]["role"] == "user"
+
+
+def test_mid_turn_failure_user_row_already_persisted(
+        client, store, registry_guard, monkeypatch):
+    """write-through 时序：轮中 LLM 崩溃，user 行已即时落库（不依赖轮末）。"""
+    register_fake_provider()
+    launch(client, "crash-mid")
+    _use_fake_llm("crash-mid")
+
+    from fake_provider import FakeProvider
+
+    def llm_boom(self, *args, **kwargs):
+        raise RuntimeError("llm down mid-turn")
+
+    monkeypatch.setattr(FakeProvider, "_chat_completion_impl", llm_boom)
+    body = chat(client, "crash-mid", "你好")
+    # chat 层吞异常转错误文本（HTTP 200 + status True），异常路径同样落库
+    assert body["status"] is True
+    assert "对话处理异常" in body["data"]["response"]
+
+    msgs = store.get_messages("crash-mid")
+    roles = [m["role"] for m in msgs]
+    assert roles == ["user", "assistant"]  # user 经 sink 即时落；错误回复由 end_turn 落
 
 
 def test_restore_skips_unregistered_pattern(client, store, registry_guard):

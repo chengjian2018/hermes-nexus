@@ -90,18 +90,17 @@ def test_create_session_keeps_old_trail(tmp_path):
     assert row["launch_epoch"] == 1
 
 
-def test_save_turn_writes_current_epoch(tmp_path):
+def test_write_through_writes_current_epoch(tmp_path):
     """重 launch 后：新消息带当代 epoch=1，旧消息 epoch=0。"""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
     store.create_session(session)
+    store.attach(session)
     session.cxt.add_message("user", "第一代", stage="chat")
-    store.save_turn(session, 0)
 
     store.create_session(make_session())  # 重新 launch，epoch=1
     session.cxt.add_message("user", "第二代", stage="chat")
-    store.save_turn(session, 1)
     store.close()
 
     msgs = fetch_all(db, "SELECT content, launch_epoch FROM messages ORDER BY id")
@@ -117,12 +116,11 @@ def test_load_active_sessions_restores_current_epoch_only(tmp_path):
     store = SessionStore(db)
     session = make_session("alive")
     store.create_session(session)
+    store.attach(session)
     session.cxt.add_message("user", "旧代消息", stage="chat")
-    store.save_turn(session, 0)
 
     store.create_session(make_session("alive"))  # epoch=1
     session.cxt.add_message("user", "当代消息", stage="chat")
-    store.save_turn(session, 1)
 
     restored = store.load_active_sessions(ttl_seconds=3600)
     store.close()
@@ -137,11 +135,10 @@ def test_get_messages_includes_all_epochs(tmp_path):
     store = SessionStore(db)
     session = make_session()
     store.create_session(session)
+    store.attach(session)
     session.cxt.add_message("user", "第一代", stage="chat")
-    store.save_turn(session, 0)
     store.create_session(make_session())  # epoch=1
     session.cxt.add_message("user", "第二代", stage="chat")
-    store.save_turn(session, 1)
 
     msgs = store.get_messages("s1")
     store.close()
@@ -150,30 +147,33 @@ def test_get_messages_includes_all_epochs(tmp_path):
     assert msgs[0]["id"] < msgs[1]["id"]
 
 
-def test_save_turn_appends_incrementally(tmp_path):
-    """两轮对话：save_turn 只追加本轮新增消息，状态快照整体回写。"""
+def test_write_through_appends_incrementally(tmp_path):
+    """两轮对话：消息逐条即时落库，轮末快照只回写状态（无双写）。"""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
     store.create_session(session)
+    store.attach(session)
 
-    # 第一轮：user + assistant
+    # 第一轮：user + assistant（逐条 write-through）
     session.cxt.add_message("user", "你好", stage="chat")
     session.cxt.add_message("assistant", "您好", stage="chat")
-    store.save_turn(session, 0)
+    store.save_snapshot(session)
 
-    # 第二轮前状态变化 + 新消息（start_idx=2 只追加第二轮）
+    # 第二轮前状态变化 + 新消息
     session.cxt.filled_slots["brand"] = "特斯拉"
     session.cxt.current_node_code = "buy_ask_budget"
     session.cxt.add_message("user", "我想买车", stage="chat")
     session.cxt.add_message("assistant", "回复", stage="chat")
-    store.save_turn(session, 2)
+    store.save_snapshot(session)
     store.close()
 
     msgs = fetch_all(db, "SELECT * FROM messages ORDER BY id")
     assert [m["content"] for m in msgs] == ["你好", "您好", "我想买车", "回复"]
     assert all(m["session_id"] == "s1" for m in msgs)
     assert msgs[0]["role"] == "user" and msgs[1]["role"] == "assistant"
+    # 无双写：DB 行数与内存 history 长度一致
+    assert len(msgs) == len(session.cxt.history)
 
     row = fetch_one(db, "SELECT * FROM sessions WHERE session_id = 's1'")
     assert row["current_node_code"] == "buy_ask_budget"
@@ -182,31 +182,32 @@ def test_save_turn_appends_incrementally(tmp_path):
     assert row["last_active_at"] >= row["created_at"]
 
 
-def test_save_turn_message_metadata_json(tmp_path):
+def test_write_through_message_metadata_json(tmp_path):
     """消息 metadata 列 JSON 往返。"""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
     store.create_session(session)
+    store.attach(session)
     session.cxt.add_message(
         "tool", "tool_result", stage="agent", metadata={"tool": "calculator"}
     )
-    store.save_turn(session, 0)
     store.close()
 
     row = fetch_one(db, "SELECT metadata FROM messages")
     assert json.loads(row[0]) == {"tool": "calculator"}
 
 
-def test_save_turn_empty_increment_no_rows(tmp_path):
-    """start_idx 之后无新消息时不插入行，仅刷新状态（不抛异常）。"""
+def test_snapshot_without_new_messages_only_refreshes_state(tmp_path):
+    """无新消息时 save_snapshot 只刷新状态，不插行不抛异常。"""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
     store.create_session(session)
+    store.attach(session)
     session.cxt.add_message("user", "q", stage="chat")
-    store.save_turn(session, 0)
-    store.save_turn(session, 1)  # 无新增
+    store.save_snapshot(session)
+    store.save_snapshot(session)  # 无新增
     store.close()
 
     assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 1
@@ -221,9 +222,9 @@ def test_load_active_sessions_restores_fields(tmp_path):
     session.cxt.current_node_code = "menu_sales"
     session.cxt.filled_slots = {"brand": "特斯拉"}
     store.create_session(session)
+    store.attach(session)
     session.cxt.add_message("user", "你好", stage="chat")
     session.cxt.add_message("assistant", "您好", stage="chat")
-    store.save_turn(session, 0)
 
     restored = store.load_active_sessions(ttl_seconds=3600)
     store.close()
@@ -268,13 +269,13 @@ def test_load_active_sessions_filters_expired(tmp_path):
 
 
 def _seed_two_sessions(store):
-    """造两个会话各一轮对话，返回 (ids)。"""
+    """造两个会话各一轮对话（write-through），返回 (ids)。"""
     for sid in ("sa", "sb"):
         session = make_session(sid, pattern_code="xianyu_agent" if sid == "sa" else "other")
         store.create_session(session)
+        store.attach(session)
         session.cxt.add_message("user", f"q-{sid}", stage="chat")
         session.cxt.add_message("assistant", f"a-{sid}", stage="chat")
-        store.save_turn(session, 0)
 
 
 def test_list_sessions_filter_and_order(tmp_path):

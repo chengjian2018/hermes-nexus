@@ -1,8 +1,10 @@
-"""SQLite 会话持久化 —— 审计流水 + 重启恢复数据源（write-through，非事实源）。
+"""SQLite 会话持久化 —— 消息事实源（逐条 write-through）+ 状态快照 + 审计。
 
-治理（TTL/逐出/存在性校验）在 main.py 内存中完成；本模块只在 launch/轮末
-落盘、startup 恢复、审计查询时被调用。单连接 + 锁串行化（FastAPI sync
-端点跑线程池，写流量极小）。
+治理（TTL/逐出/存在性校验）在 main.py 内存中完成。消息经 ``attach`` 挂接
+的 message_sink 逐条即时落库（``append_message``，DB 为事实源——中途 crash
+不丢轮内消息）；轮末 ``save_snapshot`` 只回写 sessions 状态快照；startup
+``load_active_sessions`` 恢复；压缩经 ``replace_history`` 重排。单连接 +
+锁串行化（FastAPI sync 端点跑线程池，写流量极小）。
 """
 
 import json
@@ -124,38 +126,25 @@ class SessionStore:
     # 轮末落盘
     # ------------------------------------------------------------------
 
-    def save_turn(self, session: Session, start_idx: int) -> None:
-        """轮末落盘：追加 ``cxt.history[start_idx:]`` 新消息 + 回写状态快照。
+    def attach(self, session: Session) -> None:
+        """挂接逐条 write-through：session 的每条 add_message 即时落库。
 
-        一个事务；``start_idx`` 为本轮开始时的 ``len(cxt.history)`` 快照。
+        sink 写失败在 ``DialogueContext.add_message`` 侧被吞（记日志不阻断
+        对话）；launch 时 create_session 失败也 attach——DB 中途恢复时不丢
+        消息。
+        """
+        session.cxt.message_sink = (
+            lambda msg: self.append_message(session, msg))
+
+    def save_snapshot(self, session: Session) -> None:
+        """轮末回写 sessions 状态快照（模块/节点/槽位/活跃时间）。
+
+        消息追加职责已移至 ``append_message``（attach 后逐条 write-through），
+        本方法不再碰 messages 表——轮末一次事务回写状态即可。
         """
         now = time.time()
         filled_slots = json.dumps(session.cxt.filled_slots or {}, ensure_ascii=False)
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT launch_epoch FROM sessions WHERE session_id = ?",
-                (session.session_id,),
-            ).fetchone()
-            epoch = row["launch_epoch"] if row is not None else 0
-            rows = [
-                (
-                    session.session_id,
-                    epoch,
-                    msg.role,
-                    msg.content,
-                    msg.stage,
-                    json.dumps(msg.metadata or {}, ensure_ascii=False),
-                    now,
-                )
-                for msg in session.cxt.history[start_idx:]
-            ]
-            if rows:
-                self._conn.executemany(
-                    """INSERT INTO messages
-                       (session_id, launch_epoch, role, content, stage, metadata, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    rows,
-                )
             self._conn.execute(
                 """UPDATE sessions
                    SET current_module_code = ?, current_node_code = ?,

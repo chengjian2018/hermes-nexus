@@ -15,7 +15,7 @@ flowchart TB
     chat --> resp["chat/response.py<br/>ChatResult<br/>text + actions"]
     chat --> slots["dialogue/stage_slots.py<br/>管线槽位: 四槽位 sentinel + 三层解析"]
     chat --> base["dialogue/base.py<br/>PipelineStage<br/>DialogueContext<br/>ModuleJumpEvent"]
-    chat --> store["chat/store.py<br/>SessionStore(SQLite)"]
+    chat --> store["chat/store.py<br/>SessionStore(SQLite)<br/>消息事实源 write-through"]
 
     chat --> loop2["chat/loop.py<br/>Agent ReAct 循环<br/>工具授权过滤 · 借出工具解析<br/>transfer 写跳转事件"]
     loop2 --> msgs["chat/messages.py<br/>AGENT messages 构建<br/>module.messages_builder 槽位解析"]
@@ -98,7 +98,9 @@ flowchart TB
   轮首重置 → 定位入口模块 → 同轮 hop 循环（按 AGENT/FSM/ROUTE 分派单模块处理，
   消费 ModuleJumpEvent 重路由）→ 轮末 history 追加 + 产出快照。单模块处理内联在
   本模块：AGENT → `loop.run_agent`（R2 刷新）；FSM → stages + `next_node` 轮末跳转（R3）；
-  ROUTE → stages + 轮末重置 root。LLM 配置每轮按当前位置刷新（R1 在 chat_turn 开头）
+  ROUTE → stages + 轮末重置 root。LLM 配置每轮按当前位置刷新（R1 在 chat_turn 开头）；
+  R1 之后、add user 之前触发历史压缩（`maybe_compress`，store 参数透传，None/阈值 0
+  跳过，失败不阻断）
 - **cxt 字段生命周期（chat/context_lifecycle.py）**：`TurnLifecycle` 声明式四类集合，
   改集合即改政策：
   - PERSISTENT（跨轮绝不删）：history / current_module_code / current_node_code /
@@ -111,8 +113,18 @@ flowchart TB
   - INCREMENTAL（增量）：history 追加（end_turn）、filled_slots 合并（merge_slots）
   - STAGE_MANAGED（轮首重置）：clarify（ClarifyStage 每轮自置）、served_by_projection
     （agent 借投影答轮记账，不跨轮残留）
-- **SessionStore**：SQLite write-through 审计流水（sessions 快照 + messages 行级消息），
-  兼重启恢复数据源；治理仍在内存，DB 非事实源（`chat/store.py`）
+- **SessionStore**：SQLite 消息事实源（`chat/store.py`）。消息逐条 write-through：
+  `attach(session)` 挂接 `cxt.message_sink` → `add_message` 即时落库（中途 crash
+  不丢轮内消息；sink 异常吞掉不阻断对话）；轮末 `save_snapshot` 只回写 sessions
+  状态快照。messages 表含 tool 轨迹列（tool_call_id/tool_calls，存量库自动补列）；
+  `replace_history` 为压缩重排原语（对齐校验 + summary 行置顶 + retained 重插）。
+  重启恢复/审计查询同前；治理仍在内存
+- **历史压缩（chat/compression.py）**：估算 token（CJK×2 + 其他×0.25 字符近似）
+  超阈值（默认 6000，配置 `session_compress_token_threshold`，0 关闭）时旧消息
+  LLM 摘要成 summary 行 + 保留最近 N 条（默认 12）。retain 边界向前吸附到
+  assistant(tool_calls) 配对 run 起点（防切开工件对）；摘要 LLM 失败 / DB 与内存
+  不齐 → 放弃压缩原样保留（绝不删历史）。压缩后重建 cxt.history 并重设
+  turn_history_start
 - **Channel**：外部消息源适配层（`src/channel/`，webhook 回调型）。声明式
   ChannelSpec（载荷 schema/session 派生/task_info 映射/成功响应契约，`base.py`）
   + 第 4 个 registry（AST 自动发现，`register.py`）+ 通用 handler
@@ -135,17 +147,19 @@ flowchart TB
 |---|---|---|
 | `PipelineStage.execute(ctx)` | `dialogue/base.py` | 所有 stage 的唯一接口 |
 | `resolve_stage(stage, ctx, module, pattern)` | `dialogue/stage_slots.py` | 槽位三层延迟解析器（node > module > pattern；校验整层降级；generate 双形态展开为惰性子部件） |
-| `DialogueContext` 字段 | `dialogue/base.py` | stage 间数据交换全部经由 ctx，不另开通道 |
+| `DialogueContext` 字段 | `dialogue/base.py` | stage 间数据交换全部经由 ctx，不另开通道。history 为 `SessionMessage`（role/content/stage/metadata + tool 轨迹字段 tool_call_id/tool_calls，role 含 summary 压缩行）；`turn_history_start` 由 begin_turn 快照（三段式构建的切分依据）；`message_sink` 由 SessionStore.attach 注入（add_message 逐条 write-through，异常吞掉） |
 | `ModuleJumpEvent` | `dialogue/base.py` | 模块跳转事件（target_module_code/reason/source）：stage 循环检测 / agent transfer 写入 `cxt.actions`，chat 层 hop 循环消费重路由；`to_dict()` 为观测形态 |
 | `registry.register()` 自注册 | `dialogue/register.py` `tools/register.py` `llm/register.py` | 应用层接入框架的唯一方式（AST 扫描发现） |
 | `build_provider(llm_config)` | `llm/resolve.py` | 所有 LLM 调用的统一入口 |
 | `get_llm_config(pattern_code, module_code, node_code, override)` | `config/config.py` | LLM 配置解析入口：`llm_providers` 连接层 ⊕ `llm_default`/`pattern_llm` 三层编排；`ctx.metadata["llm_override"]`（CLI 手动选择）最高优先级；chat 层每轮按当前位置刷新（R1-R4） |
 | `run_agent(session, module, llm_config)` | `chat/loop.py` | Agent 模块对话循环入口（返回 TurnResult）；transfer 命中时事件写入 `cxt.actions`、reply 为空；`conversation()` 为兼容 wrapper |
-| `chat_turn(query, session_id, all_sessions, agent_runner=None) -> ChatResult` | `chat/chat.py` | 全量轮次入口：text + actions；`chat()` 为兼容入口（等价 `.text`） |
+| `chat_turn(query, session_id, all_sessions, agent_runner=None, store=None) -> ChatResult` | `chat/chat.py` | 全量轮次入口：text + actions；`chat()` 为兼容入口（等价 `.text`）。`store` 供历史压缩消费（None 跳过）；消息落库由 launch/恢复时 attach 的 message_sink 完成 |
 | `AgentRunner.run(session, module, llm_config, force_close)` | `chat/agents.py` | AGENT 后端插件协议（默认 `LoopAgentRunner` 委托 loop.run_agent）；经 chat 入口可选参数注入 |
-| `build_agent_messages(module, system_prompt, cxt)` | `chat/messages.py` | AGENT 模块 LLM messages 构建入口：`module.messages_builder`（`(system_prompt, cxt) -> messages`，system_prompt 为终态含 force_close 后缀）优先；未设/不可调用（告警）降级 `default_build_messages`（system + user/assistant 历史）。自定义 builder 遵守不可信数据纪律：外部文本不写入 system 角色 |
-| `TurnLifecycle` 字段集合 | `chat/context_lifecycle.py` | cxt 字段生命周期唯一管理者：PERSISTENT / PER_TURN_RESET / INCREMENTAL / STAGE_MANAGED 四类声明式集合 + begin_turn / end_turn / merge_slots |
-| `SessionStore` | `chat/store.py` | launch/轮末落盘、startup 恢复、审计查询；实例由 main.py 注入，非全局单例 |
+| `build_agent_messages(module, system_prompt, cxt)` | `chat/messages.py` | AGENT 模块 LLM messages 构建入口：`module.messages_builder`（`(system_prompt, cxt) -> messages`，system_prompt 为终态含 force_close 后缀）优先；未设/不可调用（告警）降级 `default_build_messages`。自定义 builder 遵守不可信数据纪律：外部文本不写入 system 角色 |
+| `default_build_messages` 三段式 + 回放守卫 | `chat/messages.py` | system + 跨轮历史（`history[:turn_history_start]` 守卫回放）+ 显式 `cxt.user_query` + 本轮 hop 内行（`history[start+1:]`，transfer 移交后接手方可见移交方活动）。守卫：assistant(tool_calls) 与后续 tool 行 id 精确配对才协议化回放，断裂整段降级纯文本；孤儿 tool 行 / summary 行 → user 角色 untrusted 包裹。**直接调用者需先 begin_turn 或手动设 turn_history_start** |
+| `TurnLifecycle` 字段集合 | `chat/context_lifecycle.py` | cxt 字段生命周期唯一管理者：PERSISTENT / PER_TURN_RESET / INCREMENTAL / STAGE_MANAGED 四类声明式集合 + begin_turn（含 turn_history_start 快照）/ end_turn / merge_slots |
+| `SessionStore` | `chat/store.py` | 消息事实源：`attach(session)` 挂 message_sink 逐条即时落库（`append_message`）、`save_snapshot` 轮末状态回写、`replace_history` 压缩重排、`get_history` 当代重建、startup 恢复、审计查询；实例由 main.py 注入，非全局单例 |
+| `maybe_compress(session, store)` | `chat/compression.py` | 历史压缩触发入口（chat_turn 在 R1 后、add user 前调用）：估算 token 超阈值 → 旧消息 LLM 摘要成 summary 行 + retain 最近 N 条；配置 `session_compress_token_threshold`（默认 6000，0 关）/ `session_compress_retain_count`（默认 12）；摘要失败/DB 不齐绝不删历史 |
 | `KnowledgeStore` | `database/knowledge_store.py` | 知识库（商品/客服知识）连接持有者：scope 隔离（`{channel}:{account_id}`）、jieba 分词 LIKE 检索、`format_result` 消毒（untrusted 包裹，提示注入防御边界）；`get_knowledge_store()` 懒持有，main.py lifespan 释放；路径配置 `knowledge_db_path`（缺省 `data/knowledge.db`）。存储定义（表 DDL / 未来 ES 等 schema）统一放 `database/` 路径。**已知债务**：工具的 `account_id` 是 LLM 参数（从系统提示「任务信息」抄写）而非可信注入，真实渠道接入时需演进为 dispatch 侧身份注入 |
 | `ChannelSpec` 协议 + `build_channel_router(spec, ops)` | `channel/base.py` `channel/webhooks.py` | 外部消息源适配的唯一形态：渠道声明差异 + 通用 handler 共性流程；`registry.register()` 自注册（AST 发现），main.py `discover_builtin_channels()` + `build_channel_routers(EngineOps(...))` 接线 |
 

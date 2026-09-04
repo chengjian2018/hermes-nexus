@@ -18,6 +18,7 @@ flowchart TB
     chat --> store["chat/store.py<br/>SessionStore(SQLite)<br/>消息事实源 write-through"]
 
     chat --> loop2["chat/loop.py<br/>Agent ReAct 循环<br/>工具授权过滤 · 借出工具解析<br/>transfer 写跳转事件"]
+    loop2 --> ahooks["chat/agent_hooks.py<br/>loop hooks: 点位事件<br/>+ 声明解析 + dispatcher"]
     loop2 --> msgs["chat/messages.py<br/>AGENT messages 构建<br/>module.messages_builder 槽位解析"]
     loop2 --> agents["chat/agents.py<br/>AgentRunner 协议<br/>(默认 LoopAgentRunner)"]
 
@@ -153,7 +154,8 @@ flowchart TB
 | `registry.register()` 自注册 | `dialogue/register.py` `tools/register.py` `llm/register.py` | 应用层接入框架的唯一方式（AST 扫描发现） |
 | `build_provider(llm_config)` | `llm/resolve.py` | 所有 LLM 调用的统一入口 |
 | `get_llm_config(pattern_code, module_code, node_code, override)` | `config/config.py` | LLM 配置解析入口：`llm_providers` 连接层 ⊕ `llm_default`/`pattern_llm` 三层编排；`ctx.metadata["llm_override"]`（CLI 手动选择）最高优先级；chat 层每轮按当前位置刷新（R1-R4） |
-| `run_agent(session, module, llm_config)` | `chat/loop.py` | Agent 模块对话循环入口（返回 TurnResult）；transfer 命中时事件写入 `cxt.actions`、reply 为空；`conversation()` 为兼容 wrapper |
+| `run_agent(session, module, llm_config)` | `chat/loop.py` | Agent 模块对话循环入口（返回 TurnResult）；transfer 命中时事件写入 `cxt.actions`、reply 为空；`conversation()` 为兼容 wrapper。工具派发经 `_dispatch_tool_calls`：P4 改写 → **主流程最终校验**（最终 name ∉ own+lent 可用集合一律不执行，tool 行回填带可用清单的错误信息供模型自纠——顺带封堵 dispatch 只查注册不查 ACL 的旁路）→ 执行 → P5 改写；改写后实况三处一致（in-loop messages / history 载荷 / tool 行），`tool_call_id` 永不改，tool 行 metadata 审计 `rewritten/original_call/original_result`，合成行标 `synthetic=True` |
+| `pattern/module.agent_hooks` + dispatcher | `chat/agent_hooks.py` | agent loop 多点叠加 hooks：七个点位（on_agent_start 注入 system prompt 片段、on_llm_call/on_llm_response/on_transfer/on_agent_end 观察、on_tool_call/on_tool_result 变更）；`resolve_agent_hooks`（module 声明整体替换 pattern，非法配置降级跳过）；hook 异常吞掉记日志回退原值。声明 `{"点位": [hook,...]}`。边界：改 messages 归 `messages_builder`（产物终态，hook 只读）；hook 无③控制权（不能拦截/丢弃调用/制造移交）。P4 改写守卫：name 须 ∈ 本轮可用集且不带 `transfer_to_` 前缀（transfer 判定先行不可改写） |
 | `chat_turn(query, session_id, all_sessions, agent_runner=None, store=None) -> ChatResult` | `chat/chat.py` | 全量轮次入口：text + actions；`chat()` 为兼容入口（等价 `.text`）。`store` 供历史压缩消费（None 跳过）；消息落库由 launch/恢复时 attach 的 message_sink 完成 |
 | `AgentRunner.run(session, module, llm_config, force_close)` | `chat/agents.py` | AGENT 后端插件协议（默认 `LoopAgentRunner` 委托 loop.run_agent）；经 chat 入口可选参数注入 |
 | `build_agent_messages(module, system_prompt, cxt)` | `chat/messages.py` | AGENT 模块 LLM messages 构建入口：`module.messages_builder`（`(system_prompt, cxt) -> messages`，system_prompt 为终态含 force_close 后缀）优先；未设/不可调用（告警）降级 `default_build_messages`。自定义 builder 遵守不可信数据纪律：外部文本不写入 system 角色 |
@@ -178,6 +180,7 @@ flowchart TB
   （`chat/context_lifecycle.py`），不动流程代码
 - 模块要单次调用（NLU+NLG 合一）→ module 上配 `generate=FSMUnifiedNLU()/RouteUnifiedNLU()`（见 `tests/test_unified_stage.py` 的内联示例；候选节点需声明 `answer_examples`）
 - AGENT 模块要自定义发给 LLM 的 messages（截断历史 / few-shot / 注入动态数据）→ module 上配 `messages_builder=fn`，签名 `(system_prompt, cxt) -> messages`（见 `src/chat/messages.py`）
+- AGENT loop 各环节要挂钩子（prompt 前取数注入 / 改写工具调用 / 结果脱敏 / 观测打点）→ pattern 上配 `agent_hooks={"on_agent_start": [...], ...}`（module 层可整体替换；点位与契约见 `src/chat/agent_hooks.py`）——多点叠加，与 messages_builder（单点替换）互补不重叠
 - 全局 prompt 模板 → `src/prompt.py`（node/module 可覆盖）
 
 ## 测试

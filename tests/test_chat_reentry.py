@@ -2,10 +2,10 @@
 
 from unittest.mock import patch
 
-from src.chat.session import Session
-from src.dialogue.module import AgentModule, ModuleLink, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
+from chat.session import Session
+from dialogue.module import AgentModule, ModuleLink, RouteModule
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
 from test_agent_inject_transfer import ScriptedProvider, _mk_session  # 复用
 
 
@@ -34,7 +34,7 @@ def _launch(pattern, sessions, sid="s1"):
 
 
 def _chat(sessions, sid, query):
-    from src.chat.chat import chat as chat_fn
+    from chat.chat import chat as chat_fn
     return chat_fn(query=query, session_id=sid, all_sessions=sessions)
 
 
@@ -50,7 +50,7 @@ def test_same_turn_transfer_b_replies():
         # B：承接回复
         {"content": "看到您有售后需求，我先了解一下具体情况。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         reply = _chat(sessions, "s1", "帮我处理售后")
     assert reply == "看到您有售后需求，我先了解一下具体情况。"
     assert sessions["s1"].cxt.current_module_code == "after_sales"
@@ -66,7 +66,7 @@ def test_max_hops_exceeded_force_close():
         # 强制收尾轮：B 仍想转回，但已超限 → 应直接回复
         {"content": "好的，我来处理您的售后问题。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         reply = _chat(sessions, "s1", "帮我处理售后")
     assert reply == "好的，我来处理您的售后问题。"
 
@@ -74,9 +74,9 @@ def test_max_hops_exceeded_force_close():
 def test_force_close_route_returns_nonempty_reply():
     """I-4：max_hops=1，agent transfer 进 ROUTE 后强制收尾——跳过跳转检测
     （含 jump_module 命中），消费 NLG 回复，不产生空回复。"""
-    from src.dialogue.module import RouteModule
-    from src.dialogue.node import BaseNode
-    from src.dialogue.base import PipelineStage
+    from dialogue.module import RouteModule
+    from dialogue.node import BaseNode
+    from dialogue.base import PipelineStage
 
     class _FakeRouteNLU(PipelineStage):
         stage_name = "fake_route_nlu"
@@ -117,7 +117,7 @@ def test_force_close_route_returns_nonempty_reply():
             "name": "transfer_to_router",
             "arguments": '{"reason": "购车"}'}}]},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         reply = _chat(sessions, "sr", "我想买车")
     # force_close 落在 ROUTE：不触发跳转（否则 menu_buy 命中 buy_agent → 空回复）
     assert isinstance(reply, str) and reply, f"force_close 后回复不应为空: {reply!r}"

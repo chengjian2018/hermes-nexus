@@ -7,8 +7,8 @@ fake session 手工构造，不依赖 FastAPI 与 LLM。
 import json
 import sqlite3
 
-from src.chat.session import Session
-from src.chat.store import SessionStore
+from chat.session import Session
+from chat.store import SessionStore
 
 
 def make_session(session_id="s1", pattern_code="xianyu_agent"):
@@ -403,7 +403,7 @@ def test_append_message_tool_payload_roundtrip(tmp_path):
     session = make_session()
     store.create_session(session)
 
-    from src.dialogue.base import SessionMessage, decode_tool_call_content, encode_tool_call_content
+    from dialogue.base import SessionMessage, decode_tool_call_content, encode_tool_call_content
     tool_calls = [{"id": "call_1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
     store.append_message(session, SessionMessage(
@@ -429,7 +429,7 @@ def test_append_message_writes_current_epoch(tmp_path):
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
-    from src.dialogue.base import SessionMessage
+    from dialogue.base import SessionMessage
     store.append_message(session, SessionMessage(
         role="user", content="第一代消息", stage="chat"))
     store.create_session(session)  # epoch 0 → 1
@@ -446,7 +446,7 @@ def test_replace_history_summary_first_and_retained_kept(tmp_path):
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
-    from src.dialogue.base import SessionMessage, decode_tool_call_content, encode_tool_call_content
+    from dialogue.base import SessionMessage, decode_tool_call_content, encode_tool_call_content
     tool_calls = [{"id": "c1", "function": {"name": "t"}}]
     session.cxt.history = [
         SessionMessage(role="user", content="旧问题1", stage="chat"),
@@ -482,7 +482,7 @@ def test_replace_history_mismatch_leaves_db_untouched(tmp_path):
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
-    from src.dialogue.base import SessionMessage
+    from dialogue.base import SessionMessage
     store.append_message(session, SessionMessage(
         role="user", content="DB 里的消息", stage="chat"))
     # 内存 history 为空 → 不齐

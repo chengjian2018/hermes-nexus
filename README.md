@@ -75,7 +75,7 @@ export DASHSCOPE_API_KEY=sk-xxx
 | GET | `/api/v1/sessions` | 会话列表（审计） |
 | GET | `/api/v1/sessions/{id}/messages` | 会话消息流水 |
 
-外部渠道 webhook（如闲鱼）由 channel registry 自动挂载，见 `src/channel/`。
+外部渠道 webhook（如闲鱼）由 channel registry 自动挂载，见 `channel/`。
 
 ### 调试 CLI
 
@@ -93,22 +93,24 @@ export DASHSCOPE_API_KEY=sk-xxx
 ```
 main.py                  FastAPI 入口 + 会话治理(TTL/LRU) + channel 接线
 cli.py                   调试 CLI（REPL / ask / list / sessions）
-src/
-  chat/                  chat() 主循环 · Session · Agent ReAct 循环 · SQLite store
-  dialogue/              对话引擎内核
-    base.py              PipelineStage / DialogueContext 契约
-    pattern.py module.py node.py   Pattern→Module→Node 三级结构
-    stage_slots.py       管线槽位：四槽位 + 三层解析
-    unified.py           统一阶段（单次调用 NLU+NLG）
-    dispatch.py          模块间分发原语（同轮移交/回弹拒绝）
-    nlu/ nlg/ query/ recaller/   管线 stage 实现（框架扩展层）
-    xianyu_agent_route.py 闲鱼客服 pattern（应用层）
+prompt.py                全局 prompt 模板（node > module > class 三级覆盖）
+chat/                    chat() 主循环 · Session · Agent ReAct 循环 · SQLite store
+dialogue/                对话引擎内核
+  base.py                PipelineStage / DialogueContext 契约
+  pattern.py module.py node.py   Pattern→Module→Node 三级结构
+  stage_slots.py         管线槽位：四槽位 + 三层解析
+  xianyu_agent_route.py knowledge_agent_route.py   业务 pattern（应用层）
+stages/                  管线 stage 实现（框架扩展层）
+  nlu/ nlg/              两阶段形态 stage（意图识别 / 回复生成）
+  unified.py             统一阶段（单次调用 NLU+NLG）
+  query/ recaller/       查询改写 / 召回重排槽位 stage
   clarify/               偏题澄清（rule + prompts + stage）
-  llm/                   Provider 注册中心 + OpenAICompatible 实现
-  tools/                 工具注册中心 + 内置工具（calculator/weather）
-  channel/               外部消息渠道适配（ChannelSpec + 通用 handler + 闲鱼）
-  prompt.py              全局 prompt 模板（node > module > class 三级覆盖）
+llm/                     Provider 注册中心 + OpenAICompatible 实现
+tools/                   工具注册中心 + 内置工具（calculator/weather/knowledge）
+channel/                 外部消息渠道适配（ChannelSpec + 通用 handler + 闲鱼）
+augmentation/            输入增强（时间增强等）
 config/                  配置加载 + local_config.yaml（gitignored）
+database/                存储定义（SQLite 知识库 knowledge_store，scope 隔离）
 tests/                   全离线测试（fake_provider 打桩 LLM）
 ```
 
@@ -118,10 +120,10 @@ tests/                   全离线测试（fake_provider 打桩 LLM）
 
 一切新能力走注册机制，框架代码零改动：
 
-- **新对话流程** → `src/dialogue/<name>_route.py`，模块级 `registry.register()`
-- **新工具** → `src/tools/<name>_tool.py`，AST 自动发现
-- **新 LLM Provider** → `src/llm/<name>_provider.py`
-- **新消息渠道** → `src/channel/<name>.py`，实现 `ChannelSpec` 并注册
+- **新对话流程** → `dialogue/<name>_route.py`，模块级 `registry.register()`
+- **新工具** → `tools/<name>_tool.py`，AST 自动发现
+- **新 LLM Provider** → `llm/<name>_provider.py`
+- **新消息渠道** → `channel/<name>.py`，实现 `ChannelSpec` 并注册
 
 ## 测试
 

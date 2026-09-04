@@ -2,18 +2,18 @@
 ROUTE 不触发。
 
 习语沿 test_agent_inject_transfer.py：模块级注册中性 mock 工具 +
-ScriptedProvider + patch("src.chat.loop.build_provider")。
+ScriptedProvider + patch("chat.loop.build_provider")。
 """
 
 import json
 from unittest.mock import patch
 
-from src.chat.session import Session
-from src.dialogue.base import PipelineStage
-from src.dialogue.module import AgentModule, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
-from src.tools.register import registry as tool_registry
+from chat.session import Session
+from dialogue.base import PipelineStage
+from dialogue.module import AgentModule, RouteModule
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
+from tools.register import registry as tool_registry
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +122,8 @@ class ScriptedProvider:
 
 
 def _run(s, provider):
-    from src.chat.loop import run_agent
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    from chat.loop import run_agent
+    with patch("chat.loop.build_provider", return_value=provider):
         return run_agent(s, s.cxt.module_map["main"],
                          s.cxt.metadata["llm_override"])
 
@@ -166,12 +166,12 @@ def test_p1_hook_failure_degrades_silently():
 
 def test_p1_injection_precedes_force_close_suffix():
     """force_close：注入块在"勿再移交"后缀之前。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
     s = _mk_hooks_session(pattern_hooks={
         "on_agent_start": [lambda e: "店铺在售：A"],
     })
     provider = ScriptedProvider([{"content": "直接答", "tool_calls": []}])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         run_agent(s, s.cxt.module_map["main"],
                   s.cxt.metadata["llm_override"], force_close=True)
     system = provider.seen[0]["messages"][0]["content"]
@@ -272,7 +272,7 @@ class _StaticNLG(PipelineStage):
 
 
 def test_route_module_turn_does_not_fire_agent_hooks():
-    from src.chat.chat import chat_turn
+    from chat.chat import chat_turn
     fired = []
     route = RouteModule(
         module_code="root", module_name="路由", module_description="",
@@ -288,7 +288,7 @@ def test_route_module_turn_does_not_fire_agent_hooks():
     s.pattern = p
     s.cxt.module_map = p.module_map
     s.cxt.node_map = p.node_map
-    with patch("src.chat.chat.get_llm_config",
+    with patch("chat.chat.get_llm_config",
                return_value={"code": "x", "model": "m"}):
         result = chat_turn("你好", "shr", {"shr": s})
     assert result.text == "静态回复"
@@ -310,7 +310,7 @@ def _assistant_rows(cxt):
 def test_p4_args_rewrite_consistent_across_execution_payload_feed():
     """args 改写三处一致：执行参数 / history assistant 载荷 / 回填 messages；
     tool 行审计 original_call；tool_call_id 不变。"""
-    from src.chat.agent_hooks import RewriteToolCall
+    from chat.agent_hooks import RewriteToolCall
 
     def fix(e):
         return RewriteToolCall(args={"city": "杭州"})
@@ -346,7 +346,7 @@ def test_p4_args_rewrite_consistent_across_execution_payload_feed():
 
 
 def test_p4_name_rewrite_to_allowed_tool_executes_target():
-    from src.chat.agent_hooks import RewriteToolCall
+    from chat.agent_hooks import RewriteToolCall
 
     def rename(e):
         return RewriteToolCall(name="hook_alt_tool")
@@ -368,7 +368,7 @@ def test_p4_name_rewrite_to_allowed_tool_executes_target():
 
 def test_p4_rename_to_locked_tool_rejected():
     """改名目标已注册但未授权本 pattern（ACL 锁定）→ 拒绝改名、原名执行。"""
-    from src.chat.agent_hooks import RewriteToolCall
+    from chat.agent_hooks import RewriteToolCall
 
     def rename(e):
         return RewriteToolCall(name="hook_locked_tool")
@@ -387,8 +387,8 @@ def test_p4_rename_to_locked_tool_rejected():
 
 
 def test_p4_rename_to_transfer_prefix_rejected():
-    from src.chat.agent_hooks import RewriteToolCall
-    from src.dialogue.base import ModuleJumpEvent
+    from chat.agent_hooks import RewriteToolCall
+    from dialogue.base import ModuleJumpEvent
 
     def rename(e):
         return RewriteToolCall(name="transfer_to_peer")
@@ -503,7 +503,7 @@ def test_registered_but_unauthorized_name_intercepted():
 
 def test_synthetic_error_row_replays_paired():
     """幻觉轮的合成 tool 行：回放配对完整，不降级 untrusted。"""
-    from src.chat.messages import default_build_messages
+    from chat.messages import default_build_messages
 
     s = _mk_hooks_session()
     s.cxt.user_query = "查天气"
@@ -525,8 +525,8 @@ def test_synthetic_error_row_replays_paired():
 
 def test_rewritten_round_replays_paired():
     """改写轮的 history：回放协议化（assistant.tool_calls + tool 行配对）。"""
-    from src.chat.agent_hooks import RewriteToolCall
-    from src.chat.messages import default_build_messages
+    from chat.agent_hooks import RewriteToolCall
+    from chat.messages import default_build_messages
 
     def fix(e):
         return RewriteToolCall(args={"city": "杭州"})

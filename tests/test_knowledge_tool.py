@@ -8,9 +8,9 @@ import json
 
 import pytest
 
-from src.tools import knowledge_tool  # noqa: F401 -- import 即注册
+from tools import knowledge_tool  # noqa: F401 -- import 即注册
 from database.knowledge_store import KnowledgeStore
-from src.tools.register import registry
+from tools.register import registry
 
 
 @pytest.fixture()

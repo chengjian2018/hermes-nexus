@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fake_provider import fake_llm_config, register_fake_provider
-from src.chat.store import SessionStore
+from chat.store import SessionStore
 
 
 @pytest.fixture(scope="module")
@@ -262,7 +262,7 @@ def test_mid_turn_failure_user_row_already_persisted(
 def test_restore_skips_unregistered_pattern(client, store, registry_guard):
     """pattern_code 未注册的会话跳过恢复（不抛、不进内存）。"""
     import main
-    from src.chat.session import Session
+    from chat.session import Session
 
     store.create_session(Session(session_id="ghost", pattern_code="no_such_pattern"))
     restored = main._restore_sessions()
@@ -288,7 +288,7 @@ def test_init_store_degrades_on_failure(monkeypatch):
 def test_restore_failure_does_not_block(client, store, registry_guard, monkeypatch):
     """恢复过程异常不阻断：store 级抛错返回 0，单会话抛错跳过，均不向外传播。"""
     import main
-    from src.chat.session import Session
+    from chat.session import Session
 
     # 1) store 级失败（如 DB 读异常）：不抛，返回 0
     def store_boom(ttl):

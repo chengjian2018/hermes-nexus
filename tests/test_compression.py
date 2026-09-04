@@ -5,16 +5,16 @@ from unittest.mock import patch
 
 import pytest
 
-from src.chat.compression import (
+from chat.compression import (
     _snap_to_pair_boundary,
     compress_history,
     estimate_tokens,
     maybe_compress,
     should_compress,
 )
-from src.chat.session import Session
-from src.chat.store import SessionStore
-from src.dialogue.base import SessionMessage
+from chat.session import Session
+from chat.store import SessionStore
+from dialogue.base import SessionMessage
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ def test_estimate_tokens_cjk_and_ascii():
 
 def test_estimate_tokens_tool_payload_in_content():
     """工具轮载荷在 content 里，天然计入估算（比空文本行大）。"""
-    from src.dialogue.base import encode_tool_call_content
+    from dialogue.base import encode_tool_call_content
     plain = SessionMessage(role="user", content="q")
     payload = encode_tool_call_content(
         "", [{"id": "c1", "function": {"name": "weather", "arguments": "{}"}}])
@@ -57,7 +57,7 @@ def test_should_compress_boundaries():
 
 def test_snap_keeps_tool_pair_together():
     """split 落在 tool 行上：吸附到其 assistant 工具轮起点。"""
-    from src.dialogue.base import encode_tool_call_content
+    from dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "function": {"name": "t"}}]
     history = [
         SessionMessage(role="user", content="q1"),
@@ -120,7 +120,7 @@ def test_compress_success_rebuilds_db_and_cxt(tmp_path):
     provider = _SummaryProvider()
     llm_config = {"code": "fake", "model": "m", "temperature": 0.3,
                   "max_tokens": 1024}
-    with patch("src.chat.compression.build_provider", return_value=provider):
+    with patch("chat.compression.build_provider", return_value=provider):
         ok = compress_history(session, store, llm_config, retain_count=4)
 
     assert ok is True
@@ -151,7 +151,7 @@ def test_compress_llm_failure_keeps_everything(tmp_path):
     before_db = store.get_history("comp-1")
 
     provider = _SummaryProvider(fail=True)
-    with patch("src.chat.compression.build_provider", return_value=provider):
+    with patch("chat.compression.build_provider", return_value=provider):
         ok = compress_history(session, store,
                               {"code": "f", "model": "m"}, retain_count=4)
 
@@ -169,7 +169,7 @@ def test_compress_aborts_when_db_memory_mismatch(tmp_path):
     session.cxt.history.append(SessionMessage(role="user", content="幽灵"))
 
     provider = _SummaryProvider()
-    with patch("src.chat.compression.build_provider", return_value=provider):
+    with patch("chat.compression.build_provider", return_value=provider):
         ok = compress_history(session, store,
                               {"code": "f", "model": "m"}, retain_count=4)
 
@@ -185,7 +185,7 @@ def test_compress_empty_summary_aborts(tmp_path):
     session = _mk_session_with_history(store)
 
     provider = _SummaryProvider(reply="   ")
-    with patch("src.chat.compression.build_provider", return_value=provider):
+    with patch("chat.compression.build_provider", return_value=provider):
         ok = compress_history(session, store,
                               {"code": "f", "model": "m"}, retain_count=4)
     assert ok is False
@@ -198,15 +198,15 @@ def test_compress_empty_summary_aborts(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_after_compress_query_appears_once(tmp_path):
-    from src.chat.messages import default_build_messages
-    from src.dialogue.module import AgentModule
+    from chat.messages import default_build_messages
+    from dialogue.module import AgentModule
 
     store = SessionStore(str(tmp_path / "t.db"))
     session = _mk_session_with_history(store)
     session.cxt.turn_history_start = len(session.cxt.history)
     session.cxt.user_query = "新问题"
 
-    with patch("src.chat.compression.build_provider",
+    with patch("chat.compression.build_provider",
                return_value=_SummaryProvider("摘要：此前咨询")):
         ok = compress_history(session, store,
                               {"code": "f", "model": "m"}, retain_count=4)

@@ -2,10 +2,10 @@
 
 import pytest
 
-from src.clarify.rule import ClarifyRouteRule
-from src.clarify.stage import ClarifyStage
-from src.dialogue.base import DialogueContext
-from src.dialogue.recaller import (
+from stages.clarify.rule import ClarifyRouteRule
+from stages.clarify.stage import ClarifyStage
+from dialogue.base import DialogueContext
+from stages.recaller import (
     KeywordRecallPath,
     MultiPathRecaller,
     ScoreThresholdFilter,

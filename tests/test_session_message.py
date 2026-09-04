@@ -1,6 +1,6 @@
 """SessionMessage —— tool 轨迹 JSON 载荷 + summary role + sink 透传。"""
 
-from src.dialogue.base import (
+from dialogue.base import (
     DialogueContext,
     SessionMessage,
     decode_tool_call_content,

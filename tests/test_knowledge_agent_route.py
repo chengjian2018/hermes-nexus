@@ -2,13 +2,13 @@
 
 import pytest
 
-from src.chat.loop import _resolve_tools, build_transfer_tools
-from src.dialogue.knowledge_agent_route import (
+from chat.loop import _resolve_tools, build_transfer_tools
+from dialogue.knowledge_agent_route import (
     human_handoff,
     kb_agent,
     knowledge_agent_pattern,
 )
-from src.dialogue.register import registry as pattern_registry
+from dialogue.register import registry as pattern_registry
 
 
 @pytest.fixture(scope="module")

@@ -1,4 +1,4 @@
-"""Pytest 根配置 —— 将项目根目录加入 sys.path，保证 ``src.*`` 可导入。"""
+"""Pytest 根配置 —— 将项目根目录加入 sys.path，保证根级包（chat/dialogue/stages/...）可导入。"""
 
 import sys
 from pathlib import Path

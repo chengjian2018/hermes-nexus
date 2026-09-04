@@ -25,9 +25,9 @@ flowchart TB
     preg --> pattern["dialogue/pattern.py"]
     pattern --> base
 
-    slots --> nlu["dialogue/nlu/nlu.py<br/>FSMNLU · RouteNLU"]
-    slots --> nlg["dialogue/nlg/nlg.py"]
-    slots --> uni["dialogue/unified.py<br/>统一阶段(单次调用 NLU+NLG)<br/>FSMUnifiedNLU · RouteUnifiedNLU · PassThroughNLG"]
+    slots --> nlu["stages/nlu/nlu.py<br/>FSMNLU · RouteNLU"]
+    slots --> nlg["stages/nlg/nlg.py"]
+    slots --> uni["stages/unified.py<br/>统一阶段(单次调用 NLU+NLG)<br/>FSMUnifiedNLU · RouteUnifiedNLU · PassThroughNLG"]
     nlu --> resolve["llm/resolve.py<br/>build_provider()"]
     nlg --> resolve
     uni --> resolve
@@ -42,7 +42,7 @@ flowchart TB
         xianyuagent["dialogue/xianyu_agent_route.py<br/>(闲鱼客服 pattern<br/>复刻 xianyu-auto-reply)"]
         kbagent["dialogue/knowledge_agent_route.py<br/>(知识库客服 pattern<br/>工具调用型 AGENT)"]
         tools["tools/calculator_tool.py<br/>weather_tool.py<br/>knowledge_tool.py"]
-        clarify["src/clarify/<br/>偏题澄清"]
+        clarify["stages/clarify/<br/>偏题澄清"]
     end
     subgraph 存储层
         kbs["database/knowledge_store.py<br/>(SQLite 知识库<br/>scope 隔离)"]
@@ -127,7 +127,7 @@ flowchart TB
   assistant(tool_calls) 配对 run 起点（防切开工件对）；摘要 LLM 失败 / DB 与内存
   不齐 → 放弃压缩原样保留（绝不删历史）。压缩后重建 cxt.history 并重设
   turn_history_start
-- **Channel**：外部消息源适配层（`src/channel/`，webhook 回调型）。声明式
+- **Channel**：外部消息源适配层（`channel/`，webhook 回调型）。声明式
   ChannelSpec（载荷 schema/session 派生/task_info 映射/成功响应契约，`base.py`）
   + 第 4 个 registry（AST 自动发现，`register.py`）+ 通用 handler
   （token 校验/过期过滤/get-or-create/session 前缀/错误码固定契约，
@@ -168,20 +168,20 @@ flowchart TB
 
 ## 什么代码放哪
 
-- 新业务对话流程 → `src/dialogue/<name>_route.py`，模块级 `registry.register()`
-- 新工具 → `src/tools/<name>_tool.py`，自动被 AST 发现；工具需要持久化存储时在 `database/` 下建 store 模块（照 `knowledge_store.py` idiom：原生 sqlite3 + 锁 + WAL，scope 隔离，输出过 `_clean_untrusted` 消毒），工具层只消费不定义存储
+- 新业务对话流程 → `dialogue/<name>_route.py`，模块级 `registry.register()`
+- 新工具 → `tools/<name>_tool.py`，自动被 AST 发现；工具需要持久化存储时在 `database/` 下建 store 模块（照 `knowledge_store.py` idiom：原生 sqlite3 + 锁 + WAL，scope 隔离，输出过 `_clean_untrusted` 消毒），工具层只消费不定义存储
 - 知识库填充演示数据 → `.venv/bin/python cli.py knowledge-seed --scope="xianyu:<account_id>"`（幂等）
-- 新 LLM provider → `src/llm/<name>_provider.py`
-- 新外部消息渠道（channel）→ `src/channel/<name>.py`，实现 ChannelSpec（`payload_model`/`parse`/`build_reply` + 环境变量声明）并模块级 `registry.register()`，AST 自动发现，main.py 无需改动；默认 pattern/token 走环境变量（如 `XIANYU_CHANNEL_PATTERN`）
-- 新管线阶段 → `src/dialogue/<stage>.py` 继承 `PipelineStage`
+- 新 LLM provider → `llm/<name>_provider.py`
+- 新外部消息渠道（channel）→ `channel/<name>.py`，实现 ChannelSpec（`payload_model`/`parse`/`build_reply` + 环境变量声明）并模块级 `registry.register()`，AST 自动发现，main.py 无需改动；默认 pattern/token 走环境变量（如 `XIANYU_CHANNEL_PATTERN`）
+- 新管线阶段 → `stages/<stage>.py` 继承 `PipelineStage`
 - 换 agent 后端（如 planner-executor / 外部 agent 服务）→ 实现 `AgentRunner`
   协议（`chat/agents.py`），经 `chat()/chat_turn(agent_runner=...)` 注入；不加 registry
 - 调整 cxt 某字段的轮次归属（跨轮保留 / 每轮重置）→ 改 `TurnLifecycle` 声明式集合
   （`chat/context_lifecycle.py`），不动流程代码
 - 模块要单次调用（NLU+NLG 合一）→ module 上配 `generate=FSMUnifiedNLU()/RouteUnifiedNLU()`（见 `tests/test_unified_stage.py` 的内联示例；候选节点需声明 `answer_examples`）
-- AGENT 模块/pattern 要自定义发给 LLM 的 messages（system 内容全权重组 / 截断历史 / few-shot / 注入动态数据）→ module 或 pattern 上配 `messages_builder=fn`，签名 `(module, cxt, extra_blocks) -> messages`，system 行归 builder（可包一层 `build_system_prompt` 助手保留四块结构与 hooks 片段；见 `src/chat/messages.py`）
-- AGENT loop 各环节要挂钩子（prompt 前取数注入 / 改写工具调用 / 结果脱敏 / 观测打点）→ pattern 上配 `agent_hooks={"on_agent_start": [...], ...}`（module 层可整体替换；点位与契约见 `src/chat/agent_hooks.py`）——多点叠加，与 messages_builder（单点替换）互补不重叠
-- 全局 prompt 模板 → `src/prompt.py`（node/module 可覆盖）
+- AGENT 模块/pattern 要自定义发给 LLM 的 messages（system 内容全权重组 / 截断历史 / few-shot / 注入动态数据）→ module 或 pattern 上配 `messages_builder=fn`，签名 `(module, cxt, extra_blocks) -> messages`，system 行归 builder（可包一层 `build_system_prompt` 助手保留四块结构与 hooks 片段；见 `chat/messages.py`）
+- AGENT loop 各环节要挂钩子（prompt 前取数注入 / 改写工具调用 / 结果脱敏 / 观测打点）→ pattern 上配 `agent_hooks={"on_agent_start": [...], ...}`（module 层可整体替换；点位与契约见 `chat/agent_hooks.py`）——多点叠加，与 messages_builder（单点替换）互补不重叠
+- 全局 prompt 模板 → `prompt.py`（node/module 可覆盖）
 
 ## 测试
 

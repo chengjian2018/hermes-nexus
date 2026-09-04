@@ -10,10 +10,10 @@
 
 import pytest
 
-from src.dialogue.base import DialogueContext
-from src.dialogue.module import FSMModule, ModuleType, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.stage_slots import (
+from dialogue.base import DialogueContext
+from dialogue.module import FSMModule, ModuleType, RouteModule
+from dialogue.node import BaseNode
+from dialogue.stage_slots import (
     GenerateSlot,
     PostRecallSlot,
     PreRecallSlot,
@@ -77,7 +77,7 @@ def _ctx(node_code="n1", node=None, module_code="m1"):
 
 
 def _pattern(generate=None, query=None):
-    from src.dialogue.pattern import Pattern
+    from dialogue.pattern import Pattern
     return Pattern(code="p1", name="t", description="t",
                    entry_module_code="m1",
                    modules=[_fsm_module()],
@@ -221,8 +221,8 @@ def test_generate_invalid_node_layer_degrades_to_module():
 
 
 def test_generate_all_layers_empty_falls_to_builtin():
-    from src.dialogue.nlu import FSMNLU
-    from src.dialogue.nlg import FSMNLG
+    from stages.nlu import FSMNLU
+    from stages.nlg import FSMNLG
     # builtin 真实 stage 会走 LLM——这里只验证类装配，不打桩执行：
     names = [type(p).__name__ for p in
              resolve_stage(GenerateSlot(), _ctx(module_code="r1"),
@@ -245,8 +245,8 @@ def test_generate_all_layers_empty_falls_to_builtin():
 
 def test_generate_builtin_route_executes_route_stages():
     """ROUTE builtin 冒烟：三层全空时执行 RouteNLU/RouteNLG（打桩免 LLM）。"""
-    from src.dialogue.nlu import RouteNLU
-    from src.dialogue.nlg import RouteNLG
+    from stages.nlu import RouteNLU
+    from stages.nlg import RouteNLG
     orig_nlu = RouteNLU.execute
     orig_nlg = RouteNLG.execute
     RouteNLU.execute = lambda self, ctx: ran.append(("builtin", "route_nlu")) or ctx
@@ -371,7 +371,7 @@ def test_slot_direct_execute_raises():
 # ============================================================================
 
 def test_data_layer_slot_attributes():
-    from src.dialogue.pattern import Pattern
+    from dialogue.pattern import Pattern
 
     gen = {"nlu": _Marker("nlu"), "nlg": _Marker("nlg")}
     node = BaseNode(node_code="n1", generate=gen, query=_Marker("q"))
@@ -395,8 +395,8 @@ def test_data_layer_slot_attributes():
 
 from unittest.mock import patch
 
-from src.chat.session import Session
-from src.dialogue.pattern import Pattern
+from chat.session import Session
+from dialogue.pattern import Pattern
 
 
 def _launch(pattern, sessions, sid="s1"):
@@ -410,7 +410,7 @@ def _launch(pattern, sessions, sid="s1"):
 
 
 def _chat(sessions, sid, query):
-    from src.chat.chat import chat as chat_fn
+    from chat.chat import chat as chat_fn
     return chat_fn(query=query, session_id=sid, all_sessions=sessions)
 
 
@@ -424,7 +424,7 @@ def test_fsm_node_level_generate_via_default_skeleton():
                       entry_module_code="m1", modules=[m])
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         _chat(sessions, "s1", "你好")
 
     assert ran == [("f1", "f1_nlu"), ("f1", "f1_nlg")]
@@ -458,7 +458,7 @@ def test_route_menu_node_generate_nlg_same_turn_e2e():
                       entry_module_code="r1", modules=[route])
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         _chat(sessions, "s1", "选A")
 
     # root 轮：nlu 用 root 层、检测切 menu_a 后 nlg 用 menu 层（时机修复点）
@@ -495,7 +495,7 @@ def test_route_menu_jump_module_silent_dispatch_e2e():
                       entry_module_code="r1", modules=[route, fsm])
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         reply = _chat(sessions, "s1", "选A")
 
     # root nlu 后检测到 menu_a.jump_module=m1 → 中断（root_nlg/menu_nlg 不执行）
@@ -525,7 +525,7 @@ def test_pattern_stages_verbatim_and_mixed_slots():
     pattern.stages = [_Fixed("pre"), GenerateSlot()]
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         reply = _chat(sessions, "s1", "你好")
 
     assert ran == [("f1", "pre"), ("f1", "node_gen")]

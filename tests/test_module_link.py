@@ -1,6 +1,6 @@
 """ModuleLink 归一化与模块头部投影测试。"""
 
-from src.dialogue.module import AgentModule, FSMModule, ModuleLink
+from dialogue.module import AgentModule, FSMModule, ModuleLink
 
 
 def test_str_link_normalized_with_knowledge_default():

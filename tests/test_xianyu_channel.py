@@ -13,10 +13,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.chat.store import SessionStore
-from src.channel.base import EngineOps
-from src.channel.webhooks import build_channel_router
-from src.channel.xianyu import XianyuChannel
+from chat.store import SessionStore
+from channel.base import EngineOps
+from channel.webhooks import build_channel_router
+from channel.xianyu import XianyuChannel
 
 
 # ============================================================================

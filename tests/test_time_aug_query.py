@@ -11,12 +11,12 @@ import time as _time
 
 import pytest
 
-from src.augmentation import augment_time
-from src.dialogue.base import DialogueContext
-from src.dialogue.node import BaseNode
-from src.dialogue.module import FSMModule
-from src.dialogue.query import TimeAugQueryRewriter
-from src.dialogue.stage_slots import QuerySlot, is_valid_stage, resolve_stage
+from augmentation import augment_time
+from dialogue.base import DialogueContext
+from dialogue.node import BaseNode
+from dialogue.module import FSMModule
+from stages.query import TimeAugQueryRewriter
+from dialogue.stage_slots import QuerySlot, is_valid_stage, resolve_stage
 
 # 固定基准：2026-09-03 10:00:00（周四）—— 下周一 = 2026-09-07
 TIME_BASE = _time.mktime(_time.strptime("2026-09-03 10:00:00", "%Y-%m-%d %H:%M:%S"))
@@ -57,7 +57,7 @@ def test_time_base_defaults_to_now(monkeypatch):
         calls["time_base"] = time_base
         return text
 
-    monkeypatch.setattr("src.dialogue.query.time_aug.augment_time", _fake_augment)
+    monkeypatch.setattr("stages.query.time_aug.augment_time", _fake_augment)
     ctx = DialogueContext(session_id="t", user_query="下周一发货吗")
     TimeAugQueryRewriter().execute(ctx)
     assert calls["time_base"] is None

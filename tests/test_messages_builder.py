@@ -6,13 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from src.chat.messages import (
+from chat.messages import (
     build_agent_messages,
     build_system_prompt,
     default_build_messages,
 )
-from src.dialogue.base import DialogueContext
-from src.dialogue.module import AgentModule, BaseModule
+from dialogue.base import DialogueContext
+from dialogue.module import AgentModule, BaseModule
 
 
 def _mk_cxt() -> DialogueContext:
@@ -84,7 +84,7 @@ def test_default_includes_extra_blocks_in_system_row():
 
 def test_paired_tool_trace_replayed_as_protocol():
     """配对完整的 tool 轨迹按 OpenAI 协议原样回放（载荷 → 协议行）。"""
-    from src.dialogue.base import encode_tool_call_content
+    from dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
     cxt = DialogueContext(session_id="s", user_query="北京天气怎么样")
@@ -109,7 +109,7 @@ def test_paired_tool_trace_replayed_as_protocol():
 
 def test_broken_pair_degrades_to_plain_text():
     """配对断裂（tool 行丢失）：assistant 降级纯文本（取载荷内层文本）。"""
-    from src.dialogue.base import encode_tool_call_content
+    from dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
     cxt = DialogueContext(session_id="s", user_query="q")
@@ -130,7 +130,7 @@ def test_broken_pair_degrades_to_plain_text():
 
 def test_trailing_pending_assistant_degrades():
     """段末尾 pending 未配对的 assistant 工具轮：降级纯文本。"""
-    from src.dialogue.base import encode_tool_call_content
+    from dialogue.base import encode_tool_call_content
     tool_calls = [{"id": "c1", "type": "function",
                    "function": {"name": "weather", "arguments": "{}"}}]
     cxt = DialogueContext(session_id="s", user_query="q")
@@ -228,7 +228,7 @@ def test_custom_builder_receives_module_and_cxt():
 
 def test_non_callable_builder_warns_and_degrades(caplog):
     module = AgentModule(module_code="m", messages_builder="oops")
-    with caplog.at_level(logging.WARNING, logger="src.chat.messages"):
+    with caplog.at_level(logging.WARNING, logger="chat.messages"):
         result = build_agent_messages(module, _mk_cxt())
     assert any("messages_builder" in r.message and "module m" in r.message
                for r in caplog.records)
@@ -237,7 +237,7 @@ def test_non_callable_builder_warns_and_degrades(caplog):
 
 def test_explicit_none_builder_keeps_default_silent(caplog):
     module = AgentModule(module_code="m", messages_builder=None)
-    with caplog.at_level(logging.WARNING, logger="src.chat.messages"):
+    with caplog.at_level(logging.WARNING, logger="chat.messages"):
         result = build_agent_messages(module, _mk_cxt())
     assert not caplog.records
     assert result == default_build_messages(module, _mk_cxt())
@@ -276,8 +276,8 @@ class _ScriptedProvider:
 
 
 def _mk_run_session(module, pattern=None):
-    from src.chat.session import Session
-    from src.dialogue.pattern import Pattern
+    from chat.session import Session
+    from dialogue.pattern import Pattern
 
     p = pattern or Pattern(code="p", name="t", description="t",
                            entry_module_code=module.module_code,
@@ -296,7 +296,7 @@ def _mk_run_session(module, pattern=None):
 def test_run_agent_uses_custom_messages_builder():
     """run_agent 全链路：module.messages_builder 的产物直达 provider
     （system 行归 builder 组装——base_prompt 从 module 自取）。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
 
     def builder(module, cxt, extra_blocks):
         base = getattr(module, "base_prompt", "")
@@ -315,7 +315,7 @@ def test_run_agent_uses_custom_messages_builder():
     s = _mk_run_session(reception)
 
     provider = _ScriptedProvider([{"content": "99 包邮", "tool_calls": []}])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, reception, s.cxt.metadata["llm_override"])
 
     assert result.reply == "99 包邮"
@@ -329,7 +329,7 @@ def test_run_agent_uses_custom_messages_builder():
 
 def test_run_agent_delivers_p1_fragments_to_custom_builder():
     """P1 hook 片段经 extra_blocks 送达自定义 builder（叠加不被替换失效）。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
 
     captured = {}
 
@@ -344,7 +344,7 @@ def test_run_agent_delivers_p1_fragments_to_custom_builder():
     s.pattern.agent_hooks = {"on_agent_start": [lambda e: "店铺在售：A"]}
 
     provider = _ScriptedProvider([{"content": "ok", "tool_calls": []}])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         run_agent(s, reception, s.cxt.metadata["llm_override"])
 
     assert captured["blocks"] == ["店铺在售：A"]
@@ -353,7 +353,7 @@ def test_run_agent_delivers_p1_fragments_to_custom_builder():
 
 def test_run_agent_force_close_suffix_survives_custom_builder():
     """force_close 后缀框架侧强制：builder 无 system 行则前置，有则追加。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
 
     def builder_no_system(module, cxt, extra_blocks):
         return [{"role": "user", "content": cxt.user_query}]
@@ -362,7 +362,7 @@ def test_run_agent_force_close_suffix_survives_custom_builder():
                             messages_builder=builder_no_system)
     s = _mk_run_session(reception)
     provider = _ScriptedProvider([{"content": "收尾", "tool_calls": []}])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         run_agent(s, reception, s.cxt.metadata["llm_override"],
                   force_close=True)
     messages = provider.seen[0]["messages"]
@@ -378,7 +378,7 @@ def test_run_agent_force_close_suffix_survives_custom_builder():
                              messages_builder=builder_with_system)
     s2 = _mk_run_session(reception2)
     provider2 = _ScriptedProvider([{"content": "收尾", "tool_calls": []}])
-    with patch("src.chat.loop.build_provider", return_value=provider2):
+    with patch("chat.loop.build_provider", return_value=provider2):
         run_agent(s2, reception2, s2.cxt.metadata["llm_override"],
                   force_close=True)
     assert provider2.seen[0]["messages"][0]["content"] == (

@@ -1,8 +1,8 @@
 """
 配置加载模块 —— 从 local_config.yaml 读取本地配置。
 
-LLM 配置项来源：``src/llm/provider.py`` 中的 ``ProviderEntry`` 和
-``BaseLLMProvider``，以及 ``src/llm/openai_provider.py`` 中的
+LLM 配置项来源：``llm/provider.py`` 中的 ``ProviderEntry`` 和
+``BaseLLMProvider``，以及 ``llm/openai_provider.py`` 中的
 ``OpenAICompatibleProvider``。
 """
 
@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 # ============================================================================
-# LLM 配置的必填字段与可选字段（来自 src/llm/provider.py 的 ProviderEntry）
+# LLM 配置的必填字段与可选字段（来自 llm/provider.py 的 ProviderEntry）
 # ============================================================================
 
 _LLM_REQUIRED_FIELDS = {

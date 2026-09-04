@@ -24,13 +24,13 @@ from typing import Any, Dict, List, Optional
 
 import fire
 
-from src.chat.chat import chat as chat_turn
-from src.chat.session import Session
-from src.chat.store import SessionStore
-from src.dialogue.register import discover_builtin_patterns, registry as pattern_registry
-from src.llm.register import discover_builtin_providers, registry as llm_registry
-from src.tools.register import discover_builtin_tools
-from src.tools.register import registry as tool_registry
+from chat.chat import chat as chat_turn
+from chat.session import Session
+from chat.store import SessionStore
+from dialogue.register import discover_builtin_patterns, registry as pattern_registry
+from llm.register import discover_builtin_providers, registry as llm_registry
+from tools.register import discover_builtin_tools
+from tools.register import registry as tool_registry
 from config.config import get_llm_config, get_session_db_path
 
 # ============================================================================
@@ -117,7 +117,7 @@ def render_verbose_full(cxt) -> str:
 
     actions = getattr(cxt, "actions", None) or []
     if actions:
-        from src.dialogue.base import ModuleJumpEvent
+        from dialogue.base import ModuleJumpEvent
 
         rendered = [
             item.to_dict() if isinstance(item, ModuleJumpEvent) else item

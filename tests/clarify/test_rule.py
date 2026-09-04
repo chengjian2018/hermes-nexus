@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.clarify.rule import ClarifyRouteRule
+from stages.clarify.rule import ClarifyRouteRule
 
 
 def _item(score, content="chunk", keywords=None):

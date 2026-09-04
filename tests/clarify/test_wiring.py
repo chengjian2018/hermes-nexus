@@ -2,11 +2,11 @@
 
 import pytest
 
-from src.chat.chat import _default_skeleton, _handle_node_transition
-from src.dialogue.base import DialogueContext
-from src.dialogue.module import FSMModule, RouteModule
-from src.dialogue.nlg import FSMNLG
-from src.dialogue.stage_slots import (
+from chat.chat import _default_skeleton, _handle_node_transition
+from dialogue.base import DialogueContext
+from dialogue.module import FSMModule, RouteModule
+from stages.nlg import FSMNLG
+from dialogue.stage_slots import (
     GenerateSlot,
     PostRecallSlot,
     PreRecallSlot,

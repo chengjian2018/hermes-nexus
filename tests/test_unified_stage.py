@@ -38,15 +38,15 @@ def _fake_provider():
 def pattern():
     """返回内联构建的统一阶段 pattern（节点 code/name 与
     fake_provider 脚本约定保持一致）。"""
-    from src.dialogue.module import FSMModule, RouteModule
-    from src.dialogue.node import BaseNode
-    from src.dialogue.pattern import Pattern
-    from src.dialogue.register import discover_builtin_patterns
-    from src.dialogue.unified import FSMUnifiedNLU, RouteUnifiedNLU
+    from dialogue.module import FSMModule, RouteModule
+    from dialogue.node import BaseNode
+    from dialogue.pattern import Pattern
+    from dialogue.register import discover_builtin_patterns
+    from stages.unified import FSMUnifiedNLU, RouteUnifiedNLU
 
     # AST 自动发现仍工作（挂到保留的内置 pattern 上验证）
     imported = discover_builtin_patterns()
-    assert "src.dialogue.xianyu_agent_route" in imported, (
+    assert "dialogue.xianyu_agent_route" in imported, (
         f"xianyu_agent_route 未被自动发现，已发现: {imported}"
     )
 
@@ -136,7 +136,7 @@ def sessions():
 
 def launch(pattern, sessions, session_id="s1"):
     """模拟 main.py 的 launch 流程：注册会话并注入管线上下文。"""
-    from src.chat.session import Session
+    from chat.session import Session
 
     session = Session(session_id=session_id, pattern_code=pattern.code)
     session.pattern = pattern
@@ -150,8 +150,8 @@ def launch(pattern, sessions, session_id="s1"):
 
 
 def chat(sessions, session_id, query):
-    """调用 src.chat.chat 处理一轮对话。"""
-    from src.chat.chat import chat as chat_fn
+    """调用 chat.chat 处理一轮对话。"""
+    from chat.chat import chat as chat_fn
 
     return chat_fn(query=query, session_id=session_id, all_sessions=sessions)
 
@@ -177,8 +177,8 @@ def chat_once(pattern, sessions, query, expect_calls=1):
 
 def test_pattern_discovered_and_stage_wiring(pattern):
     """Pattern 可被 AST 自动发现；ROUTE/FSM 模块均注入统一阶段。"""
-    from src.dialogue.module import ModuleType
-    from src.dialogue.unified import FSMUnifiedNLU, RouteUnifiedNLU
+    from dialogue.module import ModuleType
+    from stages.unified import FSMUnifiedNLU, RouteUnifiedNLU
 
     assert pattern.code == "unified_demo"
     assert pattern.entry_module_code == "unified_root"
@@ -207,8 +207,8 @@ def test_pattern_discovered_and_stage_wiring(pattern):
 
 def test_prompt_embeds_candidates_and_valid_values(pattern):
     """统一阶段 prompt 携带候选节点回答范式与 next_node 合法取值。"""
-    from src.dialogue.base import DialogueContext
-    from src.dialogue.unified import FSMUnifiedNLU
+    from dialogue.base import DialogueContext
+    from stages.unified import FSMUnifiedNLU
 
     ctx = DialogueContext(session_id="s-prompt", user_query="比亚迪")
     ctx.module_map = pattern.module_map
@@ -318,7 +318,7 @@ def test_parse_failure_retry_recovers(pattern, sessions):
 
 def test_parse_failure_exhausted_falls_back(pattern, sessions):
     """重试后仍解析失败 → 兜底回复 + 保持当前节点，不抛异常。"""
-    from src.dialogue.unified import FSMUnifiedNLU
+    from stages.unified import FSMUnifiedNLU
 
     session = launch(pattern, sessions)
     before = FakeProvider.call_count
@@ -335,8 +335,8 @@ def test_parse_failure_exhausted_falls_back(pattern, sessions):
 
 def test_pass_through_nlg_keeps_existing_result():
     """PassThroughNLG：有已生成回复时原样保留；缺失时置空并告警不崩溃。"""
-    from src.dialogue.base import DialogueContext
-    from src.dialogue.unified import PassThroughNLG
+    from dialogue.base import DialogueContext
+    from stages.unified import PassThroughNLG
 
     stage = PassThroughNLG()
 
@@ -356,8 +356,8 @@ def test_pass_through_nlg_keeps_existing_result():
 
 def test_opening_broadcast_default_fallback():
     """未传 template：默认文案 + task_info 键值对逐行拼接。"""
-    from src.dialogue.base import DialogueContext
-    from src.dialogue.unified import OpeningBroadcastNLG
+    from dialogue.base import DialogueContext
+    from stages.unified import OpeningBroadcastNLG
 
     ctx = DialogueContext(session_id="s-ob-1", user_query="q")
     ctx.metadata["task_info"] = {"product_name": "闲置iPhone", "price": "3000"}
@@ -370,8 +370,8 @@ def test_opening_broadcast_default_fallback():
 
 def test_opening_broadcast_template_fields():
     """传 template：task_info 字段经 str.format 嵌入。"""
-    from src.dialogue.base import DialogueContext
-    from src.dialogue.unified import OpeningBroadcastNLG
+    from dialogue.base import DialogueContext
+    from stages.unified import OpeningBroadcastNLG
 
     ctx = DialogueContext(session_id="s-ob-2", user_query="q")
     ctx.task_basic_info = {"product_name": "闲置iPhone"}
@@ -383,8 +383,8 @@ def test_opening_broadcast_template_fields():
 
 def test_opening_broadcast_template_missing_field_falls_back():
     """template 引用 task_info 缺失字段：告警回落默认拼接，不抛异常。"""
-    from src.dialogue.base import DialogueContext
-    from src.dialogue.unified import OpeningBroadcastNLG
+    from dialogue.base import DialogueContext
+    from stages.unified import OpeningBroadcastNLG
 
     ctx = DialogueContext(session_id="s-ob-3", user_query="q")
     ctx.task_basic_info = {"product_name": "闲置iPhone"}
@@ -406,7 +406,7 @@ def test_clarify_next_node_rejected_when_disabled(pattern, sessions):
     模型 reply 是"帮您确认"类承接承诺，但模块未装配澄清环节不会兑现，
     因此回复一并替换为兜底话术（避免空承诺）。
     """
-    from src.dialogue.unified import FSMUnifiedNLU
+    from stages.unified import FSMUnifiedNLU
 
     session = launch(pattern, sessions)
 
@@ -427,8 +427,8 @@ def test_unified_with_clarify_off_topic_turn(pattern, sessions):
     澄清轮 = 统一调用 + 澄清生成共 2 次 LLM 调用（与两阶段+澄清持平），
     正常轮仍为 1 次。
     """
-    from src.clarify import ClarifyRouteRule, ClarifyStage
-    from src.dialogue.recaller import (
+    from stages.clarify import ClarifyRouteRule, ClarifyStage
+    from stages.recaller import (
         KeywordRecallPath,
         MultiPathRecaller,
         ScoreThresholdFilter,

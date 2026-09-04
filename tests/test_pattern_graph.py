@@ -2,9 +2,9 @@
 
 import pytest
 
-from src.dialogue.module import AgentModule, FSMModule, ModuleLink
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
+from dialogue.module import AgentModule, FSMModule, ModuleLink
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
 
 
 def _mk_pattern(modules, **kw):

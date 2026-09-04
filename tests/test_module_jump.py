@@ -8,12 +8,12 @@
 
 from unittest.mock import patch
 
-from src.chat.chat import ModuleJumpChannel
-from src.chat.session import Session
-from src.dialogue.base import DialogueContext, ModuleJumpEvent, PipelineStage
-from src.dialogue.module import AgentModule, FSMModule, ModuleLink, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
+from chat.chat import ModuleJumpChannel
+from chat.session import Session
+from dialogue.base import DialogueContext, ModuleJumpEvent, PipelineStage
+from dialogue.module import AgentModule, FSMModule, ModuleLink, RouteModule
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
 
 
 # ============================================================================
@@ -72,7 +72,7 @@ def _launch(pattern, sessions, sid="s1"):
 
 
 def _chat(sessions, sid, query):
-    from src.chat.chat import chat as chat_fn
+    from chat.chat import chat as chat_fn
     return chat_fn(query=query, session_id=sid, all_sessions=sessions)
 
 
@@ -193,7 +193,7 @@ def test_nlu_jump_breaks_stages_and_reroutes_same_turn():
                       entry_module_code="r1", modules=[route, target])
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         reply = _chat(sessions, "s1", "我要买车")
 
     assert reply == "已为您切换到目标模块"
@@ -211,7 +211,7 @@ def test_jump_event_via_actions_snapshot_when_hops_exhausted():
     制造：r1 →(route_menu) m1（hop1 消费）→ 下一轮重新进 r1 →(nlu_jump)
     m1（hop2 消费）→ 超限 force_close。
     """
-    from src.chat.chat import chat_turn
+    from chat.chat import chat_turn
 
     # root NLU 第一次跳 m1，再次进入 r1 时直接 jump_module 跳走（制造环）
     class _LoopRouteNLU(PipelineStage):
@@ -266,7 +266,7 @@ def test_jump_event_via_actions_snapshot_when_hops_exhausted():
                       max_hops=2)
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         result = chat_turn("选A", "s1", sessions)
 
     # force_close 落在最后目标 m1（FSM 轮不检测跳转，stages 跑完出回复）

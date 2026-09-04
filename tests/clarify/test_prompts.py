@@ -1,6 +1,6 @@
 """三套澄清 prompt 模板结构测试。"""
 
-from src.clarify.prompts import (
+from stages.clarify.prompts import (
     CLARIFY_FALLBACK_PROMPT,
     CLARIFY_KB_PROMPT,
     CLARIFY_MIXED_PROMPT,

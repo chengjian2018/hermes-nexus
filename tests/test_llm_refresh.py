@@ -2,10 +2,10 @@
 
 from unittest.mock import patch
 
-from src.chat.session import Session
-from src.dialogue.module import FSMModule, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
+from chat.session import Session
+from dialogue.module import FSMModule, RouteModule
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
 
 
 def _fsm_pattern():
@@ -29,12 +29,12 @@ def _launch(pattern, sessions, sid="s1"):
 
 
 def _chat(sessions, sid, query):
-    from src.chat.chat import chat as chat_fn
+    from chat.chat import chat as chat_fn
     return chat_fn(query=query, session_id=sid, all_sessions=sessions)
 
 
 def _record_calls(calls):
-    import src.chat.chat as chat_mod
+    import chat.chat as chat_mod
     real = chat_mod.get_llm_config
 
     def spy(pattern_code="", module_code="", node_code="", override=None, config_path=""):
@@ -51,8 +51,8 @@ def test_r1_passes_position_and_override():
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     calls = []
-    with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)):
+    with patch("chat.loop.build_provider"), \
+         patch("chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s1", "你好")
     assert calls, "R1 应调用 get_llm_config"
     first = calls[0]
@@ -66,7 +66,7 @@ def test_r1_passes_position_and_override():
 def test_r2_agent_module_chat_path_uses_module_code():
     """R2：AGENT 模块经 chat() 路径触发 AgentHandler，
     get_llm_config 以 module_code=<agent模块code>、node_code="" 调用。"""
-    from src.dialogue.module import AgentModule
+    from dialogue.module import AgentModule
     agent_m = AgentModule(module_code="reception", module_name=" reception",
                           module_description="d", module_todo_description="t",
                           sub_modules=[])
@@ -81,8 +81,8 @@ def test_r2_agent_module_chat_path_uses_module_code():
                             tools=None, tool_choice=None, **kw):
             return {"content": "ok", "tool_calls": []}
 
-    with patch("src.chat.loop.build_provider", return_value=_Scripted()), \
-         patch("src.chat.chat.get_llm_config",
+    with patch("chat.loop.build_provider", return_value=_Scripted()), \
+         patch("chat.chat.get_llm_config",
                side_effect=_record_calls(calls)):
         _chat(sessions, "s3", "你好")
     r2 = [c for c in calls if c["module_code"] == "reception"
@@ -96,8 +96,8 @@ def test_r3_refresh_after_node_resolution():
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     calls = []
-    with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)):
+    with patch("chat.loop.build_provider"), \
+         patch("chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s1", "你好")
     r3 = [c for c in calls if c["module_code"] == "m1" and c["node_code"] == "f1"]
     assert r3, f"R3 应按 module=m1 node=f1 解析，实际调用: {calls}"
@@ -134,8 +134,8 @@ def test_r4_route_menu_node_takes_effect_same_turn():
             return ctx
     pattern.stages = [_StubNLU(), _StubNLG()]
     # R1-R3 与 R4 刷新都经 chat 命名空间（R4 在 _detect_jump_after_stage 内）
-    with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)):
+    with patch("chat.loop.build_provider"), \
+         patch("chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s2", "选A")
     r4 = [c for c in calls if c["node_code"] == "menu_a"]
     assert r4, f"R4 应在菜单命中后按 node=menu_a 刷新，实际调用: {calls}"
@@ -148,7 +148,7 @@ def test_override_wins_and_survives_turns():
     """override 写入 cxt.llm_config 且逐轮不被冲掉。"""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         _chat(sessions, "s1", "你好")
         _chat(sessions, "s1", "继续")
     assert sessions["s1"].cxt.llm_config["model"] == "m"

@@ -3,11 +3,11 @@
 import json
 from unittest.mock import patch
 
-from src.chat.session import Session
-from src.dialogue.base import DialogueContext, ModuleJumpEvent, SessionMessage
-from src.dialogue.module import AgentModule, ModuleLink
-from src.dialogue.pattern import Pattern
-from src.tools.register import registry as tool_registry
+from chat.session import Session
+from dialogue.base import DialogueContext, ModuleJumpEvent, SessionMessage
+from dialogue.module import AgentModule, ModuleLink
+from dialogue.pattern import Pattern
+from tools.register import registry as tool_registry
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ class ScriptedProvider:
 
 
 def test_projection_block_contains_knowledge_and_tools():
-    from src.chat.messages import build_projection_block
+    from chat.messages import build_projection_block
     s = _mk_session()
     block = build_projection_block(
         s.cxt.module_map["reception"], s.cxt.module_map)
@@ -112,7 +112,7 @@ def test_projection_block_contains_knowledge_and_tools():
 
 
 def test_transfer_tools_generated_per_link():
-    from src.chat.loop import build_transfer_tools
+    from chat.loop import build_transfer_tools
     s = _mk_session()
     tools = build_transfer_tools(
         s.cxt.module_map["reception"], s.cxt.module_map)
@@ -124,7 +124,7 @@ def test_transfer_tools_generated_per_link():
 
 def test_run_agent_direct_reply_with_lent_tool():
     """inject 路径：A 借工具答完 → TurnResult(reply) + lent_by 记账。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "查下我的工单", stage="chat")
     provider = ScriptedProvider([
@@ -132,7 +132,7 @@ def test_run_agent_direct_reply_with_lent_tool():
             "name": "mock_lent_tool", "arguments": "{}"}}]},
         {"content": "您的工单已查到，预计明天完工。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "您的工单已查到，预计明天完工。"
     assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
@@ -147,7 +147,7 @@ def test_run_agent_direct_reply_with_lent_tool():
 def test_run_agent_transfer_writes_jump_event():
     """transfer 路径：A 调 transfer 工具 → 写 ModuleJumpEvent 到 cxt.actions，
     reply 为空不出口；状态转移交由 chat 层 hop 循环消费（run_agent 不改状态）。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "我要投诉整个售后流程", stage="chat")
     provider = ScriptedProvider([
@@ -155,7 +155,7 @@ def test_run_agent_transfer_writes_jump_event():
             "id": "c1", "function": {"name": "transfer_to_after_sales",
                                      "arguments": '{"reason": "售后投诉"}'}}]},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply is None or result.reply == ""
     events = [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
@@ -173,7 +173,7 @@ def test_run_agent_transfer_writes_jump_event():
 
 def test_run_agent_transfer_rejected_backfills_error_and_continues():
     """transfer 目标不存在于 module_map → 错误回填 tool result，继续 loop 普通回复。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "我要办个神奇业务", stage="chat")
     provider = ScriptedProvider([
@@ -182,7 +182,7 @@ def test_run_agent_transfer_rejected_backfills_error_and_continues():
                                      "arguments": '{"reason": "不存在"}'}}]},
         {"content": "好的，我直接为您处理。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "好的，我直接为您处理。"
     # 状态未变、无跳转事件
@@ -205,7 +205,7 @@ def test_run_agent_transfer_rejected_backfills_error_and_continues():
 
 def test_lent_tools_respect_pattern_acl():
     """I-1：借出路径同样受 pattern 级工具 ACL 约束（deny-by-default 不被架空）。"""
-    from src.chat.loop import _resolve_lent_tools
+    from chat.loop import _resolve_lent_tools
     s = _mk_session()
     reception = s.cxt.module_map["reception"]
     p = s.pattern
@@ -221,7 +221,7 @@ def test_lent_tools_respect_pattern_acl():
 
 def test_projection_recall_scoped_to_borrower():
     """I-3：回看块仅在借方自身轮次注入（served_by_projection 轮首重置）。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
     s = _mk_session()
     s.cxt.metadata["served_by_projection"] = {
         "module": "reception", "source": "after_sales"}
@@ -229,14 +229,14 @@ def test_projection_recall_scoped_to_borrower():
     provider = ScriptedProvider([
         {"content": "好的，继续为您处理。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert "上一轮提示" in provider.seen[0]["messages"][0]["content"]
 
 
 def test_rejected_transfer_backfills_all_tool_calls():
     """M-5：同轮普通工具 + 非法 transfer，被拒时两者都回填（避免 API 400）。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "查工单顺便办个神奇业务", stage="chat")
     provider = ScriptedProvider([
@@ -248,7 +248,7 @@ def test_rejected_transfer_backfills_all_tool_calls():
         ]},
         {"content": "好的，为您处理完毕。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "好的，为您处理完毕。"
     # 第二轮收到的 messages 尾部有两条 role=tool（全部 tool_call_id 有应答）
@@ -264,13 +264,13 @@ def test_rejected_transfer_backfills_all_tool_calls():
 
 def test_force_close_no_transfer_tools_and_prompt():
     """M-6(b)：force_close 时不注入 transfer 工具且 prompt 含"勿再移交"。"""
-    from src.chat.loop import run_agent
+    from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "帮我处理售后", stage="chat")
     provider = ScriptedProvider([
         {"content": "好的，我直接处理。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"],
                   force_close=True)
     first = provider.seen[0]
@@ -282,7 +282,7 @@ def test_force_close_no_transfer_tools_and_prompt():
 
 def test_chat_hop_consumes_transfer_event_same_turn():
     """transfer 事件经 chat 层 hop 循环消费：目标模块同轮续答。"""
-    from src.chat.chat import chat as chat_fn
+    from chat.chat import chat as chat_fn
 
     s = _mk_session()
     sessions = {"s": s}
@@ -294,7 +294,7 @@ def test_chat_hop_consumes_transfer_event_same_turn():
         # B（after_sales）同轮续答
         {"content": "看到您有售后需求，已为您登记。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         text = chat_fn(query="帮我处理售后", session_id="s", all_sessions=sessions)
     assert text == "看到您有售后需求，已为您登记。"
     # 状态已转移到目标模块（hop 消费后）
@@ -311,8 +311,8 @@ def test_chat_hop_consumes_transfer_event_same_turn():
 
 def test_tool_round_ids_paired_in_history():
     """普通工具轮：assistant 载荷 tool_calls 与 tool 行 metadata id 一一配对。"""
-    from src.chat.loop import run_agent
-    from src.dialogue.base import decode_tool_call_content
+    from chat.loop import run_agent
+    from dialogue.base import decode_tool_call_content
     s = _mk_session()
     s.cxt.add_message("user", "查下我的工单", stage="chat")
     provider = ScriptedProvider([
@@ -320,7 +320,7 @@ def test_tool_round_ids_paired_in_history():
             "name": "mock_lent_tool", "arguments": '{}'}}]},
         {"content": "查到了。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
 
     hist = [m for m in s.cxt.history if m.stage == "agent"]
@@ -338,8 +338,8 @@ def test_tool_round_ids_paired_in_history():
 
 def test_transfer_turn_synthesizes_all_tool_results():
     """transfer 轮：同响应混合普通工具 + transfer，全部合成 tool 行且 id 全配对。"""
-    from src.chat.loop import run_agent
-    from src.dialogue.base import decode_tool_call_content
+    from chat.loop import run_agent
+    from dialogue.base import decode_tool_call_content
     s = _mk_session()
     s.cxt.add_message("user", "查完给我转售后", stage="chat")
     provider = ScriptedProvider([
@@ -350,7 +350,7 @@ def test_transfer_turn_synthesizes_all_tool_results():
                                       "arguments": '{"reason": "售后深入"}'}},
         ]},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"],
                            s.cxt.metadata["llm_override"])
     assert result.reply in (None, "")
@@ -373,8 +373,8 @@ def test_transfer_turn_synthesizes_all_tool_results():
 
 def test_rejected_transfer_records_tool_calls_on_assistant():
     """幻觉目标错误回填路径：assistant 载荷带 tool_calls、tool 行带 id。"""
-    from src.chat.loop import run_agent
-    from src.dialogue.base import decode_tool_call_content
+    from chat.loop import run_agent
+    from dialogue.base import decode_tool_call_content
     s = _mk_session()
     s.cxt.add_message("user", "我要办个神奇业务", stage="chat")
     provider = ScriptedProvider([
@@ -382,7 +382,7 @@ def test_rejected_transfer_records_tool_calls_on_assistant():
             "name": "transfer_to_ghost", "arguments": '{}'}}]},
         {"content": "好的，我直接处理。", "tool_calls": []},
     ])
-    with patch("src.chat.loop.build_provider", return_value=provider):
+    with patch("chat.loop.build_provider", return_value=provider):
         run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
 
     agent_hist = [m for m in s.cxt.history if m.stage == "agent"]

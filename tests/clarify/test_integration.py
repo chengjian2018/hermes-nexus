@@ -8,18 +8,18 @@ import pytest
 
 from fake_provider import fake_llm_config, register_fake_provider
 
-from src.chat.chat import chat as chat_fn
-from src.chat.session import Session
-from src.dialogue.module import FSMModule, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
-from src.dialogue.recaller import (
+from chat.chat import chat as chat_fn
+from chat.session import Session
+from dialogue.module import FSMModule, RouteModule
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
+from stages.recaller import (
     KeywordRecallPath,
     MultiPathRecaller,
     ScoreThresholdFilter,
     WeightedScoreFusion,
 )
-from src.clarify import ClarifyRouteRule, ClarifyStage
+from stages.clarify import ClarifyRouteRule, ClarifyStage
 
 
 @pytest.fixture(scope="module", autouse=True)

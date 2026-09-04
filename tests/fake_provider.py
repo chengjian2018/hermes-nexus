@@ -6,8 +6,8 @@
 
 import json
 
-from src.llm import registry as llm_registry
-from src.llm.provider import BaseLLMProvider
+from llm import registry as llm_registry
+from llm.provider import BaseLLMProvider
 
 FAKE_PROVIDER_CODE = "fake_test_provider"
 

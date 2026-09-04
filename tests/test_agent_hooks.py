@@ -6,7 +6,7 @@ test_agent_hooks_loop.py（commit 2/3 增补）。
 
 import logging
 
-from src.chat.agent_hooks import (
+from chat.agent_hooks import (
     AgentStartEvent,
     RewriteToolCall,
     ToolCallEvent,

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel
 
-from src.channel.base import ChannelSpec, EngineOps, InboundMessage
+from channel.base import ChannelSpec, EngineOps, InboundMessage
 
 
 class _FakePayload(BaseModel):
@@ -70,7 +70,7 @@ def test_fake_spec_satisfies_protocol():
 
 import pytest
 
-from src.channel.register import ChannelRegistry, discover_builtin_channels
+from channel.register import ChannelRegistry, discover_builtin_channels
 
 
 class _BadSpecNoName:
@@ -148,8 +148,8 @@ def test_discover_imports_real_channel_file(tmp_path):
     """自包含渠道文件（不依赖外部名字）被成功 import 并注册到指定注册表。"""
     (tmp_path / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "good.py").write_text(
-        "from src.channel.register import registry\n"
-        "from src.channel.base import InboundMessage\n"
+        "from channel.register import registry\n"
+        "from channel.base import InboundMessage\n"
         "from pydantic import BaseModel\n"
         "class P(BaseModel):\n"
         "    user_id: str\n"
@@ -169,7 +169,7 @@ def test_discover_imports_real_channel_file(tmp_path):
     imported = discover_builtin_channels(tmp_path)
     # 包外文件走 spec_from_file_location，模块名固定为 _channel_ext_<stem>
     assert imported == ["_channel_ext_good"]
-    from src.channel.register import registry as global_reg
+    from channel.register import registry as global_reg
     assert global_reg.is_registered("discovered") is True
     global_reg._channels.pop("discovered", None)  # 清理全局态
 
@@ -183,8 +183,8 @@ import time
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.channel.base import EngineOps
-from src.channel.webhooks import build_channel_router
+from channel.base import EngineOps
+from channel.webhooks import build_channel_router
 
 
 class HandlerHarness:

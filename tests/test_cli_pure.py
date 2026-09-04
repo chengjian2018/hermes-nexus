@@ -248,7 +248,7 @@ class TestBuildSessionTaskInfo:
     def test_build_session_writes_task_info_both_places(self, monkeypatch):
         """task_info 双写对齐 main._launch_session_core：
         session.task_info（落盘）+ metadata（prompt 槽位）。"""
-        from src.dialogue.register import discover_builtin_patterns
+        from dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
         session = cli.build_session(
@@ -261,7 +261,7 @@ class TestBuildSessionTaskInfo:
         assert "item_id: 1" in session.cxt.format_task_info()
 
     def test_build_session_without_task_info_no_metadata_key(self, monkeypatch):
-        from src.dialogue.register import discover_builtin_patterns
+        from dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
         session = cli.build_session("t-no-task", "xianyu_agent")
@@ -302,7 +302,7 @@ class TestBuildSessionOverride:
 
         register_fake_provider()
         monkeypatch.setattr(cli, "get_llm_config", lambda *a, **k: fake_llm_config())
-        from src.dialogue.register import discover_builtin_patterns
+        from dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
 
@@ -336,9 +336,9 @@ pattern_llm:
 
 
 def _minimal_pattern(code):
-    from src.dialogue.module import FSMModule
-    from src.dialogue.node import BaseNode
-    from src.dialogue.pattern import Pattern
+    from dialogue.module import FSMModule
+    from dialogue.node import BaseNode
+    from dialogue.pattern import Pattern
 
     n1 = BaseNode(node_code="f1", node_name="节点一")
     m = FSMModule(module_code="m1", module_name="m1", module_description="d",
@@ -352,8 +352,8 @@ def _run_chat_turn(tmp_path, session):
     """经 chat() 跑一轮：get_llm_config 打桩到 tmp yaml 的真实三层解析。"""
     from unittest.mock import patch as _patch
     import config.config as cfg_mod
-    import src.chat.chat as chat_mod
-    from src.chat.chat import chat as chat_fn
+    import chat.chat as chat_mod
+    from chat.chat import chat as chat_fn
 
     config_path = str(tmp_path / "local_config.yaml")
     Path(config_path).write_text(_YAML, encoding="utf-8")
@@ -364,7 +364,7 @@ def _run_chat_turn(tmp_path, session):
         return real(**kw)
 
     sessions = {session.session_id: session}
-    with _patch("src.chat.loop.build_provider"), \
+    with _patch("chat.loop.build_provider"), \
          _patch.object(chat_mod, "get_llm_config", side_effect=spy):
         chat_fn(query="你好", session_id=session.session_id,
                 all_sessions=sessions)
@@ -375,7 +375,7 @@ class TestEmptyOverrideNotPinned:
             self, tmp_path, monkeypatch):
         """空 override 经 build_session 不写 llm_override；
         后续轮次走三层解析，model 取 pattern 层值（C1 回归）。"""
-        from src.chat.session import Session
+        from chat.session import Session
 
         pattern = _minimal_pattern("p_cli_test")
         monkeypatch.setattr(cli, "pattern_registry",
@@ -395,7 +395,7 @@ class TestEmptyOverrideNotPinned:
             self, tmp_path):
         """/llm 切 provider：override 只含显式字段；连接字段来自
         llm_providers.deepseek 段，不串台 openai 连接（C2 回归）。"""
-        from src.chat.session import Session
+        from chat.session import Session
 
         pattern = _minimal_pattern("p_cli_test")
         session = Session(session_id="t-cross", pattern_code="p_cli_test")

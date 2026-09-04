@@ -1,8 +1,8 @@
 """TurnLifecycle / ChatResult 离线单测（不依赖 LLM）。"""
 
-from src.chat.context_lifecycle import TurnLifecycle
-from src.chat.response import ChatResult, build_chat_result
-from src.dialogue.base import DialogueContext, ModuleJumpEvent
+from chat.context_lifecycle import TurnLifecycle
+from chat.response import ChatResult, build_chat_result
+from dialogue.base import DialogueContext, ModuleJumpEvent
 
 
 def _make_cxt() -> DialogueContext:

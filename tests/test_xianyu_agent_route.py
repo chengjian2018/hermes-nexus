@@ -37,10 +37,10 @@ def _fake_provider():
 @pytest.fixture(scope="module")
 def pattern():
     """发现内置 pattern 并返回 xianyu_agent。"""
-    from src.dialogue.register import discover_builtin_patterns, registry
+    from dialogue.register import discover_builtin_patterns, registry
 
     imported = discover_builtin_patterns()
-    assert "src.dialogue.xianyu_agent_route" in imported, (
+    assert "dialogue.xianyu_agent_route" in imported, (
         f"xianyu_agent_route 未被自动发现，已发现: {imported}"
     )
     return registry.get("xianyu_agent")
@@ -54,7 +54,7 @@ def sessions():
 
 def launch(pattern, sessions, session_id="s1", bargain_settings=None):
     """模拟 main.py 的 launch 流程：注册会话并注入管线上下文。"""
-    from src.chat.session import Session
+    from chat.session import Session
 
     session = Session(session_id=session_id, pattern_code=pattern.code)
     session.pattern = pattern
@@ -72,8 +72,8 @@ def launch(pattern, sessions, session_id="s1", bargain_settings=None):
 
 
 def chat(sessions, session_id, query):
-    """调用 src.chat.chat 处理一轮对话。"""
-    from src.chat.chat import chat as chat_fn
+    """调用 chat.chat 处理一轮对话。"""
+    from chat.chat import chat as chat_fn
 
     return chat_fn(query=query, session_id=session_id, all_sessions=sessions)
 
@@ -84,7 +84,7 @@ def chat(sessions, session_id, query):
 
 def test_pattern_auto_discovered_and_structure(pattern):
     """Pattern 可被 AST 自动发现，模块/节点结构与 ROUTE 语义正确。"""
-    from src.dialogue.module import ModuleType
+    from dialogue.module import ModuleType
 
     assert pattern.code == "xianyu_agent"
     assert pattern.entry_module_code == "xianyu_root"
@@ -111,7 +111,7 @@ def test_pattern_auto_discovered_and_structure(pattern):
 
 def test_generate_wired_at_module_level(pattern):
     """XianyuIntentNLU / FixedNLG 挂在模块级 generate dict（nlu/nlg 位）。"""
-    from src.dialogue.xianyu_agent_route import FixedNLG, XianyuIntentNLU
+    from dialogue.xianyu_agent_route import FixedNLG, XianyuIntentNLU
 
     root = pattern.module_map["xianyu_root"]
     generate = root.generate
@@ -122,7 +122,7 @@ def test_generate_wired_at_module_level(pattern):
 
 def test_query_slot_wired_with_time_aug(pattern):
     """pattern 级 query 槽位配置 TimeAugQueryRewriter（时间增强改写）。"""
-    from src.dialogue.query import TimeAugQueryRewriter
+    from stages.query import TimeAugQueryRewriter
 
     assert isinstance(pattern.query, TimeAugQueryRewriter)
 
@@ -146,7 +146,7 @@ def test_query_slot_wired_with_time_aug(pattern):
 ])
 def test_detect_intent_keywords(query, intent):
     """本地关键词意图检测与原实现关键词表一致。"""
-    from src.dialogue.xianyu_agent_route import detect_intent
+    from dialogue.xianyu_agent_route import detect_intent
 
     assert detect_intent(query) == intent
 
@@ -263,7 +263,7 @@ def test_price_prompt_contains_bargain_context(pattern, sessions):
     session = launch(pattern, sessions)
 
     captured = {}
-    from src.dialogue.nlg import BaseNLG
+    from stages.nlg import BaseNLG
     original = BaseNLG._call_llm
 
     def spy(self, prompt, llm_config=None):
@@ -290,7 +290,7 @@ def test_intent_specific_prompt_selected(pattern, sessions):
     """技术意图走 tech 模板（含"技术专家"人设），通用走 default 模板。"""
     session = launch(pattern, sessions)
 
-    from src.dialogue.nlg import BaseNLG
+    from stages.nlg import BaseNLG
     original = BaseNLG._call_llm
     captured = []
 
@@ -327,7 +327,7 @@ def test_time_augmented_query_flows_into_prompt(pattern, sessions):
     session.cxt.metadata["time_base"] = _time.mktime(
         _time.strptime("2026-09-03 10:00:00", "%Y-%m-%d %H:%M:%S"))
 
-    from src.dialogue.nlg import BaseNLG
+    from stages.nlg import BaseNLG
     original = BaseNLG._call_llm
     captured = {}
 

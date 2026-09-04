@@ -7,11 +7,11 @@ ROUTE（含 jump_module 菜单 + 无 jump 重置边）+ 2×FSM（节点链 + is_
 
 import pytest
 
-from src.dialogue import visualize
-from src.dialogue.module import AgentModule, FSMModule, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
-from src.dialogue.register import discover_builtin_patterns, registry
+from dialogue import visualize
+from dialogue.module import AgentModule, FSMModule, RouteModule
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
+from dialogue.register import discover_builtin_patterns, registry
 
 # vis_demo 的全部节点 code（见下方 pattern() fixture）
 ALL_NODE_CODES = [

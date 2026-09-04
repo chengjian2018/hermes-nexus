@@ -7,16 +7,16 @@ import fastapi
 from pydantic import BaseModel
 
 from config.config import get_session_db_path
-from src.channel.base import EngineOps
-from src.channel.register import discover_builtin_channels
-from src.channel.webhooks import build_channel_routers
-from src.chat.chat import chat
-from src.chat.session import Session
-from src.chat.store import SessionStore
-from src.dialogue.register import registry as pattern_registry
-from src.dialogue.register import discover_builtin_patterns
-from src.tools.register import registry as tool_registry
-from src.tools.register import discover_builtin_tools
+from channel.base import EngineOps
+from channel.register import discover_builtin_channels
+from channel.webhooks import build_channel_routers
+from chat.chat import chat
+from chat.session import Session
+from chat.store import SessionStore
+from dialogue.register import registry as pattern_registry
+from dialogue.register import discover_builtin_patterns
+from tools.register import registry as tool_registry
+from tools.register import discover_builtin_tools
 
 logger = logging.getLogger(__name__)
 
@@ -222,10 +222,10 @@ def _shutdown_stores() -> None:
 
 # 整体说明
 # 特定任务对话管理
-# 对话模板（src/dialogue）：由对话模块组成，每个模块复制不同的对话任务，模块也可以多个节点组成，整体为有限状态机跳转，模块有节点code，一个模块包含0到多个节点。模版可自助注册
-# 大模型提供商（src/llm）：提供大模型api请求
-# 工具（src/tools）：模版对话时可请求的工具，可自助注册，在模块定义时标明使用哪些工具或在工具注册时标明哪个模版或哪个模版的哪个模块可使用
-# 对话跳转（src/chat）：依据已有session，获取当前对话所处模块，若模块为 AGENT 型，组装system_prompt与对话记录，进行多轮工具对话（LLM 调 transfer_to_XX 工具即写 ModuleJumpEvent 到 cxt.actions，同轮由 chat 层 hop 循环消费并重路由，接手方直接接话）；若为 FSM 型，按照节点的有限状态机进行两阶段跳转，先进行意图识别，再进行回复生成；若为 ROUTE 型，意图菜单命中带 jump_module 的节点（或 NLU 直接输出 jump_module）时由 stage 循环内检测写跳转事件，chat 层消费后同轮跳转到目标模块。
+# 对话模板（dialogue）：由对话模块组成，每个模块复制不同的对话任务，模块也可以多个节点组成，整体为有限状态机跳转，模块有节点code，一个模块包含0到多个节点。模版可自助注册
+# 大模型提供商（llm）：提供大模型api请求
+# 工具（tools）：模版对话时可请求的工具，可自助注册，在模块定义时标明使用哪些工具或在工具注册时标明哪个模版或哪个模版的哪个模块可使用
+# 对话跳转（chat）：依据已有session，获取当前对话所处模块，若模块为 AGENT 型，组装system_prompt与对话记录，进行多轮工具对话（LLM 调 transfer_to_XX 工具即写 ModuleJumpEvent 到 cxt.actions，同轮由 chat 层 hop 循环消费并重路由，接手方直接接话）；若为 FSM 型，按照节点的有限状态机进行两阶段跳转，先进行意图识别，再进行回复生成；若为 ROUTE 型，意图菜单命中带 jump_module 的节点（或 NLU 直接输出 jump_module）时由 stage 循环内检测写跳转事件，chat 层消费后同轮跳转到目标模块。
 # 调用api结束后，更新跳转状态，更新会话记录
 
 
@@ -449,7 +449,7 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
 
 
 # ----channel 接线（外部消息源 → 引擎操作）----
-# AST 自动发现 src/channel/*.py 的声明式渠道（token/默认 pattern 走各渠道
+# AST 自动发现 channel/*.py 的声明式渠道（token/默认 pattern 走各渠道
 # 声明的环境变量，每次请求时读取可热改），通用 handler 生成 router
 discover_builtin_channels()
 for _router in build_channel_routers(EngineOps(

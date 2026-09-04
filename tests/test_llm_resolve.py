@@ -7,9 +7,9 @@ import pytest
 
 import config.config
 from fake_provider import FAKE_PROVIDER_CODE, register_fake_provider
-from src.llm import registry as llm_registry
-from src.llm.openai_provider import OpenAICompatibleProvider
-from src.llm.resolve import build_provider
+from llm import registry as llm_registry
+from llm.openai_provider import OpenAICompatibleProvider
+from llm.resolve import build_provider
 
 
 # ============================================================================
@@ -71,7 +71,7 @@ def test_openai_provider_discovered_on_first_use():
     llm_registry.deregister("openai")
     # 模块已在 sys.modules 缓存时 import_module 不会重新执行注册代码，
     # 弹出缓存以模拟全新进程的首次导入
-    sys.modules.pop("src.llm.openai_provider", None)
+    sys.modules.pop("llm.openai_provider", None)
     try:
         provider = build_provider({"code": "openai", "model": "m"})
         assert provider.code == "openai"
@@ -79,8 +79,8 @@ def test_openai_provider_discovered_on_first_use():
     finally:
         # 还原现场：重新执行模块注册代码，保持 registry 与模块缓存一致
         llm_registry.deregister("openai")
-        sys.modules.pop("src.llm.openai_provider", None)
-        importlib.import_module("src.llm.openai_provider")
+        sys.modules.pop("llm.openai_provider", None)
+        importlib.import_module("llm.openai_provider")
 
 
 # ============================================================================
@@ -92,7 +92,7 @@ def test_call_llm_with_none_config_uses_loaded_config(monkeypatch):
 
     回归：旧实现此处抛 ``TypeError: 'NoneType' object is not subscriptable``。
     """
-    from src.dialogue.nlu import FSMNLU
+    from stages.nlu import FSMNLU
 
     register_fake_provider()
     monkeypatch.setattr(
@@ -107,8 +107,8 @@ def test_call_llm_with_none_config_uses_loaded_config(monkeypatch):
 
 def test_call_llm_with_none_config_loads_real_yaml(monkeypatch):
     """回退路径读取真实 local_config.yaml 时能构建出配置生效的 provider。"""
-    from src.dialogue.nlg import FSMNLG
-    import src.dialogue.nlg.nlg as nlg_module
+    from stages.nlg import FSMNLG
+    import stages.nlg.nlg as nlg_module
 
     built = {}
 

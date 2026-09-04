@@ -309,3 +309,24 @@ AgentRunner 接线/删除；chat.py 任何改动；FSM/ROUTE 挂点；③控制�
 （拦截/丢弃调用/制造移交）——指 **hook 不拥有**否决权；§3.3 的非法 name
 拦截是框架主流程行为（确定性规则，非 hook 决策），不属此列；hook 写 cxt
 的注入通道；async hook；新全局 registry。
+
+---
+
+## 9. 追加变更（2026-09-04 执行后）：MessagesBuilder 一体化
+
+hooks 落地后复查发现 messages_builder 契约不含 system 组装（system 为
+框架终态成品，builder 只管列表装配）——对齐 Customer-Agent 的 MessageBuilder
+全权形态，追加一次契约一体化（commit c0f5957）：
+
+- 契约 `(system_prompt, cxt) -> messages` 改为
+  `(module, cxt, extra_blocks) -> messages`，**system 行归 builder 组装**；
+- 声明两级：`module.messages_builder > pattern.messages_builder > 默认`
+  （pattern 级 Pattern 新字段，与 agent_hooks 层级同构）；
+- `build_system_prompt` / `build_projection_block` 自 loop.py 迁入
+  messages.py 公开，作为自定义 builder 的可复用助手（四块结构 + hooks
+  扩展块内置，extra_blocks 片段随之保留）；
+- force_close 收尾后缀改为 builder 返回后框架侧强制
+  （`_append_force_close_suffix`：追加首条 system 行，无则前置）——
+  控制流语义不赌 builder 自觉；
+- Q8 边界不变：单点替换归 builder（所有权扩至 system）、叠加归 hooks；
+  P4/P5 与主流程工具名校验不受影响。

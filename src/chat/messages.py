@@ -51,6 +51,10 @@ def default_build_messages(
 
     for msg in cxt.history:
         if msg.role in ("user", "assistant"):
+            # 临时护栏（回放守卫落地后移除）：跳过带 tool_calls 的 assistant
+            # 行，避免中间态把 content="" 的协议行发给真实 API
+            if msg.tool_calls:
+                continue
             messages.append({"role": msg.role, "content": msg.content})
 
     return messages

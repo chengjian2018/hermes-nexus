@@ -303,3 +303,82 @@ def test_chat_hop_consumes_transfer_event_same_turn():
     assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
     # B 的回复入口走 agent loop（两次 LLM 调用：A transfer + B 答复）
     assert len(provider.seen) == 2
+
+
+# ---------------------------------------------------------------------------
+# tool 轨迹完整记录（跨轮回放的配对基础）
+# ---------------------------------------------------------------------------
+
+def test_tool_round_ids_paired_in_history():
+    """普通工具轮：assistant(tool_calls) 与 tool 行 id 一一配对落 history。"""
+    from src.chat.loop import run_agent
+    s = _mk_session()
+    s.cxt.add_message("user", "查下我的工单", stage="chat")
+    provider = ScriptedProvider([
+        {"content": "查询中", "tool_calls": [{"id": "c1", "function": {
+            "name": "mock_lent_tool", "arguments": '{}'}}]},
+        {"content": "查到了。", "tool_calls": []},
+    ])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
+
+    hist = [m for m in s.cxt.history if m.stage == "agent"]
+    assistant_calls = [m for m in hist if m.role == "assistant" and m.tool_calls]
+    assert len(assistant_calls) == 1
+    call_ids = {tc["id"] for tc in assistant_calls[0].tool_calls}
+    tool_ids = {m.tool_call_id for m in hist if m.role == "tool"}
+    assert call_ids == tool_ids == {"c1"}
+
+
+def test_transfer_turn_synthesizes_all_tool_results():
+    """transfer 轮：同响应混合普通工具 + transfer，全部合成 tool 行且 id 全配对。"""
+    from src.chat.loop import run_agent
+    s = _mk_session()
+    s.cxt.add_message("user", "查完给我转售后", stage="chat")
+    provider = ScriptedProvider([
+        {"content": "好的，查完就转", "tool_calls": [
+            {"id": "c1", "function": {"name": "mock_lent_tool",
+                                      "arguments": '{}'}},
+            {"id": "c2", "function": {"name": "transfer_to_after_sales",
+                                      "arguments": '{"reason": "售后深入"}'}},
+        ]},
+    ])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        result = run_agent(s, s.cxt.module_map["reception"],
+                           s.cxt.metadata["llm_override"])
+    assert result.reply in (None, "")
+
+    suppressed = [m for m in s.cxt.history
+                  if m.role == "assistant" and m.metadata.get("suppressed")]
+    assert len(suppressed) == 1
+    assert len(suppressed[0].tool_calls) == 2
+
+    synthetic = [m for m in s.cxt.history if m.role == "tool"]
+    assert len(synthetic) == 2  # 每个tool call 一条，全配对
+    assert {m.tool_call_id for m in synthetic} == {"c1", "c2"}
+    assert all(m.metadata.get("synthetic") for m in synthetic)
+    moved = [m for m in synthetic if m.content.startswith("[已移交至模块")]
+    skipped = [m for m in synthetic if m.content.startswith("[未执行")]
+    assert len(moved) == 1 and len(skipped) == 1
+
+
+def test_rejected_transfer_records_tool_calls_on_assistant():
+    """幻觉目标错误回填路径：assistant 行带 tool_calls、tool 行带 id。"""
+    from src.chat.loop import run_agent
+    s = _mk_session()
+    s.cxt.add_message("user", "我要办个神奇业务", stage="chat")
+    provider = ScriptedProvider([
+        {"content": "尝试移交", "tool_calls": [{"id": "c1", "function": {
+            "name": "transfer_to_ghost", "arguments": '{}'}}]},
+        {"content": "好的，我直接处理。", "tool_calls": []},
+    ])
+    with patch("src.chat.loop.build_provider", return_value=provider):
+        run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
+
+    agent_hist = [m for m in s.cxt.history if m.stage == "agent"]
+    call_assistants = [m for m in agent_hist
+                       if m.role == "assistant" and m.tool_calls]
+    assert len(call_assistants) == 1
+    assert call_assistants[0].tool_calls[0]["id"] == "c1"
+    tools = [m for m in agent_hist if m.role == "tool"]
+    assert tools[0].tool_call_id == "c1"

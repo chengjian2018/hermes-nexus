@@ -234,6 +234,51 @@ class TestPromptTaskInfo:
         with unittest.mock.patch("builtins.input", return_value=""):
             assert cli.prompt_task_info("p1") is None
 
+    def test_preset_wins_over_mock(self):
+        """--task-info 显式传入优先于 pattern 的 mock 预设。"""
+        with unittest.mock.patch("builtins.input") as inp:
+            out = cli.prompt_task_info("customer_agent", '{"k": "v"}')
+        assert out == {"k": "v"}
+        inp.assert_not_called()
+
+
+class TestMockTaskInfo:
+    def test_customer_agent_preset_present(self):
+        mock = cli.mock_task_info_for("customer_agent")
+        assert mock == {"channel": "xianyu", "account_id": "demo"}
+
+    def test_unknown_pattern_returns_none(self):
+        assert cli.mock_task_info_for("xianyu_agent") is None
+        assert cli.mock_task_info_for("no_such") is None
+
+    def test_returns_copy_not_table_entry(self):
+        mock = cli.mock_task_info_for("customer_agent")
+        mock["account_id"] = "mutated"
+        assert cli.mock_task_info_for("customer_agent")["account_id"] == "demo"
+
+    def test_enter_applies_mock_for_preset_pattern(self):
+        with unittest.mock.patch("builtins.input", return_value=""):
+            assert cli.prompt_task_info("customer_agent") == {
+                "channel": "xianyu", "account_id": "demo"}
+
+    def test_eof_applies_mock(self):
+        """非交互（管道）场景：EOF 也回落 mock，演示可脚本化。"""
+        with unittest.mock.patch("builtins.input", side_effect=EOFError):
+            assert cli.prompt_task_info("customer_agent") == {
+                "channel": "xianyu", "account_id": "demo"}
+
+    def test_typed_json_wins_over_mock(self):
+        with unittest.mock.patch("builtins.input",
+                                 return_value='{"account_id": "acct_9"}'):
+            assert cli.prompt_task_info("customer_agent") == {
+                "account_id": "acct_9"}
+
+    def test_preset_account_matches_seed_scope(self):
+        """mock 的 account_id 必须与 knowledge-seed 默认 scope 对齐，
+        目录预取/知识工具才能取到种子数据。"""
+        assert f"xianyu:{cli.mock_task_info_for('customer_agent')['account_id']}" \
+            == cli.knowledge_seed.__defaults__[0]
+
     def test_typed_json_parsed(self):
         with unittest.mock.patch("builtins.input",
                                  return_value='{"item_id": "9"}'):

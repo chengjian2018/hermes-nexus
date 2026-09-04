@@ -8,7 +8,8 @@
 
 选择交互: 不带 --pattern/--llm 启动时出 prompt_toolkit 方向键菜单
 (pattern 单级; llm 两级 provider → models)。选定 pattern 后可输入
-task_info JSON（回车跳过；--task-info 直接传）。调试输出: -v 简要 / -vv 完整。
+task_info JSON（回车跳过；--task-info 直接传；customer_agent 等有 mock
+预设的 pattern 回车即用 mock，见 MOCK_TASK_INFO）。调试输出: -v 简要 / -vv 完整。
 
 用法示例:
     .venv/bin/python cli.py chat --pattern xianyu_agent -vv
@@ -417,17 +418,41 @@ def parse_task_info(raw: Any) -> Optional[Dict[str, str]]:
     return {str(k): str(v) for k, v in data.items()}
 
 
-def prompt_task_info(pattern_code: str, preset: str = "") -> Optional[Dict[str, str]]:
-    """选完 pattern 后的 task_info 输入框；回车跳过。
+# pattern 级 mock task_info（演示/联调预设：选择对应 pattern 后回车直接采用；
+# --task-info 或手输 JSON 优先）。account_id 与 cli.py knowledge-seed 的默认
+# scope（xianyu:demo）对齐——customer_agent 的目录预取/知识工具即取到种子数据。
+MOCK_TASK_INFO: Dict[str, Dict[str, str]] = {
+    "customer_agent": {"channel": "xianyu", "account_id": "demo"},
+}
 
-    preset 非空（--task-info flag）则只做解析不再询问。
+
+def mock_task_info_for(pattern_code: str) -> Optional[Dict[str, str]]:
+    """返回 pattern 的 mock task_info 副本（无预设返回 None）。"""
+    preset = MOCK_TASK_INFO.get(pattern_code)
+    return dict(preset) if preset else None
+
+
+def prompt_task_info(pattern_code: str, preset: str = "") -> Optional[Dict[str, str]]:
+    """选完 pattern 后的 task_info 输入框。
+
+    - preset 非空（--task-info flag）只做解析不再询问（优先级最高）
+    - pattern 有 mock 预设：提示语带出 mock 内容，回车/EOF 直接采用
+    - 无 mock：回车跳过（原行为）；手输 JSON 恒优先于 mock
     """
     if preset:
         return parse_task_info(preset)
+    mock = mock_task_info_for(pattern_code)
+    hint = (f"，回车用 mock {json.dumps(mock, ensure_ascii=False)}" if mock
+            else "（回车跳过）")
     try:
-        raw = input(dim(f"task_info JSON（回车跳过）[{pattern_code}]: ")).strip()
+        raw = input(dim(f"task_info JSON{hint} [{pattern_code}]: ")).strip()
     except EOFError:
-        return None
+        return mock
+    if not raw:
+        if mock is not None:
+            print(dim("  mock task_info 已应用；商品目录/知识检索需先跑 "
+                      "`cli.py knowledge-seed`（默认 scope xianyu:demo）"))
+        return mock
     return parse_task_info(raw)
 
 

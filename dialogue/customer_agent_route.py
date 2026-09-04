@@ -1,8 +1,8 @@
 """customer_agent pattern —— Customer-Agent（兄弟项目）店铺客服的整装迁移。
 
 agent 注册：模块顶层 ``registry.register()``，AST 扫描自动发现（同
-knowledge_agent_route 习语）；知识工具组复用 tools/knowledge_tool.py
-（Customer-Agent 工具的前期移植），本 pattern 补齐 ACL 授权。
+xianyu_agent_route 习语）；知识工具组复用 tools/knowledge_tool.py
+（Customer-Agent 工具的前期移植），本 pattern 是其唯一 ACL 授权方。
 
 MessageBuilder 迁移（Customer-Agent ``custom/message_builder.py`` → 本项目
 一体化契约 ``messages_builder(module, cxt, extra_blocks) -> messages``）：

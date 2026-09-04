@@ -99,7 +99,7 @@ dialogue/                对话引擎内核
   base.py                PipelineStage / DialogueContext 契约
   pattern.py module.py node.py   Pattern→Module→Node 三级结构
   stage_slots.py         管线槽位：四槽位 + 三层解析
-  xianyu_agent_route.py knowledge_agent_route.py   业务 pattern（应用层）
+  xianyu_agent_route.py customer_agent_route.py    业务 pattern（应用层）
 stages/                  管线 stage 实现（框架扩展层）
   nlu/ nlg/              两阶段形态 stage（意图识别 / 回复生成）
   unified.py             统一阶段（单次调用 NLU+NLG）

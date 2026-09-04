@@ -39,7 +39,8 @@ def test_tools_registered():
 
 
 def test_pattern_acl_grant_and_deny():
-    allowed = registry.get_allowed_tools_for_pattern("knowledge_agent", "kb_agent")
+    allowed = registry.get_allowed_tools_for_pattern(
+        "customer_agent", "customer_service")
     for name in ("search_product_knowledge",
                  "search_customer_service_knowledge",
                  "list_products", "send_goods_link"):

@@ -819,7 +819,7 @@ def knowledge_seed(scope: str = "xianyu:demo") -> None:
     Args:
         scope: 知识隔离域，格式 {channel}:{account_id}
     """
-    from src.tools.knowledge_store import close_knowledge_store, get_knowledge_store
+    from database.knowledge_store import close_knowledge_store, get_knowledge_store
 
     store = get_knowledge_store()
     try:

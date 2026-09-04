@@ -4,6 +4,9 @@
 重写：原生 sqlite3 单连接 + 锁 + WAL（照 src/chat/store.py），Shop FK 层级
 拍平为 ``scope`` 列（``{channel}:{account_id}``）。
 
+存储定义统一放 ``database/`` 路径（表 DDL / 未来 ES 等 schema 均归此）；
+工具层（src/tools/knowledge_tool.py）只消费本模块，不定义存储。
+
 输出消毒（_clean_untrusted + untrusted 包裹）为安全边界：知识库内容是不可信
 数据，检索结果进入 LLM 上下文前必须过本模块的 format_result。
 """

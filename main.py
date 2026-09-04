@@ -109,7 +109,7 @@ def _init_store() -> None:
 def _init_knowledge_store() -> None:
     """预热知识库连接（工具懒持有的兜底提前到启动期）；失败不阻断服务。"""
     try:
-        from src.tools.knowledge_store import get_knowledge_store
+        from database.knowledge_store import get_knowledge_store
         kb = get_knowledge_store()
         logger.info("知识库已启用: %s", kb._conn and "ok")
     except Exception:
@@ -203,7 +203,7 @@ def _shutdown_stores() -> None:
     """服务关闭：释放知识库/会话库连接。"""
     global store
     try:
-        from src.tools.knowledge_store import close_knowledge_store
+        from database.knowledge_store import close_knowledge_store
         close_knowledge_store()
     except Exception:
         logger.exception("关闭知识库失败")

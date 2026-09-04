@@ -16,7 +16,7 @@ search_customer_service_knowledge / get_shop_products / send_goods_link），
 
 from typing import Any, Dict
 
-from src.tools.knowledge_store import (
+from database.knowledge_store import (
     _clean_untrusted,
     get_knowledge_store,
 )

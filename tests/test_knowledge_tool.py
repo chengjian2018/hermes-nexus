@@ -9,7 +9,7 @@ import json
 import pytest
 
 from src.tools import knowledge_tool  # noqa: F401 -- import 即注册
-from src.tools.knowledge_store import KnowledgeStore
+from database.knowledge_store import KnowledgeStore
 from src.tools.register import registry
 
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.tools.knowledge_store import (
+from database.knowledge_store import (
     KnowledgeStore,
     _clean_untrusted,
     _cut_query,

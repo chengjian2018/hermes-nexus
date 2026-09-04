@@ -11,7 +11,9 @@ search_customer_service_knowledge / get_shop_products / send_goods_link），
 - ``send_goods_link`` 返回链接文本而非副作用发送（webhook 模型只有一段回复
   文本）；保留归属校验：goods_id 必须在当前 scope 知识库存在，防 LLM 编造
 
-权限：``allowed_patterns={"knowledge_agent": True}`` —— domain 工具精确授权。
+权限：``allowed_patterns={"knowledge_agent": True, "customer_agent": True}``
+—— domain 工具精确授权（customer_agent 为 Customer-Agent 整装迁移 pattern，
+见 dialogue/customer_agent_route.py）。
 """
 
 from typing import Any, Dict
@@ -242,5 +244,5 @@ for _schema, _handler, _desc, _emoji in _KNOWLEDGE_TOOLS:
         handler=_handler,
         description=_desc,
         emoji=_emoji,
-        allowed_patterns={"knowledge_agent": True},
+        allowed_patterns={"knowledge_agent": True, "customer_agent": True},
     )

@@ -41,6 +41,7 @@ flowchart TB
     subgraph 应用层
         xianyuagent["dialogue/xianyu_agent_route.py<br/>(闲鱼客服 pattern<br/>复刻 xianyu-auto-reply)"]
         kbagent["dialogue/knowledge_agent_route.py<br/>(知识库客服 pattern<br/>工具调用型 AGENT)"]
+        caagent["dialogue/customer_agent_route.py<br/>(Customer-Agent 整装迁移 pattern<br/>迁移版 MessageBuilder:<br/>会话信息块+目录预取 untrusted 行)"]
         tools["tools/calculator_tool.py<br/>weather_tool.py<br/>knowledge_tool.py"]
         clarify["stages/clarify/<br/>偏题澄清"]
     end
@@ -51,6 +52,7 @@ flowchart TB
     kbs -.-> tools
     kbagent -.-> preg
     kbs -.-> tools
+    caagent -.-> preg
     xianyuagent -.-> preg
     tools -.-> treg
 ```

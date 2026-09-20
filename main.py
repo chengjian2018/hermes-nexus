@@ -60,6 +60,14 @@ def _touch_session(session_id: str) -> None:
     _session_last_active[session_id] = time.monotonic()
 
 
+def _touch_session_threadsafe(session_id: str) -> None:
+    """Lock-wrapped touch for background threads (task runner keeps its session
+    hot against TTL eviction)."""
+    with _sessions_lock:
+        if session_id in _session_last_active:
+            _touch_session(session_id)
+
+
 def _purge_expired_sessions() -> int:
     """Purge sessions idle beyond SESSION_TTL_SECONDS (requires _sessions_lock
     held).

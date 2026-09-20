@@ -15,6 +15,7 @@ Data sources:
 """
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import re
@@ -40,11 +41,49 @@ _ANNOTATION_RE = re.compile(
     rf"(?:~(?:(?P<d2>{_DATE})\s?)?(?P<c2>{_CLOCK})?)?\)"
 )
 
+# Whole-unit annotations from _render's _whole_unit_date shorthand (these do
+# NOT match _ANNOTATION_RE — the two grammars are deliberately disjoint):
+#   (2026-09)  whole month          (2026)          whole year
+#   (2026-09~2026-10) month range   (2026~2027)     year range
+_WHOLE_UNIT_RE = re.compile(
+    r"\((?P<y1>\d{4})(?:-(?P<m1>\d{2}))?"
+    r"(?:~(?P<y2>\d{4})(?:-(?P<m2>\d{2}))?)?\)"
+)
 
-def parse_available_slots(task_info: dict) -> List[Slot]:
+
+def _month_end(year: int, month: int) -> datetime:
+    last_day = calendar.monthrange(year, month)[1]
+    return datetime(year, month, last_day, 23, 59)
+
+
+def _expand_whole_unit(y1, m1, y2, m2) -> Optional[Slot]:
+    """Expand a whole month/year annotation into a (start, end, display)
+    window: month → [month-start 00:00, month-end 23:59]; year →
+    [Jan-1 00:00, Dec-31 23:59]. Returns None on non-existent months."""
+    try:
+        start = datetime(int(y1), int(m1 or 1), 1, 0, 0)
+        end_year, end_month = (
+            (int(y2), int(m2 or 12)) if y2 else (int(y1), int(m1 or 12)))
+        end = _month_end(end_year, end_month)
+    except ValueError:
+        logger.warning(
+            "[booking] 整月/整年标注非法（跳过）: %s%s%s%s", y1, m1, y2, m2)
+        return None
+    display = f"{y1}" + (f"-{m1}" if m1 else "")
+    if y2:
+        display += f"~{y2}" + (f"-{m2}" if m2 else "")
+    return start, end, display
+
+
+def parse_available_slots(task_info: dict,
+                          now: Optional[datetime] = None) -> List[Slot]:
     """Parse task_info["available_slots"] ("YYYY-MM-DD HH:MM-HH:MM" strings)
     into (start, end, original) windows, start-sorted; malformed entries are
     skipped with a warning (a bad schedule never blocks the dialogue).
+
+    ``now`` filters out windows that have already ended (``end <= now``) —
+    an afternoon call must not recommend that morning's slot; None keeps
+    every window (backward-compatible raw view).
 
     Value shape tolerance: the canonical form is a list of strings, but some
     entry paths (channel/webhook models) declare task_info as Dict[str, str]
@@ -85,6 +124,11 @@ def parse_available_slots(task_info: dict) -> List[Slot]:
             continue
         slots.append((start, end, str(raw)))
     slots.sort(key=lambda s: s[0])
+    if now is not None:
+        expired = sum(1 for _s, e, _d in slots if e <= now)
+        if expired:
+            logger.info("[booking] 过滤已过期档期 %d 条（now=%s）", expired, now)
+        slots = [s for s in slots if s[1] > now]
     return slots
 
 
@@ -139,7 +183,9 @@ def extract_requested_time(rewritten_query: str,
     下午3点(15:00)" [Oct 1 (2026-10-01), 3pm (15:00)]), so preference order: a
     date+clock annotation > a date-only
     combined with a following clock-only > date-only (whole day) > clock-only
-    (today). Returns None when the utterance carries no time annotation.
+    (today) > a whole month/year annotation ("这个月都行" -> "(2026-09)") as
+    the coarse fallback. Returns None when the utterance carries no parsable
+    time annotation.
     """
     found = []
     for m in _ANNOTATION_RE.finditer(rewritten_query or ""):
@@ -147,8 +193,6 @@ def extract_requested_time(rewritten_query: str,
         d2, c2 = m.group("d2"), m.group("c2")
         if d1 or c1:
             found.append((d1, c1, d2, c2))
-    if not found:
-        return None
 
     for d1, c1, d2, c2 in found:
         if d1 and c1:
@@ -174,16 +218,35 @@ def extract_requested_time(rewritten_query: str,
             slot = _build(None, c1, d2, c2, today)
             if slot is not None:
                 return slot
+
+    # Coarse fallback: whole month/year annotations ("这个月都行" ->
+    # "(2026-09)"); only reached when no specific annotation parsed
+    for w in _WHOLE_UNIT_RE.finditer(rewritten_query or ""):
+        slot = _expand_whole_unit(
+            w.group("y1"), w.group("m1"), w.group("y2"), w.group("m2"))
+        if slot is not None:
+            return slot
     return None
 
 
 def match_slot(requested: Slot, slots: List[Slot]) -> Optional[str]:
-    """Bookability: the requested window must be fully contained in one
-    available slot (a point time counts when it falls inside the window).
+    """Bookability against the schedule:
+
+    - specific request (annotation carries a clock): the requested window
+      must be fully contained in one available slot — a partial overlap
+      exceeding a window stays unbookable (the installer cannot stay past
+      the window; a point time counts when it falls inside the window);
+    - coarse request (date-only / month / year annotation — display has no
+      clock): a flexibility window; any available slot fully inside it
+      satisfies the customer (the earliest wins, slots start-sorted).
+
     Returns the matched slot's original text, else None."""
-    rs, re_, _ = requested
+    rs, re_, rdisp = requested
+    coarse = ":" not in rdisp
     for ss, se, sdisp in slots:
         if ss <= rs and re_ <= se:
+            return sdisp
+        if coarse and rs <= ss and se <= re_:
             return sdisp
     return None
 

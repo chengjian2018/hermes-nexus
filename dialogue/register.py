@@ -139,6 +139,14 @@ class PatternRegistry:
             if isinstance(code_or_pattern, Pattern):
                 pattern = code_or_pattern
             else:
+                # nodes / llm_provider_code are declared in the signature for
+                # backward compatibility — forward them into the constructor's
+                # extra-attribute kwargs instead of silently dropping them
+                extra = dict(kwargs)
+                if nodes is not None:
+                    extra["nodes"] = nodes
+                if llm_provider_code:
+                    extra["llm_provider_code"] = llm_provider_code
                 pattern = Pattern(
                     code=code_or_pattern,
                     name=name,
@@ -146,7 +154,7 @@ class PatternRegistry:
                     modules=modules,
                     stages=stages,
                     entry_module_code=entry_module_code,
-                    **kwargs
+                    **extra,
                 )
 
             code = pattern.code

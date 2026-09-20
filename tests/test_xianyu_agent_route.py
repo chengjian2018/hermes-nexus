@@ -224,6 +224,24 @@ def test_bargain_count_persists_across_interleaved_intents(pattern, sessions):
     assert reply == REFUSE_TEXT
 
 
+def test_bargain_count_survives_intent_metadata_loss(pattern, sessions):
+    """重启恢复后 history 的 intent 标注丢失（消息落库快照早于 NLU 回写）：
+    议价计数靠 filled_slots 持久下限继续累积，拒绝阈值不失效。"""
+    session = launch(pattern, sessions)
+    chat(sessions, "s1", "能便宜点吗")     # price #1
+    chat(sessions, "s1", "还能再少点")     # price #2
+    assert session.cxt.filled_slots["bargain_count"] == 2
+
+    # 模拟重启恢复：intent 标注全部丢失，filled_slots（快照持久化）保留
+    for msg in session.cxt.history:
+        msg.metadata.pop("intent", None)
+
+    reply = chat(sessions, "s1", "最低多少钱")  # price #3（历史计 1，下限 2+1=3）→ 拒绝
+
+    assert session.cxt.nlu_result["slots"]["bargain_count"] == 3
+    assert reply == REFUSE_TEXT
+
+
 def test_custom_bargain_settings(pattern, sessions):
     """metadata.bargain_settings overrides the default bargain settings (max=1 -> refused on the first haggle)."""
     session = launch(pattern, sessions,

@@ -80,3 +80,34 @@ def test_route_jump_module_self_loop_raises():
     route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
     with pytest.raises(ValueError, match="自环"):
         _mk_pattern([route_mod])
+
+
+def test_kwargs_attach_without_modules():
+    """modules=None 骨架 pattern 的自定义 kwargs 属性不再被静默丢弃。"""
+    p = Pattern(code="p_skeleton", name="t", description="t",
+                entry_module_code="a", modules=None,
+                counterpart_hint={"role_prompt": "x"}, custom_flag=7)
+    assert p.counterpart_hint == {"role_prompt": "x"}
+    assert p.custom_flag == 7
+
+    # 带模块时照常生效（原有行为不回归）
+    a = AgentModule(module_code="a")
+    p2 = _mk_pattern([a], custom_flag=9)
+    assert p2.custom_flag == 9
+
+
+def test_register_string_args_forward_declared_params():
+    """字符串兼容注册路径：nodes / llm_provider_code 不再被吞掉，透传为
+    pattern 属性（kwargs 附加机制）。"""
+    from dialogue.register import registry
+
+    p = registry.register(
+        "tmp_str_style", name="t", description="t",
+        nodes={"n1": {"node_name": "x"}},
+        llm_provider_code="openai",
+    )
+    try:
+        assert p.nodes == {"n1": {"node_name": "x"}}
+        assert p.llm_provider_code == "openai"
+    finally:
+        registry.deregister("tmp_str_style")

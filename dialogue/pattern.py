@@ -95,7 +95,10 @@ class Pattern:
                                 f"→ {jump_target}（模块自环）"
                             )
 
-            for key, value in kwargs.items():
-                setattr(self, key, value)
+        # Extra keyword attributes attach regardless of modules (a
+        # modules=None skeleton pattern keeps its custom attributes too —
+        # max_hops above already follows this rule)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 

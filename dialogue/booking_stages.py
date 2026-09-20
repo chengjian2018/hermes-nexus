@@ -77,6 +77,14 @@ from stages.unified import FSMUnifiedNLU
 logger = logging.getLogger(__name__)
 
 
+def _now(ctx: DialogueContext) -> datetime:
+    """The turn's time base (tests inject metadata.time_base)."""
+    tb = ctx.metadata.get("time_base")
+    if tb:
+        return datetime.fromtimestamp(tb)
+    return datetime.now()
+
+
 # ============================================================================
 # Schedule-backed recommendation NLG (deterministic, zero LLM)
 # ============================================================================
@@ -102,7 +110,9 @@ class ScheduleRecommendNLG:
 
     def execute(self, ctx: DialogueContext) -> DialogueContext:
         task_info = ctx.task_basic_info or ctx.metadata.get("task_info") or {}
-        available = parse_available_slots(task_info)
+        # Expired windows are filtered: an afternoon call must not recommend
+        # that morning's slot
+        available = parse_available_slots(task_info, now=_now(ctx))
         if not available:
             return ctx  # no schedule: keep the unified reply as-is
 
@@ -190,10 +200,13 @@ class BookingGuardUnifiedNLU(FSMUnifiedNLU):
             return
 
         task_info = ctx.task_basic_info or ctx.metadata.get("task_info") or {}
-        available = parse_available_slots(task_info)
+        # Expired windows cannot match: the guard must not bless a slot that
+        # already ended
+        available = parse_available_slots(task_info, now=self._now_datetime(ctx))
         if not available:
-            # No schedule injected: nothing to enforce, let the model's pick
-            # through (declared wiring: guard is opt-in via task_info)
+            # No (unexpired) schedule injected: nothing to enforce, let the
+            # model's pick through (declared wiring: guard is opt-in via
+            # task_info)
             slots_out["bookable"] = "no_schedule"
             self._write_back(ctx, slots_out)
             return
@@ -356,10 +369,7 @@ class BookingGuardUnifiedNLU(FSMUnifiedNLU):
     @staticmethod
     def _now_datetime(ctx) -> datetime:
         """The turn's time base (tests inject metadata.time_base)."""
-        tb = ctx.metadata.get("time_base")
-        if tb:
-            return datetime.fromtimestamp(tb)
-        return datetime.now()
+        return _now(ctx)
 
 
 # ============================================================================

@@ -239,12 +239,18 @@ class XianyuIntentNLU(BaseNLU):
         next_node = INTENT_TO_MENU.get(intent, "xy_menu_default")
         settings = _get_bargain_settings(ctx)
 
-        bargain_count = 0
+        # Non-price turns keep the accumulated count (no reset): the counter
+        # doubles as the persisted floor below
+        bargain_count = int(ctx.filled_slots.get("bargain_count", 0) or 0)
         if intent == "price":
             # Replicates the bargain round count control: count includes the current
             # round; refuse once >= max_bargain_rounds (the max-th haggle gets the
-            # fixed refusal script)
-            bargain_count = _count_bargain_rounds(ctx)
+            # fixed refusal script). History counting (per-message intent
+            # metadata) is primary; the filled_slots counter — persisted by the
+            # end-of-turn snapshot — is the floor: message rows snapshot their
+            # metadata BEFORE the NLU backfills intent, so a restored history
+            # carries no intents and history counting alone would restart at 0
+            bargain_count = max(_count_bargain_rounds(ctx), bargain_count + 1)
             if bargain_count >= settings["max_bargain_rounds"]:
                 next_node = "xy_menu_price_refuse"
 

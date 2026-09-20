@@ -44,9 +44,27 @@ flowchart TB
         tools["tools/calculator_tool.py<br/>weather_tool.py<br/>knowledge_tool.py"]
         clarify["stages/clarify/<br/>偏题澄清"]
     end
-    subgraph 存储层
-        kbs["database/knowledge_store.py<br/>(SQLite 知识库<br/>scope 隔离)"]
+    subgraph 话术模版链路(templates/)
+        tplapi["templates/api.py<br/>validate/register/get 路由"]
+        tval["templates/validator.py<br/>collect-all 三层校验"]
+        tcomp["templates/compiler.py<br/>JSON→Pattern 编译"]
+        tplstore["templates/store.py<br/>TemplateStore(data/templates)<br/>canonical hash + 启动重放"]
     end
+    subgraph 自主任务链路(tasks/)
+        taskapi["tasks/api.py<br/>tasks 触发/轮询路由"]
+        tengine["tasks/engine.py<br/>TaskEngine 后台线程<br/>pattern×对端跑到终态"]
+        tstore2["tasks/store.py<br/>TaskStore(tasks 表<br/>同库独立连接)"]
+    end
+    main --> tplapi
+    main --> taskapi
+    tplapi --> tval
+    tplapi --> tcomp
+    tplapi --> tplstore
+    tcomp --> preg
+    taskapi --> tengine
+    tengine --> chat
+    tengine --> tstore2
+    kbs["database/knowledge_store.py<br/>(SQLite 知识库<br/>scope 隔离)"]
     kbs -.-> tools
     kbs -.-> tools
     caagent -.-> preg
@@ -141,6 +159,29 @@ flowchart TB
   metadata 回标 intent 计数，达上限切拒绝节点走 FixedNLG 固定话术，零 LLM）。
   ROUTE 轮末回 root 与原实现"每条消息独立检测"同构；议价设置经
   `ctx.metadata["bargain_settings"]` 注入（账号级配置入口）
+- **话术模版（declarative dialogue template，`templates/`）**：声明式
+  pattern JSON 的动态注册链路——validator（collect-all 三层：schema/结构/引用，
+  全量 errors+warnings 带 JSON 路径；镜像 Pattern 构造 fail-fast 检查并前移
+  为收集式，零内核改动）→ compiler（JSON→Pattern/Module/Node；
+  `counterpart_hint` 等元数据挂 Pattern 属性）→ 现有 PatternRegistry.register
+  （同 code 原生覆盖）→ `data/templates/{code}.json` 原子落盘（canonical
+  sha256，子 skill hash 对齐基准）+ 启动重放（坏文件跳过不阻断）。
+  表达力边界：stage 实例 / messages_builder / agent_hooks 不可表达（出现即
+  剔除告警）——需要代码级定制手写 pattern 文件。防护：code 撞内置 pattern
+  拒绝（BUILTIN_CONFLICT）；use_tools 未注册=error、ACL 未授予本
+  pattern=warning（工具注册默认全拒绝）
+- **自主任务引擎（TaskEngine，`tasks/`）**：`POST /api/v1/tasks`
+  fire-and-forget——每任务一条守护线程（仓库首个后台线程）：
+  kickoff → `chat_turn`（LLM 慢调用锁外执行 + 轮末 save_snapshot +
+  touch 防 TTL 误逐出，复刻 `_run_chat_turn_core` 纪律）→ 终态检测
+  （FSM 的 `conversation_end` action，或 runner 自查当前模块/节点的
+  `is_end`——补齐 Agent 型收尾模块的运行时信号）→ 对端（scripted
+  脚本式 / llm role_prompt 扮演，channel 枚举预留）产下一条 query →
+  循环至终态 / max_turns / timeout / 对端耗尽 / 异常。结果快照
+  `{finish_reason, end_module_code, filled_slots, turn_count, messages}`
+  （语义后置判断留调用方）；轮询运行中带 current_module/最近消息。
+  TaskStore 与 sessions 同库文件的独立连接（WAL 多连接），仅在创建与
+  终态两个时刻写库；重启遗留的 pending/running 任务改判 failed
 
 ## 公共契约（改动需走内核流程）
 
@@ -164,10 +205,19 @@ flowchart TB
 | `maybe_compress(session, store)` | `chat/compression.py` | 历史压缩触发入口（chat_turn 在 R1 后、add user 前调用）：估算 token 超阈值 → 旧消息 LLM 摘要成 summary 行 + retain 最近 N 条；配置 `session_compress_token_threshold`（默认 6000，0 关）/ `session_compress_retain_count`（默认 12）；摘要失败/DB 不齐绝不删历史 |
 | `KnowledgeStore` | `database/knowledge_store.py` | 知识库（商品/客服知识）连接持有者：scope 隔离（`{channel}:{account_id}`）、jieba 分词 LIKE 检索、`format_result` 消毒（untrusted 包裹，提示注入防御边界）；`get_knowledge_store()` 懒持有，main.py lifespan 释放；路径配置 `knowledge_db_path`（缺省 `data/knowledge.db`）。存储定义（表 DDL / 未来 ES 等 schema）统一放 `database/` 路径。**已知债务**：工具的 `account_id` 是 LLM 参数（从系统提示「任务信息」抄写）而非可信注入，真实渠道接入时需演进为 dispatch 侧身份注入 |
 | `ChannelSpec` 协议 + `build_channel_router(spec, ops)` | `channel/base.py` `channel/webhooks.py` | 外部消息源适配的唯一形态：渠道声明差异 + 通用 handler 共性流程；`registry.register()` 自注册（AST 发现），main.py `discover_builtin_channels()` + `build_channel_routers(EngineOps(...))` 接线 |
+| `validate_template(raw, ...)` / `compile_template(tpl)` | `templates/validator.py` `templates/compiler.py` | 声明式模版的校验（collect-all 三层，返回带 JSON 路径的 errors/warnings；registry 参数可注入）与编译（JSON→Pattern，元数据挂属性）；注册走现有 `PatternRegistry.register`（同 code 覆盖），不新增 registry |
+| `template_hash(tpl)` / `canonical_dumps(tpl)` | `templates/store.py` | 模版 canonical 序列化与 sha256（`json.dumps(sort_keys, ensure_ascii=False, indent=2)`）——客户端（trigger_task.py）用同一算法对齐本地副本 |
+| `TaskEngine.start(...)` / `get(task_id)` | `tasks/engine.py` | 自主任务触发（起线程即返 `(task_id, session_id, error)`）与轮询视图（运行中带中间过程、终态带结果快照、内存 miss 回退 TaskStore）；依赖 EngineDeps 由 main 注入（launch/touch/all_sessions/store getters），不反向 import main |
 
 ## 什么代码放哪
 
 - 新业务对话流程 → `dialogue/<name>_route.py`，模块级 `registry.register()`
+- 新领域话术模版（数据形态 pattern，无需写代码）→ `POST /api/v1/templates`
+  注册（或子 skill 的 `trigger_task.py ensure` 懒注册），落
+  `data/templates/{code}.json` 启动重放；只有需要 messages_builder /
+  agent_hooks 等代码级定制才手写 pattern 文件
+- 新的"与对端自主跑完多轮"任务 → 直接 `POST /api/v1/tasks`（现有
+  TaskEngine），不要另起后台线程机制
 - 新工具 → `tools/<name>_tool.py`，自动被 AST 发现；工具需要持久化存储时在 `database/` 下建 store 模块（照 `knowledge_store.py` idiom：原生 sqlite3 + 锁 + WAL，scope 隔离，输出过 `_clean_untrusted` 消毒），工具层只消费不定义存储
 - 知识库填充演示数据 → `.venv/bin/python cli.py knowledge-seed --scope="xianyu:<account_id>"`（幂等）
 - 新 LLM provider → `llm/<name>_provider.py`

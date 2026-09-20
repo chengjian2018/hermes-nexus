@@ -14,6 +14,8 @@
 - **偏题澄清（clarify）**：可按模块开关，检测用户偏题时主动澄清而非硬答
 - **统一阶段（unified）**：单次 LLM 调用 + structured output 一次产出回复/转移/槽位，每轮 2 次调用降为 1 次
 - **四级注册中心**：pattern / tool / llm provider / channel，模块级 `registry.register()` + AST 自动发现，无需改框架代码即可接入
+- **话术模版动态注册**：声明式 pattern JSON（FSM/Agent/混排）经 collect-all 三层校验（全量错误带 JSON 路径）编译注册进现有 registry，同 code 覆盖、落盘重放、无需重启；配 SIG 元 skill（`interactive-task-skill-generator/`）实现"调研领域→生成模版→生成子 skill"链路
+- **自主任务引擎**：`POST /api/v1/tasks` 触发 pattern 与 mock 对端（scripted 脚本 / llm 角色扮演）多轮交互直到终态，fire-and-forget + 轮询取结果快照
 - **多渠道接入（Channel）**：声明式 `ChannelSpec` + 通用 webhook handler，内置闲鱼（xianyu）适配
 - **会话治理与持久化**：内存治理（TTL 过期 + LRU 逐出）+ SQLite 审计流水（write-through，支持重启恢复）
 - **调试 CLI**：交互 REPL、单问单答、方向键菜单选择 pattern/LLM、verbose 调试输出
@@ -63,17 +65,24 @@ pattern_llm: {}           # pattern/module/node 级覆盖，留空全走默认
 
 ```bash
 export DASHSCOPE_API_KEY=sk-xxx
-.venv/bin/python main.py          # 或 uvicorn main:app
+.venv/bin/python main.py          # 绑定 127.0.0.1:8000（本机 mock 服务，无鉴权设计）
+                                  # 或 uvicorn main:app --host 127.0.0.1
 ```
 
 主要接口：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/api/v1/health` | 探活 + 已注册 pattern 清单 |
 | POST | `/api/v1/launch` | 创建会话 |
-| POST | `/api/v1/chat` | 对话轮次 |
+| POST | `/api/v1/chat` | 对话轮次（同步） |
 | GET | `/api/v1/sessions` | 会话列表（审计） |
 | GET | `/api/v1/sessions/{id}/messages` | 会话消息流水 |
+| POST | `/api/v1/templates/validate` | 话术模版只校验不注册（全量 errors/warnings） |
+| POST | `/api/v1/templates` | 注册话术模版（校验→编译→动态注册→落盘，同 code 覆盖） |
+| GET | `/api/v1/templates/{code}` | 模版查询（template/builtin 来源 + 内容 hash） |
+| POST | `/api/v1/tasks` | 触发自主任务（pattern 与 mock 对端跑到终态，返回 task_id） |
+| GET | `/api/v1/tasks/{task_id}` | 轮询任务（运行中带中间过程，终态带结果快照） |
 
 外部渠道 webhook（如闲鱼）由 channel registry 自动挂载，见 `channel/`。
 
@@ -107,10 +116,13 @@ stages/                  管线 stage 实现（框架扩展层）
   clarify/               偏题澄清（rule + prompts + stage）
 llm/                     Provider 注册中心 + OpenAICompatible 实现
 tools/                   工具注册中心 + 内置工具（calculator/weather/knowledge）
+templates/               话术模版链路：schema/validator/compiler/store + API 路由（声明式 pattern JSON → 动态注册）
+tasks/                   自主任务链路：TaskEngine（后台跑 pattern×对端）+ TaskStore + API 路由
 channel/                 外部消息渠道适配（ChannelSpec + 通用 handler + 闲鱼）
 augmentation/            输入增强（时间增强等）
 config/                  配置加载 + local_config.yaml（gitignored）
 database/                存储定义（SQLite 知识库 knowledge_store，scope 隔离）
+interactive-task-skill-generator/   元 skill：调研领域→生成话术模版→生成子 skill（skill 侧资料，不参与服务运行）
 tests/                   全离线测试（fake_provider 打桩 LLM）
 ```
 
@@ -121,6 +133,7 @@ tests/                   全离线测试（fake_provider 打桩 LLM）
 一切新能力走注册机制，框架代码零改动：
 
 - **新对话流程** → `dialogue/<name>_route.py`，模块级 `registry.register()`
+- **新领域话术模版**（数据形态，不写代码）→ `POST /api/v1/templates` 注册声明式 pattern JSON（蓝本见 `interactive-task-skill-generator/references/pattern-template-example.json`）
 - **新工具** → `tools/<name>_tool.py`，AST 自动发现
 - **新 LLM Provider** → `llm/<name>_provider.py`
 - **新消息渠道** → `channel/<name>.py`，实现 `ChannelSpec` 并注册

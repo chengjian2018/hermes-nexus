@@ -112,7 +112,10 @@ flowchart TB
   ROUTE 与 FSM 默认同形，菜单节点推进/跳转检测由 chat 层在 nlu 部件后做）
 - **PipelineStage**：可插拔管线步骤，`execute(ctx) -> ctx`；ctx 即 `DialogueContext` 全程数据载体
 - **统一阶段（unified.py）**：单次调用 + structured output 的 NLU+NLG 合一形态——一次 LLM 调用产出 `{"reply","next_node","slots"}`，拆写 `ctx.nlu_result`/`ctx.nlg_result`；`next_node` 由代码按合法转移边硬校验（开启 `enable_clarify` 的模块放行 `"clarify"`，ClarifyStage 在 generate 展开的 nlu/nlg 部件之间执行）。module 级注入（`generate=FSMUnifiedNLU()/RouteUnifiedNLU()`，generate 单 stage 形态，nlu 部件整体执行、nlg 部件 no-op），替换默认两阶段（每轮 2 次调用 → 1 次；澄清轮 2 次，与两阶段+澄清持平）
-- **Session**：持有 `cxt`（DialogueContext）；每轮更新 `user_query`，轮末回写状态
+- **Session**：持有 `cxt`（DialogueContext）；每轮更新 `user_query`，轮末回写状态。
+  `turn_lock` 串行化同 session 的并发轮次（渠道重发/客户端连发/任务与人工重叠
+  时轮次状态不交错；锁随会话对象生灭）。`launch_epoch` 为 DB 代际标记
+  （create/恢复时捕获），是 SessionStore 跨代写入守卫的依据
 - **chat 编排器（chat/chat.py）**：`chat()` 兼容入口（返回 str）/ `chat_turn()` 全量入口
   （返回 `ChatResult`：text + actions）。职责收窄为轮次编排：session 定位 → lifecycle
   轮首重置 → 定位入口模块 → 同轮 hop 循环（按 AGENT/FSM/ROUTE 分派单模块处理，
@@ -136,7 +139,9 @@ flowchart TB
 - **SessionStore**：SQLite 消息事实源（`chat/store.py`）。消息逐条 write-through：
   `attach(session)` 挂接 `cxt.message_sink` → `add_message` 即时落库（中途 crash
   不丢轮内消息；sink 异常吞掉不阻断对话）；轮末 `save_snapshot` 只回写 sessions
-  状态快照。tool 轨迹不占表列：assistant 工具轮 content 为 JSON 载荷
+  状态快照。**跨代写入守卫**：写入侧（append_message/save_snapshot/replace_history）
+  校验 `session.launch_epoch` 与当前行代际，旧代在途轮的消息/快照/压缩一律丢弃或
+  拒绝——会话被逐出重发起后，旧轮不再污染新代。tool 轨迹不占表列：assistant 工具轮 content 为 JSON 载荷
   （`encode_tool_call_content`）、tool 行 id 在 metadata（零表结构变更，存量库直开）；
   `replace_history` 为压缩重排原语（对齐校验 + summary 行置顶 + retained 重插）。
   重启恢复/审计查询同前；治理仍在内存
@@ -191,7 +196,9 @@ flowchart TB
   （FSM 的 `conversation_end` action，或 runner 自查当前模块/节点的
   `is_end`——补齐 Agent 型收尾模块的运行时信号）→ 对端（scripted
   脚本式 / llm role_prompt 扮演，channel 枚举预留）产下一条 query →
-  循环至终态 / max_turns / timeout / 对端耗尽 / 异常。结果快照
+  循环至终态 / max_turns / timeout / 对端耗尽 / 异常；**循环体整体兜底**——对端
+  LLM 失败等任何未预期异常直接落 `failed` 终态（内存 + TaskStore 双写），守护
+  线程不会带着 running 状态死掉。结果快照
   `{finish_reason, end_module_code, filled_slots, turn_count, messages}`
   （语义后置判断留调用方）；轮询运行中带 current_module/最近消息。
   TaskStore 与 sessions 同库文件的独立连接（WAL 多连接），仅在创建与
@@ -206,11 +213,11 @@ flowchart TB
 | `DialogueContext` 字段 | `dialogue/base.py` | stage 间数据交换全部经由 ctx，不另开通道。history 为 `SessionMessage`（role/content/stage/metadata；role 含 summary 压缩行）。tool 轨迹载荷：assistant 工具轮 content 为 `{"content", "tool_calls"}` JSON（`encode_tool_call_content`/`decode_tool_call_content`）、tool 行 `metadata["tool_call_id"]`；`turn_history_start` 由 begin_turn 快照（三段式构建的切分依据）；`message_sink` 由 SessionStore.attach 注入（add_message 逐条 write-through，异常吞掉） |
 | `ModuleJumpEvent` | `dialogue/base.py` | 模块跳转事件（target_module_code/reason/source）：stage 循环检测 / agent transfer 写入 `cxt.actions`，chat 层 hop 循环消费重路由；`to_dict()` 为观测形态 |
 | `registry.register()` 自注册 | `dialogue/register.py` `tools/register.py` `llm/register.py` | 应用层接入框架的唯一方式（AST 扫描发现） |
-| `build_provider(llm_config)` | `llm/resolve.py` | 所有 LLM 调用的统一入口 |
+| `build_provider(llm_config)` | `llm/resolve.py` | 所有 LLM 调用的统一入口。OpenAICompatibleProvider 重试策略按错误分类：429/5xx/网络错误线性退避重试（`max_retries`），401/400/404 等永久性 4xx 快速失败并携带响应体（不可重试的错误不烧重试预算） |
 | `get_llm_config(pattern_code, module_code, node_code, override)` | `config/config.py` | LLM 配置解析入口：`llm_providers` 连接层 ⊕ `llm_default`/`pattern_llm` 三层编排；`ctx.metadata["llm_override"]`（CLI 手动选择）最高优先级；chat 层每轮按当前位置刷新（R1-R4） |
 | `run_agent(session, module, llm_config)` | `chat/loop.py` | Agent 模块对话循环入口（返回 TurnResult）；transfer 命中时事件写入 `cxt.actions`、reply 为空；`conversation()` 为兼容 wrapper。工具派发经 `_dispatch_tool_calls`：P4 改写 → **主流程最终校验**（最终 name ∉ own+lent 可用集合一律不执行，tool 行回填带可用清单的错误信息供模型自纠——顺带封堵 dispatch 只查注册不查 ACL 的旁路）→ 执行 → P5 改写；改写后实况三处一致（in-loop messages / history 载荷 / tool 行），`tool_call_id` 永不改，tool 行 metadata 审计 `rewritten/original_call/original_result`，合成行标 `synthetic=True` |
 | `pattern/module.agent_hooks` + dispatcher | `chat/agent_hooks.py` | agent loop 多点叠加 hooks：七个点位（on_agent_start 注入 system prompt 片段、on_llm_call/on_llm_response/on_transfer/on_agent_end 观察、on_tool_call/on_tool_result 变更）；`resolve_agent_hooks`（module 声明整体替换 pattern，非法配置降级跳过）；hook 异常吞掉记日志回退原值。声明 `{"点位": [hook,...]}`。边界：改 messages（含 system 行）归 `messages_builder`（module > pattern 两级），hook 只读；hook 无③控制权（不能拦截/丢弃调用/制造移交）。P4 改写守卫：name 须 ∈ 本轮可用集且不带 `transfer_to_` 前缀（transfer 判定先行不可改写）；P1 片段经 `extra_blocks` 送达 builder（叠加不因单点替换失效） |
-| `chat_turn(query, session_id, all_sessions, agent_runner=None, store=None) -> ChatResult` | `chat/chat.py` | 全量轮次入口：text + actions；`chat()` 为兼容入口（等价 `.text`）。`store` 供历史压缩消费（None 跳过）；消息落库由 launch/恢复时 attach 的 message_sink 完成 |
+| `chat_turn(query, session_id, all_sessions, agent_runner=None, store=None) -> ChatResult` | `chat/chat.py` | 全量轮次入口：text + actions；`chat()` 为兼容入口（等价 `.text`）。**入口即持有 `session.turn_lock` 至轮末**（同 session 并发轮次串行化）；处理异常被捕获并转为固定脱敏文案（内部异常细节只进日志与 `cxt.metadata["turn_error"]`，不进对外回复）。`store` 供历史压缩消费（None 跳过）；消息落库由 launch/恢复时 attach 的 message_sink 完成 |
 | `AgentRunner.run(session, module, llm_config, force_close)` | `chat/agents.py` | AGENT 后端插件协议（默认 `LoopAgentRunner` 委托 loop.run_agent）；经 chat 入口可选参数注入 |
 | `build_agent_messages(module, cxt, pattern=None, extra_blocks=None)` | `chat/messages.py` | AGENT 模块 LLM messages 一体化构建入口：`messages_builder` 两级声明（module 覆写 pattern > 默认），契约 `(module, cxt, extra_blocks) -> messages`——**system 行归 builder 组装**（对齐 Customer-Agent MessageBuilder 全权形态；`build_system_prompt(module, cxt, extra_blocks)` 为可复用助手：四块结构 + hooks 扩展块）；`extra_blocks` 为 on_agent_start 片段，契约要求 builder 包含；force_close 收尾后缀由 run_agent 在 builder 返回后框架侧强制（任何 builder 不可破坏）；未设/不可调用（告警）降级默认。自定义 builder 遵守不可信数据纪律：外部文本不写入 system 角色 |
 | `default_build_messages` 三段式 + 回放守卫 | `chat/messages.py` | `build_system_prompt` 的 system 行 + 跨轮历史（`history[:turn_history_start]` 守卫回放）+ 显式 `cxt.user_query` + 本轮 hop 内行（`history[start+1:]`，transfer 移交后接手方可见移交方活动）。守卫：assistant(tool_calls) 与后续 tool 行 id 精确配对才协议化回放，断裂整段降级纯文本；孤儿 tool 行 / summary 行 → user 角色 untrusted 包裹。**直接调用者需先 begin_turn 或手动设 turn_history_start** |

@@ -545,15 +545,32 @@ def chat_turn(
     persistence is done per message by the message_sink attached at
     launch/restore time and does not go through this parameter.
     """
-    # ------------------------------------------------------------------
-    # 1. Locate the session; start-of-turn reset (user_query overwrite +
-    #    per-turn fields zeroed — exactly once, before hopping)
-    # ------------------------------------------------------------------
     session = all_sessions.get(session_id)
     if session is None:
         logger.warning("会话不存在: %s", session_id)
         return ChatResult(text="会话不存在，请先发起对话任务")
 
+    # Serialize turns on the same session: begin_turn resets, history writes
+    # and end_turn appends of one turn must never interleave with another
+    # (channel redelivery / client double-send / task-vs-manual overlap).
+    # The session is fetched before the lock — a mid-wait eviction keeps
+    # this turn runnable on the object, same tolerance as main's
+    # end-of-turn snapshot path.
+    with session.turn_lock:
+        return _chat_turn_locked(query, session_id, session, store)
+
+
+def _chat_turn_locked(
+        query: str,
+        session_id: str,
+        session: Session,
+        store: Optional["SessionStore"] = None,
+) -> ChatResult:
+    """Lock-held body of chat_turn (assumes session.turn_lock is held)."""
+    # ------------------------------------------------------------------
+    # 1. Start-of-turn reset (user_query overwrite + per-turn fields
+    #    zeroed — exactly once, before hopping)
+    # ------------------------------------------------------------------
     _lifecycle.begin_turn(session.cxt, query)
 
     pattern = session.pattern
@@ -585,8 +602,10 @@ def chat_turn(
     try:
         _refresh_llm_config(session)
     except Exception as e:
+        # Fixed user-facing text: the raw error (urls, provider internals)
+        # reaches external channel users — details stay in the server log
         logger.error("加载 LLM 配置失败: %s", e)
-        return ChatResult(text=f"LLM 配置加载失败: {e}")
+        return ChatResult(text="LLM 配置加载失败，请检查服务配置")
 
     # History compression (silently skipped when the store is disabled /
     # threshold is 0 / too few messages; summarizes with the llm_config R1
@@ -631,7 +650,12 @@ def chat_turn(
             response = result.reply or ""
     except Exception as e:
         logger.exception("对话处理异常: session=%s", session_id)
-        response = f"对话处理异常: {e}"
+        # Sanitized user-facing text: the raw exception (provider urls,
+        # internal error details) must not reach external channel users via
+        # the reply; full traceback lives in the server log, the short
+        # marker on cxt.metadata keeps the failure observable in-process
+        session.cxt.metadata["turn_error"] = repr(e)
+        response = "对话处理异常，请稍后重试"
 
     # ------------------------------------------------------------------
     # 4. End of turn: append the assistant message to history

@@ -91,7 +91,9 @@ def test_create_session_keeps_old_trail(tmp_path):
 
 
 def test_write_through_writes_current_epoch(tmp_path):
-    """After re-launch: new messages carry the current epoch=1, old messages epoch=0."""
+    """After re-launch (new session object): the new generation's writes carry
+    epoch=1; an in-flight write from the OLD object is dropped (generation
+    guard) instead of landing in the new generation."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
@@ -99,15 +101,41 @@ def test_write_through_writes_current_epoch(tmp_path):
     store.attach(session)
     session.cxt.add_message("user", "第一代", stage="chat")
 
-    store.create_session(make_session())  # re-launch, epoch=1
-    session.cxt.add_message("user", "第二代", stage="chat")
+    relaunched = make_session()
+    store.create_session(relaunched)  # re-launch, epoch=1 (new object captures it)
+    store.attach(relaunched)
+    relaunched.cxt.add_message("user", "新代", stage="chat")
+    session.cxt.add_message("user", "旧代在途", stage="chat")  # 旧对象：跨代丢弃
     store.close()
 
     msgs = fetch_all(db, "SELECT content, launch_epoch FROM messages ORDER BY id")
     assert [(m["content"], m["launch_epoch"]) for m in msgs] == [
         ("第一代", 0),
-        ("第二代", 1),
+        ("新代", 1),
     ]
+
+
+def test_snapshot_of_old_generation_does_not_overwrite_relaunch(tmp_path):
+    """An in-flight turn of the old generation must not overwrite the relaunched
+    session's state row (epoch-guarded UPDATE)."""
+    db = str(tmp_path / "t.db")
+    store = SessionStore(db)
+    session = make_session()
+    store.create_session(session)
+
+    relaunched = make_session()
+    relaunched.cxt.current_module_code = "new_module"
+    store.create_session(relaunched)  # epoch=1
+
+    # 旧对象轮末快照：captured epoch=0，UPDATE 命中 0 行被丢弃
+    session.cxt.current_module_code = "stale_module"
+    store.save_snapshot(session)
+    # 新对象快照正常写回
+    store.save_snapshot(relaunched)
+    store.close()
+
+    row = fetch_one(db, "SELECT current_module_code FROM sessions WHERE session_id = 's1'")
+    assert row["current_module_code"] == "new_module"
 
 
 def test_load_active_sessions_restores_current_epoch_only(tmp_path):
@@ -119,8 +147,11 @@ def test_load_active_sessions_restores_current_epoch_only(tmp_path):
     store.attach(session)
     session.cxt.add_message("user", "旧代消息", stage="chat")
 
-    store.create_session(make_session("alive"))  # epoch=1
-    session.cxt.add_message("user", "当代消息", stage="chat")
+    relaunched = make_session("alive")
+    store.create_session(relaunched)  # epoch=1
+    store.attach(relaunched)
+    relaunched.cxt.add_message("user", "当代消息", stage="chat")
+    session.cxt.add_message("user", "旧代迟到", stage="chat")  # 跨代丢弃
 
     restored = store.load_active_sessions(ttl_seconds=3600)
     store.close()
@@ -137,8 +168,10 @@ def test_get_messages_includes_all_epochs(tmp_path):
     store.create_session(session)
     store.attach(session)
     session.cxt.add_message("user", "第一代", stage="chat")
-    store.create_session(make_session())  # epoch=1
-    session.cxt.add_message("user", "第二代", stage="chat")
+    relaunched = make_session()
+    store.create_session(relaunched)  # epoch=1
+    store.attach(relaunched)
+    relaunched.cxt.add_message("user", "第二代", stage="chat")
 
     msgs = store.get_messages("s1")
     store.close()

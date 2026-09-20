@@ -254,6 +254,9 @@ def test_mid_turn_failure_user_row_already_persisted(
     # The chat layer swallows the exception and turns it into error text (HTTP 200 + status True); the failure path is persisted too
     assert body["status"] is True
     assert "对话处理异常" in body["data"]["response"]
+    # 脱敏：内部异常细节（异常类型/消息）不再进入对外回复
+    assert "llm down mid-turn" not in body["data"]["response"]
+    assert "RuntimeError" not in body["data"]["response"]
 
     msgs = store.get_messages("crash-mid")
     roles = [m["role"] for m in msgs]

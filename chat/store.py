@@ -91,6 +91,11 @@ class SessionStore:
                 (session.session_id,),
             ).fetchone()
             epoch = (row["launch_epoch"] + 1) if row is not None else 0
+            # Capture the generation on the session object: every later
+            # write from this object is validated against it (in-flight
+            # turns of an evicted, re-launched session must not pollute
+            # the new generation)
+            session.launch_epoch = epoch
             self._conn.execute(
                 """INSERT OR REPLACE INTO sessions
                    (session_id, pattern_code, launch_epoch, request_id, task_info,
@@ -131,26 +136,39 @@ class SessionStore:
         """Write back the end-of-turn sessions state snapshot
         (module/node/slots/last-active time).
 
+        The UPDATE is generation-guarded (``launch_epoch`` captured at
+        create/restore time): an in-flight turn of an evicted, re-launched
+        session no longer overwrites the new generation's state row.
+
         Message appending has moved to ``append_message`` (per-message
         write-through once attached); this method no longer touches the
         messages table — one end-of-turn transaction to write back state.
         """
         now = time.time()
         filled_slots = json.dumps(session.cxt.filled_slots or {}, ensure_ascii=False)
+        captured = session.launch_epoch
         with self._lock, self._conn:
-            self._conn.execute(
+            cur = self._conn.execute(
                 """UPDATE sessions
                    SET current_module_code = ?, current_node_code = ?,
                        filled_slots = ?, last_active_at = ?
-                   WHERE session_id = ?""",
+                   WHERE session_id = ?
+                     AND (? IS NULL OR launch_epoch = ?)""",
                 (
                     session.cxt.current_module_code,
                     session.cxt.current_node_code,
                     filled_slots,
                     now,
                     session.session_id,
+                    captured,
+                    captured,
                 ),
             )
+            if captured is not None and cur.rowcount == 0:
+                logger.warning(
+                    "丢弃跨代状态快照: session=%s captured_epoch=%s（会话已被重新发起）",
+                    session.session_id, captured,
+                )
 
     # ------------------------------------------------------------------
     # Per-message write-through (DB is the source of truth) + compression primitives
@@ -168,13 +186,20 @@ class SessionStore:
         """Persist a single message immediately (write side of message_sink,
         triggered per add_message).
 
-        The epoch is looked up at write time (same idiom as save_turn): an
-        in-flight turn of a session evicted from memory and re-launched lands
-        in the new generation — same kind of deviation as the existing batch
-        write, not introduced here.
+        Cross-generation guard: the epoch captured at create/restore time is
+        compared against the current row — an in-flight turn of an evicted,
+        re-launched session is dropped with a warning instead of landing in
+        the new generation (no capture yet degrades to the write-time epoch).
         """
         with self._lock, self._conn:
             epoch = self._current_epoch(session.session_id)
+            captured = session.launch_epoch
+            if captured is not None and captured != epoch:
+                logger.warning(
+                    "丢弃跨代消息写入: session=%s captured_epoch=%s current_epoch=%s role=%s",
+                    session.session_id, captured, epoch, msg.role,
+                )
+                return
             self._conn.execute(
                 """INSERT INTO messages
                    (session_id, launch_epoch, role, content, stage, metadata, created_at)
@@ -231,6 +256,14 @@ class SessionStore:
         now = time.time()
         with self._lock, self._conn:
             epoch = self._current_epoch(session.session_id)
+            captured = session.launch_epoch
+            if captured is not None and captured != epoch:
+                # Cross-generation write: abandon compression (same
+                # conservative posture as the alignment mismatch below)
+                raise RuntimeError(
+                    f"跨代会话放弃压缩: session={session.session_id}"
+                    f" captured_epoch={captured} current_epoch={epoch}"
+                )
             count = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM messages"
                 " WHERE session_id = ? AND launch_epoch = ?",
@@ -295,6 +328,9 @@ class SessionStore:
                     session_id=row["session_id"],
                     pattern_code=row["pattern_code"],
                 )
+                # Capture the restored generation so the pollution guard
+                # applies to restored sessions as well
+                session.launch_epoch = row["launch_epoch"]
                 session.task_info = json.loads(row["task_info"] or "{}")
                 session.cxt.metadata["task_info"] = session.task_info
                 session.cxt.metadata["request_id"] = row["request_id"]

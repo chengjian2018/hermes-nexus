@@ -85,7 +85,12 @@ def build_templates_router(
 
     @router.post("/api/v1/templates")
     def register_template_endpoint(payload: TemplatePayload, request: Request) -> ApiEnvelope:
-        """注册：校验（全量报错）→ 编译 → 动态注册（同 code 覆盖）→ 落盘。"""
+        """注册：校验（全量报错）→ 编译 → 落盘 → 动态注册（同 code 覆盖）。
+
+        落盘先于注册：save 失败（磁盘满/权限）时返回 500 且内存未生效，
+        不再出现"客户端以为失败重试、新会话却已用新版"的分裂；注册在
+        校验+编译成功后实际不会再失败，万一失败重启重放会补齐。
+        """
         logger.info("templates/register: request_id=%s client=%s",
                     payload.request_id, request.client.host if request.client else "?")
         store = _require_store()
@@ -101,12 +106,13 @@ def build_templates_router(
 
         from dialogue.register import registry as pattern_registry
         try:
-            pattern = pattern_registry.register(compile_template(payload.template))
+            compiled = compile_template(payload.template)
             digest = store.save(payload.template)
+            pattern = pattern_registry.register(compiled)
         except Exception as e:
-            logger.exception("模版编译/注册失败")
+            logger.exception("模版编译/落盘/注册失败")
             return ApiEnvelope(code="500", status=False,
-                               message=f"模版编译注册失败: {e}")
+                               message=f"模版注册失败: {e}")
         return ApiEnvelope(
             code="0", status=True,
             message=f"模版 '{pattern.code}' 注册成功（同 code 覆盖，新会话生效）",

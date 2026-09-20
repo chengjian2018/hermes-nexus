@@ -8,6 +8,7 @@ Register pattern: call ``registry.register(...)`` at module level so
 
 import json
 import logging
+import time
 from typing import Any, Dict, Generator, List, Optional
 
 import requests
@@ -114,6 +115,32 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                     "raw": data,
                 }
 
+            except requests.exceptions.HTTPError as e:
+                # Permanent client errors (401 bad key / 400 bad payload /
+                # 404 unknown model) never heal — fail fast with the
+                # response body attached, instead of burning retries and
+                # max_retries × timeout wall time. 429 and 5xx stay retried.
+                status = e.response.status_code if e.response is not None else None
+                body = ""
+                if e.response is not None:
+                    try:
+                        body = e.response.text[:500]
+                    except Exception:
+                        body = ""
+                if status is not None and 400 <= status < 500 and status != 429:
+                    raise RuntimeError(
+                        f"Provider '{self.code}' HTTP {status}"
+                        f"（不可重试的客户端错误）: {body or e}"
+                    ) from e
+                last_exc = e
+                logger.warning(
+                    "Provider '%s' attempt %d/%d failed: HTTP %s: %s",
+                    self.code, attempt + 1, self.max_retries + 1,
+                    status, body or e,
+                )
+                if attempt < self.max_retries:
+                    time.sleep(1 * (attempt + 1))  # linear backoff
+
             except requests.exceptions.RequestException as e:
                 last_exc = e
                 logger.warning(
@@ -124,7 +151,6 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                     e,
                 )
                 if attempt < self.max_retries:
-                    import time
                     time.sleep(1 * (attempt + 1))  # linear backoff
 
         raise RuntimeError(

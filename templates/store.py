@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,11 +38,19 @@ class TemplateStore:
         return self._dir / f"{code}.json"
 
     def save(self, tpl: Dict[str, Any]) -> str:
-        """原子写入模版文件，返回内容哈希。"""
+        """原子写入模版文件，返回内容哈希。
+
+        tmp 名带 uuid 后缀：sync 端点跑线程池，两个并发注册同 code 的
+        请求写同一个固定 tmp 名会互踩出坏 JSON（重启重放时静默消失）。
+        """
         path = self._path(tpl["code"])
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(canonical_dumps(tpl) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        tmp = path.with_suffix(f".json.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(canonical_dumps(tpl) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            # replace 成功时 tmp 已不存在；失败时清掉残留
+            tmp.unlink(missing_ok=True)
         return template_hash(tpl)
 
     def load(self, code: str) -> Optional[Dict[str, Any]]:

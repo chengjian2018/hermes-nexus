@@ -122,3 +122,14 @@ def test_list_templates(client, tpl_store):
     assert body["code"] == "0"
     codes = [t["code"] for t in body["data"]["templates"]]
     assert "tmp_api_demo" in codes
+
+
+def test_save_leaves_no_tmp_residue(tmp_path):
+    """落盘原子写：uuid 后缀 tmp 不残留、list_codes 不误收 tmp 文件。"""
+    s = TemplateStore(str(tmp_path / "tpl"))
+    s.save(make_template())
+    s.save(make_template())  # 二次覆盖同 code
+
+    files = sorted(p.name for p in (tmp_path / "tpl").iterdir())
+    assert files == ["tmp_api_demo.json"]
+    assert s.list_codes() == ["tmp_api_demo"]

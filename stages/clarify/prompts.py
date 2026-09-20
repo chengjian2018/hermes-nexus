@@ -1,18 +1,18 @@
-"""双轨澄清三套 prompt 模板。
+"""Three prompt templates for dual-track clarify.
 
-槽位词表（三套共用，`{__key__}` 占位，由 ClarifyStage 填充）：
-- query       : 用户原始输入（偏题问句）
-- topic       : NLU 澄清槽位 —— 主题
-- keywords    : NLU 澄清槽位 —— 关键词列表
-- recall_info : 知识库召回内容（fallback 轨道可能为空）
-- cur_node    : 当前节点（nlg facet：名称 + 描述，含待办）
-- history     : 对话历史
-- task_info   : 任务基础信息
+Slot vocabulary (shared by all three, `{__key__}` placeholders, filled by ClarifyStage):
+- query       : user's original input (off-topic question)
+- topic       : NLU clarify slot — subject
+- keywords    : NLU clarify slot — keyword list
+- recall_info : knowledge base recall content (may be empty on the fallback track)
+- cur_node    : current node (nlg facet: name + description, incl. todo)
+- history     : dialogue history
+- task_info   : basic task info
 
-拉回强度设计（详见 spec 第 6 节）：
-- KB       : 基于召回作答 + 轻拉回
-- FALLBACK : 承接 + 诚实告知 + 强拉回（重问当前节点待办）
-- MIXED    : 部分业务知识 + 问题响应，拉回强度居中
+Pull-back strength design (see spec section 6 for details):
+- KB       : answer based on recall + light pull-back
+- FALLBACK : acknowledgment + honest notice + strong pull-back (re-ask the current node's todo)
+- MIXED    : partial business knowledge + question-responsive reply, medium pull-back strength
 """
 
 CLARIFY_KB_PROMPT = """## 任务描述

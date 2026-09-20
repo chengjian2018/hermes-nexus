@@ -1,9 +1,10 @@
-"""ModuleJumpEvent 机制：stage 循环内检测 + hop 消费重路由。
+"""ModuleJumpEvent mechanism: detection inside the stage loop + hop-consumption rerouting.
 
-覆盖 chat.ModuleJumpChannel.detect_after_stage 的三类来源与容错：
-- NLU 直接输出 jump_module 字段（nlu_jump）
-- next_node 命中节点的 jump_module 配置（route_menu，先推进菜单 + R4）
-- 目标不存在 / 自环 → 忽略继续跑剩余 stages（LLM 幻觉容错）
+Covers the three sources and fault tolerance of chat.ModuleJumpChannel.detect_after_stage:
+- NLU directly outputs the jump_module field (nlu_jump)
+- next_node hits a node's jump_module config (route_menu, advancing the menu first + R4)
+- unknown target / self-loop -> ignored, remaining stages keep running
+  (LLM hallucination tolerance)
 """
 
 from unittest.mock import patch
@@ -17,11 +18,11 @@ from dialogue.pattern import Pattern
 
 
 # ============================================================================
-# 脚手架
+# Scaffolding
 # ============================================================================
 
 class _JumpNLU(PipelineStage):
-    """写 nlu_result 的桩 NLU：next_node / jump_module 由用例注入。"""
+    """Stub NLU that writes nlu_result: next_node / jump_module injected by the test case."""
 
     stage_name = "jump_nlu"
 
@@ -77,7 +78,7 @@ def _chat(sessions, sid, query):
 
 
 # ============================================================================
-# ModuleJumpChannel.detect_after_stage 单测（离线）
+# ModuleJumpChannel.detect_after_stage unit tests (offline)
 # ============================================================================
 
 class TestDetectJump:
@@ -88,7 +89,7 @@ class TestDetectJump:
         return ctx
 
     def test_nlu_jump_field_wins(self):
-        """nlu_result.jump_module 直接命中 → nlu_jump 事件。"""
+        """nlu_result.jump_module hits directly -> nlu_jump event."""
         ctx = self._ctx()
         ctx.module_map = {"r1": object(), "m1": object()}
         ctx.nlu_result = {"next_node": "", "jump_module": "m1",
@@ -100,7 +101,7 @@ class TestDetectJump:
         assert event.reason == "售后"
 
     def test_node_jump_module_after_advance(self):
-        """next_node 命中带 jump_module 的节点 → 先切节点再 route_menu 事件。"""
+        """next_node hits a node with jump_module -> switch the node first, then a route_menu event."""
         ctx = self._ctx()
         menu = BaseNode(node_code="menu_a", node_name="A", jump_module="m1")
         root = BaseNode(node_code="root", node_name="R", sub_nodes=["menu_a"])
@@ -114,24 +115,24 @@ class TestDetectJump:
         assert event is not None
         assert event.target_module_code == "m1"
         assert event.source == "route_menu"
-        assert ctx.current_node_code == "menu_a"  # 节点已推进
+        assert ctx.current_node_code == "menu_a"
 
     def test_self_jump_ignored(self):
-        """跳转目标为当前模块（自环）→ 忽略。"""
+        """Jump target is the current module (self-loop) -> ignored."""
         ctx = self._ctx()
         ctx.module_map = {"r1": object(), "m1": object()}
         ctx.nlu_result = {"next_node": "", "jump_module": "r1", "slots": {}}
         assert ModuleJumpChannel.detect_after_stage(ctx, _route_mod(), None) is None
 
     def test_unknown_target_ignored(self):
-        """目标不在 module_map（LLM 幻觉）→ 忽略。"""
+        """Target not in module_map (LLM hallucination) -> ignored."""
         ctx = self._ctx()
         ctx.module_map = {"r1": object()}
         ctx.nlu_result = {"next_node": "", "jump_module": "ghost", "slots": {}}
         assert ModuleJumpChannel.detect_after_stage(ctx, _route_mod(), None) is None
 
     def test_unchanged_nlu_result_skipped(self):
-        """nlu_result 未被本 stage 更新（同对象）→ 不检测（hop 续答防误检）。"""
+        """nlu_result not updated by this stage (same object) -> no detection (avoids false positives on hop continuation)."""
         ctx = self._ctx()
         ctx.module_map = {"r1": object(), "m1": object()}
         ctx.nlu_result = {"jump_module": "m1", "slots": {}}
@@ -146,12 +147,13 @@ def _route_mod():
 
 
 # ============================================================================
-# e2e：stage 循环中断 + hop 消费
+# e2e: stage-loop interruption + hop consumption
 # ============================================================================
 
 def test_nlu_jump_breaks_stages_and_reroutes_same_turn():
-    """NLU 输出 jump_module → 剩余 stages 中断（NLG 不跑）、源模块静默，
-    chat 层 hop 消费重路由到目标模块同轮续答。"""
+    """NLU outputs jump_module -> the remaining stages are interrupted (NLG does
+    not run), the source module stays silent, and the chat layer's hop
+    consumption reroutes to the target module to continue in the same turn."""
     menu = BaseNode(node_code="menu_a", node_name="菜单A")
     root = BaseNode(node_code="root", node_name="根", sub_nodes=["menu_a"],
                     generate={"nlu": _JumpNLU({"next_node": "",
@@ -197,23 +199,26 @@ def test_nlu_jump_breaks_stages_and_reroutes_same_turn():
         reply = _chat(sessions, "s1", "我要买车")
 
     assert reply == "已为您切换到目标模块"
-    assert "marker_nlg" not in ran          # 源模块 NLG 未执行（stages 中断）
-    assert ran == ["fsm_nlu", "target_nlg"]  # 目标模块同轮续答
+    assert "marker_nlg" not in ran
+    assert ran == ["fsm_nlu", "target_nlg"]
     assert sessions["s1"].cxt.current_module_code == "m1"
-    # 槽位随跳转合并（目标模块承接上下文）
+    # Slots are merged along with the jump (the target module takes over the context)
     assert sessions["s1"].cxt.filled_slots.get("brand") == "A"
 
 
 def test_jump_event_via_actions_snapshot_when_hops_exhausted():
-    """超跳数：第二轮 hop 的跳转事件被消费落到最后目标后 force_close 收尾。
+    """Over the hop limit: the second hop's jump event is consumed onto the last
+    target, then force_close wraps up.
 
-    FSM 不产生事件（检测仅 ROUTE），环路由 ROUTE 反复输出 jump_module
-    制造：r1 →(route_menu) m1（hop1 消费）→ 下一轮重新进 r1 →(nlu_jump)
-    m1（hop2 消费）→ 超限 force_close。
+    FSM produces no events (detection is ROUTE-only); the loop is created by
+    the ROUTE module repeatedly outputting jump_module: r1 ->(route_menu) m1
+    (consumed by hop1) -> the next turn re-enters r1 ->(nlu_jump) m1 (consumed
+    by hop2) -> over the limit, force_close.
     """
     from chat.chat import chat_turn
 
-    # root NLU 第一次跳 m1，再次进入 r1 时直接 jump_module 跳走（制造环）
+    # The root NLU jumps to m1 the first time; on re-entry to r1 it jumps
+    # straight via jump_module (creating the loop)
     class _LoopRouteNLU(PipelineStage):
         stage_name = "loop_route_nlu"
 
@@ -222,7 +227,8 @@ def test_jump_event_via_actions_snapshot_when_hops_exhausted():
 
         def execute(self, ctx):
             self.calls += 1
-            # 首次经菜单节点 route_menu，后续直接 nlu_jump（两种来源都覆盖）
+            # First time via the menu node (route_menu), afterwards directly
+            # via nlu_jump (covers both sources)
             if self.calls == 1:
                 ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
             else:
@@ -269,8 +275,10 @@ def test_jump_event_via_actions_snapshot_when_hops_exhausted():
     with patch("chat.loop.build_provider"):
         result = chat_turn("选A", "s1", sessions)
 
-    # force_close 落在最后目标 m1（FSM 轮不检测跳转，stages 跑完出回复）
+    # force_close lands on the last target m1 (FSM turns do not detect jumps;
+    # stages run to completion and produce the reply)
     assert result.text == "target 回复"
     assert sessions["s1"].cxt.current_module_code == "m1"
-    # 事件通道已清空（超跳 pending 消费后 force_close 不再产生事件）
+    # The event channel is empty (after the over-limit pending event is
+    # consumed, force_close produces no further events)
     assert not [a for a in result.actions if "module_jump" in a]

@@ -1,9 +1,11 @@
-"""Channel registry —— 第 4 个 registry，与 pattern/tool/llm 同构。
+"""Channel registry — the 4th registry, isomorphic with pattern/tool/llm.
 
-每个渠道文件模块级 ``registry.register(Spec())`` 自注册；AST 扫描自动
-发现并 import（包内走 importlib.import_module，包外目录——如测试 tmp——
-走 spec_from_file_location）。框架文件（base/register/webhooks）在排除
-清单里，不会被当渠道 import。
+Each channel module self-registers with a module-level
+``registry.register(Spec())``; the AST scan auto-discovers and imports them
+(in-package via importlib.import_module; out-of-package directories — e.g.
+test tmp dirs — via spec_from_file_location). Framework files
+(base/register/webhooks) are on the exclusion list and never imported as
+channels.
 """
 
 import ast
@@ -18,11 +20,11 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")  # 用在 URL 路径里：小写 snake/kebab
+_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")  # used in URL paths: lowercase snake/kebab
 
 
 def _is_registry_register_call(node: ast.AST) -> bool:
-    """True 当 *node* 是模块顶层 ``registry.register(...)`` 表达式。"""
+    """True when *node* is a module-top-level ``registry.register(...)`` expression."""
     if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
         return False
     func = node.value.func
@@ -35,7 +37,7 @@ def _is_registry_register_call(node: ast.AST) -> bool:
 
 
 def _module_registers_channel(module_path: Path) -> bool:
-    """True 当模块含模块级 registry.register() 调用（文本预过滤 + AST）。"""
+    """True when the module contains a module-level registry.register() call (text pre-filter + AST)."""
     try:
         source = module_path.read_text(encoding="utf-8")
     except OSError:
@@ -54,14 +56,15 @@ _CHANNEL_PKG = "channel"
 
 
 class ChannelRegistry:
-    """渠道注册表：name -> spec。register 时做结构校验，坏声明 import 期拦住。"""
+    """Channel registry: name -> spec. Structural validation happens at register
+    time, so bad declarations are stopped at import time."""
 
     def __init__(self):
         self._channels: dict = {}
         self._lock = threading.RLock()
 
     def register(self, spec: Any) -> Any:
-        """注册渠道 spec；name 非法/重名/钩子不可调用抛 ValueError。"""
+        """Register a channel spec; raises ValueError on an invalid/duplicate name or non-callable hooks."""
         name = getattr(spec, "name", None)
         if not isinstance(name, str) or not _NAME_RE.match(name):
             raise ValueError(f"channel name 非法（须匹配 {_NAME_RE.pattern}）: {name!r}")
@@ -89,11 +92,11 @@ class ChannelRegistry:
 
 
 def _import_channel_module(path: Path) -> Optional[str]:
-    """import 单个渠道文件，返回模块名；失败 warning 返回 None。
+    """Import a single channel file, returning the module name; on failure log a warning and return None.
 
-    包内文件走 import_module（可被重复 import 幂等）；包外（测试 tmp 目
-    录）走 spec_from_file_location，模块名用 ``_channel_ext_<stem>`` 防与
-    真模块撞名。
+    In-package files go through import_module (re-import stays idempotent);
+    out-of-package (test tmp dirs) go through spec_from_file_location, with
+    the module name ``_channel_ext_<stem>`` to avoid clashing with real modules.
     """
     try:
         if _CHANNEL_PKG + "." + path.stem in sys.modules or (
@@ -115,9 +118,10 @@ def _import_channel_module(path: Path) -> Optional[str]:
 
 
 def discover_builtin_channels(channels_dir: Optional[Path] = None) -> List[str]:
-    """扫描渠道目录，import 含模块级 registry.register() 的文件。
+    """Scan the channels directory and import files containing a module-level registry.register().
 
-    Returns: 成功 import 的模块名列表（import 失败的单文件 warning 跳过）。
+    Returns: list of successfully imported module names (a file that fails to
+    import is skipped with a warning).
     """
     channels_path = (
         Path(channels_dir) if channels_dir is not None

@@ -1,12 +1,14 @@
-"""会话历史压缩 —— token 超阈值时旧消息 LLM 摘要成 summary 行 + 保留最近 N 条。
+"""Session history compression — when the token estimate exceeds the threshold, old messages are LLM-summarized into a summary line + the most recent N messages are retained.
 
-借鉴 Customer-Agent SessionManager 的压缩设计，两处刻意不照抄的修正：
-- retain 边界向前吸附到 assistant(tool_calls) 配对 run 起点——按条数硬切
-  会把 tool 行切在界内、其 assistant 行切在界外，回放守卫整段降级
-  （Customer-Agent 的存量缺陷）
-- 摘要 LLM 调用任何异常 → 放弃压缩原样返回（铁律：摘要失败绝不删历史）
+Borrows the compression design of Customer-Agent SessionManager with two deliberate deviations:
+- the retain boundary snaps back to the start of the assistant(tool_calls) paired run — a hard
+  cut by count can leave a tool row inside the boundary with its assistant row outside, and the
+  replay guard then degrades the whole segment (a latent defect in Customer-Agent)
+- any exception from the summary LLM call → abandon compression and return history unchanged
+  (iron rule: a failed summary never deletes history)
 
-编排三方（LLM + store + cxt），故独立于 store（纯持久化层不耦合 LLM）。
+It orchestrates three parties (LLM + store + cxt), hence it lives apart from store (the pure
+persistence layer does not couple to the LLM).
 """
 
 import logging
@@ -25,16 +27,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 单条消息进摘要拼接的截断长度（防超长 tool 结果撑爆摘要请求）
+# Truncation length per message entering summary concatenation (prevents oversized tool results from blowing up the summary request)
 _SUMMARY_MSG_TRUNCATE = 200
 
 
 # ============================================================================
-# Token 估算（字符近似；无 tiktoken 依赖）
+# Token estimation (character approximation; no tiktoken dependency)
 # ============================================================================
 
 def _estimate_text(text: str) -> int:
-    """CJK×2 + 其他×0.25 的字符近似估算（Customer-Agent 降级公式）。"""
+    """Character-approximation estimate: CJK×2 + others×0.25 (the Customer-Agent fallback formula)."""
     if not text:
         return 0
     cjk = sum(1 for c in text if "一" <= c <= "鿿")
@@ -42,7 +44,7 @@ def _estimate_text(text: str) -> int:
 
 
 def estimate_tokens(history: List[SessionMessage]) -> int:
-    """消息列表总 token 估算：各条 content（含工具轮 JSON 载荷）+ 每条 4。"""
+    """Total token estimate of a message list: each message's content (including tool-turn JSON payloads) + 4 per message."""
     total = 0
     for msg in history:
         total += 4
@@ -53,21 +55,22 @@ def estimate_tokens(history: List[SessionMessage]) -> int:
 def should_compress(
     history: List[SessionMessage], threshold: int, retain_count: int
 ) -> bool:
-    """阈值 > 0 且估算超阈值且条数多到值得压（有旧消息可摘）。"""
+    """Threshold > 0, estimate over the threshold, and enough messages to be worth compressing (old messages exist to summarize)."""
     if threshold <= 0 or len(history) <= retain_count + 1:
         return False
     return estimate_tokens(history) > threshold
 
 
 # ============================================================================
-# 压缩执行
+# Compression execution
 # ============================================================================
 
 def _snap_to_pair_boundary(history: List[SessionMessage], split: int) -> int:
-    """split 向前吸附到 assistant(tool_calls) 配对 run 的起点。
+    """Snap split back onto the start of the assistant(tool_calls) paired run.
 
-    若 split 落在某 tool 行上（其 run 起点是前面的 assistant 工具轮），
-    把 split 回退到该 assistant 行之前——界外不留下配对残段。
+    If split lands on a tool row (whose run starts at the earlier assistant tool turn),
+    move split back to before that assistant row — no paired fragment is left outside
+    the boundary.
     """
     while 0 < split < len(history) and history[split].role == "tool":
         start = split - 1
@@ -82,9 +85,9 @@ def _snap_to_pair_boundary(history: List[SessionMessage], split: int) -> int:
 
 
 def _build_summary_input(history: List[SessionMessage], end_idx: int) -> str:
-    """旧消息拼接成摘要请求文本（role 标注 + 单条截断）。
+    """Concatenate the old messages into the summary request text (role annotation + per-message truncation).
 
-    assistant 工具轮 content 是 JSON 载荷：取内层文本 + 标注调用的工具名。
+    An assistant tool-turn content is a JSON payload: take the inner text + annotate the called tool names.
     """
     lines = []
     for msg in history[:end_idx]:
@@ -107,20 +110,21 @@ def compress_history(
     llm_config: Dict[str, Any],
     retain_count: int,
 ) -> bool:
-    """执行压缩：旧消息 LLM 摘要 → summary 行 + 保留最近条数。
+    """Execute compression: LLM-summarize the old messages → summary line + retain the most recent messages.
 
     Returns:
-        是否压缩成功。任何一步失败（DB 不齐 / LLM 异常）都返回 False 且
-        DB 与 cxt.history 原样未动。
+        Whether compression succeeded. Any failing step (DB mismatch / LLM error) returns False
+        with the DB and cxt.history left untouched.
     """
     cxt = session.cxt
     split = _snap_to_pair_boundary(
         cxt.history, max(0, len(cxt.history) - retain_count))
     if split <= 0:
-        return False  # 全部都在保留窗口内，无旧消息可摘
+        return False  # everything is inside the retention window; no old messages to summarize
 
-    # DB/内存对齐校验：write-through 下二者应一致；不齐（如 sink 曾故障）
-    # 绝不删——replace_history 内还会再校验一次（事务级兜底）
+    # DB/memory alignment check: under write-through the two should agree; if they do not
+    # (e.g. the sink once failed) never delete — replace_history re-validates inside the
+    # transaction (transaction-level fallback)
     try:
         db_history = store.get_history(session.session_id)
     except Exception:
@@ -133,7 +137,7 @@ def compress_history(
         )
         return False
 
-    # 摘要 LLM 调用（复用当前位置的 llm_config——R1 刚刷新）
+    # Summary LLM call (reuses the llm_config of the current position — just refreshed by R1)
     prompt = HISTORY_SUMMARY_PROMPT.replace(
         "{__msg_count__}", str(split)
     ).replace(
@@ -161,7 +165,7 @@ def compress_history(
         logger.warning("摘要为空，放弃压缩: session=%s", session.session_id)
         return False
 
-    # DB 重排（事务内：对齐校验 → 删当代全部 → summary 最前 + retained 重插）
+    # DB reshuffle (one transaction: alignment check → delete all rows of the current generation → summary first + reinsert retained)
     try:
         store.replace_history(session, summary, keep_idx=split)
     except Exception:
@@ -171,7 +175,7 @@ def compress_history(
         )
         return False
 
-    # 内存同步重建 + 轮内标记修正（不重设会导致 query 重复注入）
+    # Rebuild history in memory + fix the in-turn marker (not resetting it would inject the query twice)
     summary_msg = SessionMessage(
         role="summary", content=summary, stage="compress")
     cxt.history = [summary_msg] + list(cxt.history[split:])
@@ -184,10 +188,10 @@ def compress_history(
 
 
 def maybe_compress(session: "Session", store: "SessionStore") -> None:
-    """压缩触发入口（chat_turn 在 R1 之后、add user 之前调用）。
+    """Compression trigger entry (called by chat_turn after R1 and before adding the user message).
 
-    store None / 阈值 0 / 条数不足 → 静默跳过；失败仅记日志——压缩是
-    优化，绝不阻断对话。
+    store None / threshold 0 / too few messages → skip silently; failures are only logged —
+    compression is an optimization and must never block the dialogue.
     """
     if store is None:
         return

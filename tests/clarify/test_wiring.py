@@ -1,4 +1,4 @@
-"""框架 wiring 测试 —— 管线插入、NLG 跳过、槽位不合并、节点不动。"""
+"""Framework wiring tests — pipeline insertion, NLG skip, slots not merged, node unchanged."""
 
 import pytest
 
@@ -62,7 +62,8 @@ class TestBuildStages:
         names = [s.stage_name for s in
                  resolve_stage(GenerateSlot(), ctx, route, None)]
 
-        # ROUTE 与 FSM 默认同形：菜单节点推进/跳转检测由 chat 层在 nlu 部件后做
+        # ROUTE and FSM are the same shape by default: menu-node advance /
+        # jump detection is done by the chat layer after the nlu part
         assert names == ["generate_nlu_part", "generate_nlg_part"]
 
 
@@ -92,5 +93,5 @@ class TestTransitionGuard:
         ctx.metadata["clarify"] = {"triggered": True, "mode": "kb"}
         module = make_fsm_module(True)
         _handle_node_transition(ctx, module)
-        assert ctx.filled_slots == {}            # topic/keywords 未污染业务槽位
-        assert ctx.current_node_code == "n1"     # 节点不动
+        assert ctx.filled_slots == {}
+        assert ctx.current_node_code == "n1"

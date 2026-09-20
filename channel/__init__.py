@@ -1,12 +1,15 @@
-"""Channel 适配层 —— 外部消息源接入引擎的 endpoint 集合。
+"""Channel adapter layer — the endpoint collection through which external message sources reach the engine.
 
-每个渠道一个模块（如 ``xianyu.py``），实现 ChannelSpec 声明（载荷 schema、
-session 派生、task_info 映射、成功响应契约）并模块级 ``registry.register()``
-自注册；AST 自动发现（register.py），共性流程在 webhooks.py 通用 handler
-（token 校验/过期过滤/get-or-create/错误码，结构上不可绕过）。引擎操作由
-main.py 经 EngineOps 注入，channel 模块不感知会话治理与 LLM，可独立离线
-测试。
+One module per channel (e.g. ``xianyu.py``), implementing a ChannelSpec
+declaration (payload schema, session derivation, task_info mapping, success
+response contract) with module-level ``registry.register()`` self-registration;
+AST auto-discovery (register.py), with the common flow in the webhooks.py
+generic handler (token validation / staleness filtering / get-or-create /
+error codes — structurally impossible to bypass). Engine operations are
+injected by main.py via EngineOps; channel modules know nothing about session
+governance or the LLM and can be tested offline in isolation.
 
-新增渠道：``channel/<name>.py`` 实现 ChannelSpec + registry.register()，
-main.py 无需改动（自动发现 + 自动生成 router）。
+Adding a channel: implement ChannelSpec + registry.register() in
+``channel/<name>.py``; main.py needs no changes (auto-discovery + auto router
+generation).
 """

@@ -1,7 +1,7 @@
-"""偏题轮全链路集成测试 —— FakeProvider + 内存知识库。
+"""End-to-end integration test for the off-topic turn — FakeProvider + in-memory knowledge base.
 
-Pattern 为内联构建，节点 code/name 与 fake_provider 脚本约定保持一致
-（路由根节点 / menu_sales / 询问品牌 …）。
+The pattern is built inline; node codes/names follow the fake_provider script
+conventions (route root / menu_sales / buy_ask_brand ...).
 """
 
 import pytest
@@ -35,7 +35,7 @@ KB_DOCS = [
 
 @pytest.fixture()
 def pattern():
-    """内联 route + FSM pattern（ROUTE 路由 + 购车 FSM 子模块）。"""
+    """Inline route + FSM pattern (ROUTE routing + car-buying FSM submodule)."""
     return Pattern(
         code="clarify_demo",
         name="澄清集成测试 pattern",
@@ -110,7 +110,7 @@ def pattern():
 
 
 def test_off_topic_turn_routes_kb_and_keeps_node(pattern):
-    """偏题轮：kb 应答 + 拉回；节点不动、槽位不污染；下一轮恢复正常。"""
+    """Off-topic turn: kb answer + bring back on topic; node unchanged, slots unpolluted; the next turn recovers."""
     session = Session(session_id="it", pattern_code=pattern.code)
     session.pattern = pattern
     session.task_info = {}
@@ -119,7 +119,8 @@ def test_off_topic_turn_routes_kb_and_keeps_node(pattern):
     session.cxt.metadata["task_info"] = {}
     session.cxt.metadata["llm_override"] = fake_llm_config()
 
-    # 给购车 FSM 模块开启澄清（测试注入，不改 fixture 定义）
+    # Enable clarify on the car-buying FSM module (test injection, leaves the
+    # fixture definition untouched)
     buy = pattern.module_map["demo_buy"]
     buy.enable_clarify = True
     buy.clarify_stage = ClarifyStage(
@@ -133,27 +134,28 @@ def test_off_topic_turn_routes_kb_and_keeps_node(pattern):
 
     sessions = {"it": session}
 
-    # 第 1 轮：路由静默分发，buy FSM 首节点 buy_ask_brand 同轮消化该句，
-    # brand 槽位 = 整句 query，节点推进到 buy_ask_budget
+    # Round 1: route silently dispatches; the buy FSM first node buy_ask_brand
+    # digests the sentence in the same turn, brand slot = the whole query,
+    # node advances to buy_ask_budget
     r1 = chat_fn("我想买车", "it", sessions)
     assert session.cxt.current_module_code == "demo_buy"
     assert session.cxt.current_node_code == "buy_ask_budget"
     assert session.cxt.filled_slots.get("brand") == "我想买车"
-    assert "询问品牌" in r1  # FSMNLG 用转移前节点生成回复
+    assert "询问品牌" in r1  # FSMNLG generates the reply with the pre-transition node
 
-    # 第 2 轮：偏题（应询问预算时反问收费）
+    # Round 2: off-topic (asks about fees when budget should be asked)
     r3 = chat_fn("还要收别的钱吗", "it", sessions)
     clarify_info = session.cxt.metadata["clarify"]
     assert clarify_info["triggered"] is True
     assert clarify_info["mode"] == "kb"
-    assert "上牌费与服务费" in r3                    # kb 应答
-    assert "预算" in r3                              # 拉回主线
-    assert session.cxt.current_node_code == "buy_ask_budget"   # 节点不动
-    assert "topic" not in session.cxt.filled_slots   # 澄清槽位未污染
-    assert session.cxt.filled_slots.get("brand") == "我想买车"  # 业务槽位保留
+    assert "上牌费与服务费" in r3
+    assert "预算" in r3
+    assert session.cxt.current_node_code == "buy_ask_budget"
+    assert "topic" not in session.cxt.filled_slots
+    assert session.cxt.filled_slots.get("brand") == "我想买车"
 
-    # 第 3 轮：恢复正常（回答预算）
+    # Round 3: back to normal (answers the budget)
     r4 = chat_fn("20万左右", "it", sessions)
-    assert session.cxt.metadata["clarify"]["triggered"] is False   # 元数据已重置
+    assert session.cxt.metadata["clarify"]["triggered"] is False
     assert session.cxt.current_node_code == "buy_ask_city"
     assert session.cxt.filled_slots["budget"] == "20万左右"

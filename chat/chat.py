@@ -1,34 +1,44 @@
 """
-Dialogue processing — 轮次编排器（orchestrator）。
+Dialogue processing — the turn orchestrator.
 
-职责收窄为"一轮对话的编排"：session 定位 → cxt 轮次生命周期 → 同轮 hop
-循环 → 产出 ChatResult。单模块的处理按类型内联在本模块：
+Responsibility is narrowed to "orchestrating one turn": locate the session →
+cxt turn lifecycle → same-turn hop loop → produce a ChatResult. Per-module
+handling is inlined in this module by type:
 
-- AGENT → loop.run_agent（inject 直接答 / transfer 写 ModuleJumpEvent 返回）
-- FSM   → _run_fsm_pipeline（stages 执行 + next_node 跳转）
-- ROUTE → _run_route_pipeline（stages 执行 + 轮末重置 root）
+- AGENT → loop.run_agent (inject answers directly / transfer writes a
+  ModuleJumpEvent and returns)
+- FSM   → _run_fsm_pipeline (stages execution + next_node jump)
+- ROUTE → _run_route_pipeline (stages execution + end-of-turn reset to root)
 
-模块跳转统一走 ModuleJumpEvent（写 cxt.actions，定义在 dialogue/base.py），
-事件只由两个入口产生：
+Module jumps all go through ModuleJumpEvent (written to cxt.actions,
+defined in dialogue/base.py). Events originate from only two entry points:
 
-- ROUTE 跳到新模块：_run_stages 在每个 stage 执行后检测（仅 ROUTE 模块）——
-  NLU 输出的 jump_module 字段、推进后菜单节点配置的 jump_module。命中即
-  合并槽位、写 event、中断剩余 stages（源模块静默，不生成回复）。
-- AGENT transfer 工具调用：loop.run_agent 直接写 event 返回。
-- FSM 不产生事件：clarify 在循环内由 ClarifyStage 处理（覆写 nlg_result，
-  不出循环），节点跳转由轮末 _fsm_node_transition 处理。
-- 消费：chat_turn 的 hop 循环 _jumps.pop → _jumps.reroute（写
-  current_module_code、置空 current_node_code）→ 目标模块同轮续答；
-  超跳数 force_close 强制收尾。
-- 无邻接校验 / 回弹拒绝 / dispatch 记账——目标存在于 module_map 即合法，
-  边界淡化，agent 与 route 跳转同构。
+- ROUTE jumping to a new module: _run_stages detects after each stage
+  execution (ROUTE modules only) — the jump_module field output by NLU, or
+  the jump_module configured on the menu node after advancement. On a hit:
+  merge slots, write the event, abort the remaining stages (the source
+  module is suppressed and generates no reply).
+- AGENT transfer tool call: loop.run_agent writes the event directly and
+  returns.
+- FSM produces no events: clarify is handled inside the loop by
+  ClarifyStage (overwrites nlg_result without leaving the loop), and node
+  jumps are handled by the end-of-turn _fsm_node_transition.
+- Consumption: chat_turn's hop loop _jumps.pop → _jumps.reroute (writes
+  current_module_code, clears current_node_code) → the target module
+  continues the reply in the same turn; exceeding the hop budget forces a
+  force_close close-out.
+- No adjacency validation / bounce rejection / dispatch accounting — the
+  target existing in module_map is legal; boundaries are deliberately thin,
+  and agent and route jumps are isomorphic.
 
-cxt 字段生命周期（每轮重置 / 跨轮保留 / 增量更新）统一由
-context_lifecycle.TurnLifecycle 管理，本模块只在正确的时序点调用。
+The cxt field lifecycle (per-turn reset / cross-turn retention / incremental
+update) is managed exclusively by context_lifecycle.TurnLifecycle; this
+module only calls it at the right timing points.
 
-入口：
-- chat_turn() ：全量入口，返回 ChatResult（text + 预留 actions）
-- chat()      ：兼容入口（main.py / cli.py / 既有测试），等价 chat_turn().text
+Entries:
+- chat_turn() : full entry, returns ChatResult (text + reserved actions)
+- chat()      : compat entry (main.py / cli.py / existing tests),
+  equivalent to chat_turn().text
 """
 
 import logging
@@ -37,7 +47,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 from config.config import get_llm_config
 from chat.compression import maybe_compress
 from chat.context_lifecycle import TurnLifecycle
-from chat.loop import TurnResult, run_agent  # noqa: F401（兼容再导出）
+from chat.loop import TurnResult, run_agent  # noqa: F401 (compat re-export)
 from chat.response import ChatResult, build_chat_result
 from chat.session import Session
 from dialogue.base import ModuleJumpEvent
@@ -55,35 +65,39 @@ from dialogue.stage_slots import (
 
 logger = logging.getLogger(__name__)
 
-# cxt 字段生命周期唯一管理者（无状态，模块级复用）
+# Sole manager of the cxt field lifecycle (stateless, shared module-level instance)
 _lifecycle = TurnLifecycle()
 
 
 # ============================================================================
-# ModuleJumpEvent 通道（cxt.actions 是跳转事件的唯一载体）
+# ModuleJumpEvent channel (cxt.actions is the sole carrier of jump events)
 # ============================================================================
 
 class ModuleJumpChannel:
-    """跳转事件通道操作 —— 通道读写 / 生产检测 / 消费重路由的唯一入口。
+    """Jump event channel operations — the single entry for channel
+    read/write, production detection, and consumption rerouting.
 
-    无状态（全部状态在 cxt.actions 上），与 TurnLifecycle 同模式模块级
-    复用。本类必须留在 chat 模块：R4 刷新经 ``get_llm_config`` 本命名空间
-    解析（tests/test_llm_refresh.py 以 patch("chat.chat.get_llm_config")
-    为锚点）。
+    Stateless (all state lives on cxt.actions), reused at module level in
+    the same pattern as TurnLifecycle. This class must stay in the chat
+    module: the R4 refresh resolves ``get_llm_config`` in this namespace
+    (tests/test_llm_refresh.py anchors on
+    patch("chat.chat.get_llm_config")).
 
-    职责分工：生产方（detect_after_stage / stage 自写 / run_agent）只
-    append 不移除，事件以 cxt.actions 为跨函数载体；消费（pop + reroute）
-    只发生在 chat_turn 的 hop 循环——生产方若 pop，消费方拿不到即当作
-    无跳转，产出空回复。
+    Division of duties: producers (detect_after_stage / stages writing
+    events themselves / run_agent) only append and never remove;
+    cxt.actions is the cross-function carrier. Consumption (pop + reroute)
+    happens only in chat_turn's hop loop — if a producer popped, the
+    consumer would find nothing and treat it as no jump, yielding an empty
+    reply.
     """
 
     # ------------------------------------------------------------------
-    # 通道读写
+    # Channel read/write
     # ------------------------------------------------------------------
 
     @staticmethod
     def peek(cxt) -> Optional[ModuleJumpEvent]:
-        """查看 cxt.actions 中是否已有跳转事件（不移除）。"""
+        """Check whether cxt.actions already holds a jump event (without removing it)."""
         for item in cxt.actions:
             if isinstance(item, ModuleJumpEvent):
                 return item
@@ -91,10 +105,11 @@ class ModuleJumpChannel:
 
     @staticmethod
     def pop(cxt) -> Optional[ModuleJumpEvent]:
-        """取出 cxt.actions 中第一个跳转事件（消费即移除）。
+        """Take the first jump event out of cxt.actions (consumption removes it).
 
-        非跳转动作（dict 形态，如 conversation_end）原样留在 actions，
-        由轮末 build_chat_result 快照进 ChatResult。
+        Non-jump actions (dict-shaped, e.g. conversation_end) stay in
+        actions untouched and are snapshotted into ChatResult by the
+        end-of-turn build_chat_result.
         """
         for i, item in enumerate(cxt.actions):
             if isinstance(item, ModuleJumpEvent):
@@ -102,15 +117,17 @@ class ModuleJumpChannel:
         return None
 
     # ------------------------------------------------------------------
-    # 消费：重路由
+    # Consumption: reroute
     # ------------------------------------------------------------------
 
     @staticmethod
     def reroute(cxt, event: ModuleJumpEvent) -> None:
-        """消费跳转事件：重路由到目标模块（淡化边界，仅校验存在性）。
+        """Consume a jump event: reroute to the target module (deliberately
+        thin boundary, only existence is validated).
 
-        目标不存在时保持原位（注册期 pattern 已对 jump_module 配置 fail
-        fast，此处兜底 NLU 幻觉输出）。
+        If the target does not exist, stay in place (the pattern already
+        fail-fasts on jump_module configuration at registration time; this
+        guards against hallucinated NLU output).
         """
         if event.target_module_code not in cxt.module_map:
             logger.warning(
@@ -123,29 +140,38 @@ class ModuleJumpChannel:
             cxt.current_module_code, event.target_module_code, event.source,
         )
         cxt.current_module_code = event.target_module_code
-        # 节点置空：目标模块 _resolve_entry_node 取自身首节点
+        # Node cleared: the target module's _resolve_entry_node picks its own first node
         cxt.current_node_code = None
 
     @staticmethod
     def detect_after_stage(cxt, module, before_nlu) -> Optional[ModuleJumpEvent]:
-        """ROUTE 模块 stage 执行后的跳转检测；FSM/AGENT 恒返回 None。
+        """Jump detection after each stage execution for ROUTE modules;
+        FSM/AGENT always return None.
 
-        事件只由 ROUTE 产生：FSM 的 clarify 在循环内由 ClarifyStage 处理
-        （覆写 nlg_result，不出循环），节点跳转由轮末 _fsm_node_transition
-        处理；AGENT 的移交走 transfer 工具（run_agent 写事件）。
+        Events are produced by ROUTE only: FSM's clarify is handled inside
+        the loop by ClarifyStage (overwrites nlg_result without leaving the
+        loop) and node jumps are handled by the end-of-turn
+        _fsm_node_transition; AGENT transfers go through the transfer tool
+        (run_agent writes the event).
 
-        ROUTE 检测前先做菜单节点推进（原 _RouteNodeAdvance 职责并入此处）：
-        next_node 命中本模块节点 → 切当前节点 + R4 节点级 LLM 配置当轮生效，
-        使随后的 NLG 部件按菜单节点配置生成。
+        Before detecting, ROUTE first advances the menu node (the former
+        _RouteNodeAdvance duty was merged in here): next_node hitting one
+        of this module's nodes → switch the current node + R4 node-level
+        LLM config takes effect this turn, so the subsequent NLG part
+        generates per the menu node's configuration.
 
-        模块跳转来源（按优先级）：
-        1. ``nlu_result.jump_module``：NLU 直接输出的模块级跳转字段
-        2. 推进后节点的 ``jump_module`` 配置：菜单节点自身声明要跳往的模块
-           （推进已在上面完成，直接读当前节点）
+        Module jump sources (in priority order):
+        1. ``nlu_result.jump_module``: the module-level jump field output
+           directly by NLU
+        2. the advanced node's ``jump_module`` configuration: the module
+           the menu node itself declares to jump to (advancement already
+           happened above, so just read the current node)
 
-        仅当 nlu_result 在本 stage 执行后被（覆）写才检测——避免 hop 续答阶段
-        对残留旧 nlu_result 误检。目标不在 module_map / 自环时忽略，继续执行
-        剩余 stages（LLM 幻觉容错）。
+        Detection runs only when nlu_result was (over)written during this
+        stage's execution — prevents false detection on a stale nlu_result
+        during the hop continuation phase. Targets missing from module_map
+        / self-jumps are ignored and the remaining stages keep executing
+        (LLM hallucination tolerance).
         """
         if module.type != ModuleType.ROUTE:
             return None
@@ -156,7 +182,7 @@ class ModuleJumpChannel:
         target = ""
         source = ""
 
-        # 菜单节点推进
+        # Menu node advancement
         next_node_code = nlu_result.get("next_node", "")
         module_node_codes = {n.node_code for n in module.module_nodes}
         if next_node_code and next_node_code in module_node_codes:
@@ -165,8 +191,10 @@ class ModuleJumpChannel:
                 cxt.current_node_code, next_node_code,
             )
             cxt.current_node_code = next_node_code
-            # R4：菜单节点 node 级 LLM 配置当轮生效（spec §4；pattern_code
-            # 取 R1 写入的 metadata，ROUTE 每轮从 root 出发永不定居菜单节点）
+            # R4: the menu node's node-level LLM config takes effect this
+            # turn (spec §4; pattern_code comes from the metadata R1 wrote —
+            # ROUTE departs from root every turn and never dwells on a menu
+            # node)
             cxt.llm_config = get_llm_config(
                 pattern_code=cxt.metadata.get("pattern_code", ""),
                 module_code=cxt.current_module_code or "",
@@ -174,12 +202,12 @@ class ModuleJumpChannel:
                 override=cxt.metadata.get("llm_override"),
             )
 
-        # 1) NLU 直接输出模块级跳转字段
+        # 1) NLU directly outputs the module-level jump field
         jump_field = nlu_result.get("jump_module", "")
         if isinstance(jump_field, str) and jump_field:
             target, source = jump_field, "nlu_jump"
 
-        # 2) 推进后（或当前）节点配置了 jump_module（菜单分发）
+        # 2) the advanced (or current) node has jump_module configured (menu dispatch)
         if not target:
             cur_node = cxt.node_map.get(cxt.current_node_code)
             node_jump = getattr(cur_node, "jump_module", None) if cur_node else None
@@ -202,31 +230,34 @@ class ModuleJumpChannel:
 
 
 
-# 跳转事件通道唯一管理者（无状态，模块级复用）
+# Sole manager of the jump event channel (stateless, shared module-level instance)
 _jumps = ModuleJumpChannel()
 
 
 # ============================================================================
-# 管线执行
+# Pipeline execution
 # ============================================================================
 
 def _default_skeleton(module) -> list:
-    """默认管线骨架（槽位延迟解析，不绑定节点）。
+    """Default pipeline skeleton (slots resolved lazily, not bound to a node).
 
-    [PreRecallSlot, QuerySlot, PostRecallSlot, GenerateSlot]；
-    FSM/ROUTE 的差异（advance / clarify 插入）由 GenerateSlot 展开处理
-    （stage_slots.resolve_stage），骨架本身全模块类型同形。
+    [PreRecallSlot, QuerySlot, PostRecallSlot, GenerateSlot]; the FSM/ROUTE
+    differences (advance / clarify insertion) are handled when GenerateSlot
+    expands (stage_slots.resolve_stage) — the skeleton itself is identical
+    across all module types.
     """
     return [PreRecallSlot(), QuerySlot(), PostRecallSlot(), GenerateSlot()]
 
 
 def _refresh_llm_config(session: Session, module_code: str = "",
                         node_code: str = "") -> None:
-    """按当前位置解析 LLM 配置并写入 cxt.llm_config（spec §4，R1-R4 共用）。
+    """Resolve the LLM config for the current position and write it to
+    cxt.llm_config (spec §4, shared by R1-R4).
 
-    本函数必须留在 chat 模块：R1-R3 的 get_llm_config 经本命名空间解析
-    （tests/test_llm_refresh.py 等以 patch("chat.chat.get_llm_config")
-    为锚点），不引入 handlers 自 import。
+    This function must stay in the chat module: R1-R3 resolve
+    get_llm_config through this namespace (tests/test_llm_refresh.py et al.
+    anchor on patch("chat.chat.get_llm_config")), avoiding a handlers
+    self-import.
     """
     cxt = session.cxt
     cxt.llm_config = get_llm_config(
@@ -238,17 +269,18 @@ def _refresh_llm_config(session: Session, module_code: str = "",
 
 
 def _fsm_node_transition(cxt, module) -> None:
-    """FSM 轮末节点转移。
+    """FSM end-of-turn node transition.
 
-    按 NLU 结果的 next_node 跳转；澄清轮跳过槽位合并与跳转（topic/keywords
-    不入 filled_slots，节点保持）。同时把 NLU 抽取的槽位增量合并进
-    filled_slots。
+    Jumps per next_node from the NLU result; clarify turns skip slot
+    merging and jumping (topic/keywords stay out of filled_slots, node
+    unchanged). Also merges the slots extracted by NLU incrementally into
+    filled_slots.
 
     Args:
         cxt: dialogue context
         module: current module object
     """
-    # 澄清轮：跳过槽位合并（topic/keywords 不入 filled_slots），节点保持
+    # Clarify turn: skip slot merging (topic/keywords stay out of filled_slots), node unchanged
     if (cxt.metadata.get("clarify") or {}).get("triggered"):
         logger.info("澄清轮，跳过槽位合并与节点跳转: node=%s", cxt.current_node_code)
         return
@@ -256,7 +288,7 @@ def _fsm_node_transition(cxt, module) -> None:
     nlu_result = cxt.nlu_result or {}
     slots = nlu_result.get("slots", {})
 
-    # Merge slots（增量：经 lifecycle 入口）
+    # Merge slots (incremental: via the lifecycle entry point)
     _lifecycle.merge_slots(cxt, slots)
 
     # FSM type: jump according to next_node in the NLU result
@@ -283,7 +315,7 @@ def _fsm_node_transition(cxt, module) -> None:
 
 
 def _resolve_entry_node(cxt, module) -> None:
-    """确定当前节点（首次进入模块时取首节点），写入 cxt.current_node_code。"""
+    """Determine the current node (first node of the module on first entry), written to cxt.current_node_code."""
     if cxt.current_node_code is None:
         if module.module_nodes:
             first_node = module.module_nodes[0]
@@ -305,19 +337,25 @@ def _resolve_entry_node(cxt, module) -> None:
 
 def _run_stages(cxt, module, pattern, force_close: bool = False
                 ) -> Optional[ModuleJumpEvent]:
-    """顺序执行管线 stages（槽位按 node > module > pattern 延迟解析）。
+    """Execute the pipeline stages in order (slots resolved lazily as
+    node > module > pattern).
 
-    每个 stage 执行后做跳转检测（仅 ROUTE：_jumps.detect_after_stage +
-    stage 自写 event）：命中即合并槽位、写 ModuleJumpEvent 到 cxt.actions
-    并中断剩余 stages——源模块本轮静默（NLG 不执行），由 chat 层 hop
-    循环重路由到目标模块同轮续答。FSM 不产生事件（clarify 循环内由
-    ClarifyStage 处理不出循环、节点跳转由轮末转移处理）。force_close
-    （超跳数收尾）跳过检测，stages 跑完；其间 stage 写入的事件不参与
-    控制流（不触发静默），仅留 actions 作观测。
+    After each stage executes, run jump detection (ROUTE only:
+    _jumps.detect_after_stage + events written by stages themselves): on a
+    hit, merge slots, write the ModuleJumpEvent to cxt.actions, and abort
+    the remaining stages — the source module is suppressed this turn (NLG
+    does not run) and the chat layer's hop loop reroutes to the target
+    module to continue the reply in the same turn. FSM produces no events
+    (clarify is handled inside the loop by ClarifyStage without leaving it;
+    node jumps are handled by the end-of-turn transition). force_close
+    (max-hops close-out) skips detection and lets the stages run through;
+    events written by stages during that window do not participate in
+    control flow (they do not trigger suppression) and stay in actions for
+    observation only.
 
     Returns:
-        待消费的跳转事件（已写入 cxt.actions，由 chat_turn 的 hop 循环
-        pop 消费）；None 表示无跳转。
+        The jump event awaiting consumption (already written to
+        cxt.actions, popped by chat_turn's hop loop); None means no jump.
     """
     stages = pattern.stages or _default_skeleton(module)
 
@@ -347,7 +385,7 @@ def _run_stages(cxt, module, pattern, force_close: bool = False
             if force_close:
                 continue
 
-            # 检测 1：stage 直接写入了跳转事件（自定义 stage 通道）
+            # Detection 1: the stage itself wrote a jump event (custom stage channel)
             direct = _jumps.peek(cxt)
             if direct is not None:
                 logger.info(
@@ -356,11 +394,11 @@ def _run_stages(cxt, module, pattern, force_close: bool = False
                 )
                 return direct
 
-            # 检测 2：nlu_result 更新且指示跳转（NLU jump_module 字段 /
-            # 推进后节点 jump_module 配置）
+            # Detection 2: nlu_result was updated and indicates a jump (NLU
+            # jump_module field / advanced node's jump_module config)
             event = _jumps.detect_after_stage(cxt, module, before_nlu)
             if event is not None:
-                # 槽位增量合并随跳转走（目标模块承接上下文）
+                # Incremental slot merge travels with the jump (the target module inherits the context)
                 _lifecycle.merge_slots(
                     cxt, (cxt.nlu_result or {}).get("slots", {}))
                 cxt.actions.append(event)
@@ -371,34 +409,38 @@ def _run_stages(cxt, module, pattern, force_close: bool = False
                 )
                 return event
 
-    # stages 自然跑完即无跳转：stage 直接写的事件已被检测 1 在该 stage
-    # 执行后捕获提前返回；force_close 下检测被跳过，其间写入的事件仅留
-    # actions 作观测（轮末快照），不触发源模块静默
+    # Stages running through naturally means no jump: events written
+    # directly by a stage were already caught by detection 1 right after
+    # that stage and returned early; under force_close detection is skipped,
+    # so events written in the meantime stay in actions for observation
+    # only (end-of-turn snapshot) and do not trigger source-module
+    # suppression
     return None
 
 
 def _run_fsm_pipeline(session: Session, module, force_close: bool = False
                       ) -> TurnResult:
-    """FSM 模块一轮：节点解析 → R3 刷新 → stages → next_node 跳转。
+    """One FSM module turn: node resolution → R3 refresh → stages →
+    next_node jump.
 
-    FSM 不产生跳转事件（clarify 循环内处理、节点跳转轮末处理），
-    _run_stages 返回值恒为 None。
+    FSM produces no jump events (clarify handled inside the loop, node
+    jumps at end of turn), so _run_stages always returns None.
     """
     cxt = session.cxt
     pattern = session.pattern
 
     _resolve_entry_node(cxt, module)
 
-    # R3：节点解析完按 module+node 刷新 LLM 配置（spec §4）
+    # R3: after node resolution, refresh the LLM config by module+node (spec §4)
     _refresh_llm_config(session, module_code=module.module_code,
                         node_code=cxt.current_node_code)
 
     _run_stages(cxt, module, pattern, force_close=force_close)
 
-    # FSM：next_node 跳转（澄清轮守卫在转移函数内）
+    # FSM: next_node jump (the clarify-turn guard lives inside the transition function)
     _fsm_node_transition(cxt, module)
 
-    # 终节点动作（预留通道）
+    # Terminal node action (reserved channel)
     next_node = pattern.node_map.get(cxt.current_node_code)
     if next_node is not None and getattr(next_node, "is_end", False):
         cxt.actions.append({"conversation_end": True})
@@ -409,38 +451,45 @@ def _run_fsm_pipeline(session: Session, module, force_close: bool = False
 
 def _run_route_pipeline(session: Session, module, force_close: bool = False
                         ) -> TurnResult:
-    """ROUTE 模块一轮：节点解析 → R3 刷新 → stages → 轮末重置 root。
+    """One ROUTE module turn: node resolution → R3 refresh → stages →
+    end-of-turn reset to root.
 
-    模块跳转在 _run_stages 内检测（NLU jump_module 字段 / 菜单节点
-    jump_module 配置），本函数不再做 jump_module 分发。跳转轮直接静默
-    返回（hop 循环重路由，目标模块自解析入口节点）；跳到 AGENT/FSM 后
-    目标模块跨轮承接后续轮次（agent 靠 history、FSM 靠节点位置），不回
-    路由——只有当前还停在 ROUTE 模块时才轮末重置回 root（菜单节点无
-    sub_nodes，不重置则下一轮路由候选为空）。ROUTE 不装配 ClarifyStage
-    （仅 FSM+enable_clarify 插入，见 stage_slots.resolve_stage），且
-    begin_turn 轮首已清 clarify，无澄清轮分支。
+    Module jumps are detected inside _run_stages (NLU jump_module field /
+    menu node jump_module config); this function does no jump_module
+    dispatch of its own. On a jump turn, return silently (the hop loop
+    reroutes and the target module resolves its own entry node); after
+    jumping to an AGENT/FSM module, the target carries the following turns
+    across turns (agent via history, FSM via node position) without
+    returning to routing — the end-of-turn reset to root happens only while
+    still parked in the ROUTE module (menu nodes have no sub_nodes; without
+    the reset the next turn's routing candidates would be empty). ROUTE
+    does not assemble a ClarifyStage (only FSM+enable_clarify gets one
+    inserted, see stage_slots.resolve_stage), and begin_turn already
+    cleared clarify at start of turn, so there is no clarify-turn branch.
     """
     cxt = session.cxt
     pattern = session.pattern
 
     _resolve_entry_node(cxt, module)
 
-    # R3：节点解析完按 module+node 刷新 LLM 配置（spec §4）
+    # R3: after node resolution, refresh the LLM config by module+node (spec §4)
     _refresh_llm_config(session, module_code=module.module_code,
                         node_code=cxt.current_node_code)
 
     jump_event = _run_stages(cxt, module, pattern, force_close=force_close)
 
-    # 跳转轮：槽位已在检测点合并，hop 循环重路由到目标模块同轮续答
+    # Jump turn: slots were already merged at the detection point; the hop
+    # loop reroutes to the target module to continue in the same turn
     if jump_event is not None:
         return TurnResult()
 
-    # 槽位合并（增量：经 lifecycle 入口）
+    # Slot merge (incremental: via the lifecycle entry point)
     slots = (cxt.nlu_result or {}).get("slots", {})
     _lifecycle.merge_slots(cxt, slots)
 
-    # 轮末重置回 root（含 force_close：跳过跳转检测但菜单节点无 sub_nodes，
-    # 不重置则下一轮路由候选为空）
+    # End-of-turn reset to root (including force_close: jump detection is
+    # skipped, but menu nodes have no sub_nodes — without the reset the
+    # next turn's routing candidates would be empty)
     root_code = module.module_nodes[0].node_code if module.module_nodes else None
     cxt.current_node_code = root_code
     logger.info("ROUTE 模块保持 root 节点: %s", root_code)
@@ -451,10 +500,11 @@ def _run_route_pipeline(session: Session, module, force_close: bool = False
 
 def _run_agent_pipeline(session: Session, module, force_close: bool = False
                         ) -> TurnResult:
-    """AGENT 模块一轮：R2 刷新 → loop.run_agent。
+    """One AGENT module turn: R2 refresh → loop.run_agent.
 
-    transfer 工具调用由 run_agent 写 ModuleJumpEvent 到 cxt.actions，
-    本函数不额外处理（chat 层 hop 循环统一消费）。
+    transfer tool calls are written by run_agent as a ModuleJumpEvent to
+    cxt.actions; this function does nothing further with them (consumed
+    uniformly by the chat layer's hop loop).
     """
     logger.info("Agent 模块处理: module=%s", module.module_code)
     _refresh_llm_config(session, module_code=module.module_code)  # R2
@@ -464,7 +514,7 @@ def _run_agent_pipeline(session: Session, module, force_close: bool = False
 
 def _handle_module(session: Session, module, force_close: bool = False
                    ) -> TurnResult:
-    """按模块类型分派单模块单轮处理。"""
+    """Dispatch single-module single-turn handling by module type."""
     if module.type == ModuleType.AGENT:
         return _run_agent_pipeline(session, module, force_close=force_close)
     if module.type == ModuleType.ROUTE:
@@ -478,21 +528,26 @@ def chat_turn(
         all_sessions: Dict[str, Session],
         store: Optional["SessionStore"] = None,
 ) -> ChatResult:
-    """处理一轮用户对话，返回完整产出（文本 + 预留动作）。
+    """Process one user dialogue turn, returning the full output (text +
+    reserved actions).
 
-    1. 按 session_id 定位 session，cxt 轮首重置（lifecycle.begin_turn）
-    2. 校验 pattern / 入口模块，解析 LLM 配置（R1）
-    3. 同轮 hop 循环（max_hops）：按模块类型分派处理；消费 cxt.actions
-       中的 ModuleJumpEvent → 重路由到目标模块同轮续答；
-       超跳数 force_close 强制收尾
-    4. 轮末 history 追加（lifecycle.end_turn），快照产出 ChatResult
+    1. Locate the session by session_id, reset cxt at start of turn
+       (lifecycle.begin_turn)
+    2. Validate the pattern / entry module, resolve the LLM config (R1)
+    3. Same-turn hop loop (max_hops): dispatch handling by module type;
+       consume the ModuleJumpEvents in cxt.actions → reroute to the target
+       module to continue the reply in the same turn; exceeding the hop
+       budget forces a force_close close-out
+    4. End of turn: append to history (lifecycle.end_turn), snapshot the
+       output into ChatResult
 
-    ``store`` 供历史压缩消费（None 跳过）；消息落库由 launch/恢复时
-    attach 的 message_sink 逐条完成，不经此参数。
+    ``store`` is consumed by history compression (None skips it); message
+    persistence is done per message by the message_sink attached at
+    launch/restore time and does not go through this parameter.
     """
     # ------------------------------------------------------------------
-    # 1. 定位 session；轮首重置（user_query 覆写 + 每轮字段归零——
-    #    hop 之前恰好一次）
+    # 1. Locate the session; start-of-turn reset (user_query overwrite +
+    #    per-turn fields zeroed — exactly once, before hopping)
     # ------------------------------------------------------------------
     session = all_sessions.get(session_id)
     if session is None:
@@ -507,15 +562,16 @@ def chat_turn(
         return ChatResult(text="对话模板未配置")
 
     # ------------------------------------------------------------------
-    # 2. 定位入口模块（cxt.current_module_code 优先，回落 entry）
+    # 2. Locate the entry module (cxt.current_module_code first, fall back
+    #    to the entry)
     # ------------------------------------------------------------------
     current_module_code = session.cxt.current_module_code or pattern.entry_module_code
     if not current_module_code:
         logger.warning("会话 %s 未找到入口模块", session_id)
         return ChatResult(text="入口模块未配置")
 
-    # 写回 cxt：stages 与转移（跳转检测 / _fsm_node_transition）都从
-    # cxt 读取当前位置
+    # Write back to cxt: stages and transitions (jump detection /
+    # _fsm_node_transition) both read the current position from cxt
     session.cxt.current_module_code = current_module_code
 
     current_module = pattern.module_map.get(current_module_code)
@@ -525,23 +581,24 @@ def chat_turn(
 
     session.cxt.metadata["pattern_code"] = session.pattern_code
 
-    # R1：每轮按当前位置解析 LLM 配置，override 优先（spec §4）
+    # R1: resolve the LLM config by current position each turn, override takes precedence (spec §4)
     try:
         _refresh_llm_config(session)
     except Exception as e:
         logger.error("加载 LLM 配置失败: %s", e)
         return ChatResult(text=f"LLM 配置加载失败: {e}")
 
-    # 历史压缩（store 未启用/阈值 0/条数不足静默跳过；复用 R1 刚刷新的
-    # llm_config 做摘要；失败绝不阻断对话）。必须在 add user 之前——
-    # 压缩会重建 history 并修正 turn_history_start
+    # History compression (silently skipped when the store is disabled /
+    # threshold is 0 / too few messages; summarizes with the llm_config R1
+    # just refreshed; failure never blocks the dialogue). Must run before
+    # add user — compression rebuilds history and fixes turn_history_start
     maybe_compress(session, store)
 
     # Record user message
     session.cxt.add_message("user", query, stage="chat")
 
     # ------------------------------------------------------------------
-    # 3. Reentry loop: consume same-turn jump events（cxt.actions 通道）
+    # 3. Reentry loop: consume same-turn jump events (cxt.actions channel)
     # ------------------------------------------------------------------
     max_hops = getattr(pattern, "max_hops", 2)
     try:
@@ -561,7 +618,8 @@ def chat_turn(
             )
             _jumps.reroute(session.cxt, event)
         else:
-            # 超跳数：先消费残留事件落到最后目标，再以该模块强制收尾
+            # Max hops exceeded: first consume the leftover event to land on
+            # the final target, then force-close with that module
             logger.warning("达到 max_hops=%d，强制收尾", max_hops)
             pending = _jumps.pop(session.cxt)
             if pending is not None:
@@ -576,7 +634,8 @@ def chat_turn(
         response = f"对话处理异常: {e}"
 
     # ------------------------------------------------------------------
-    # 4. 轮末：history 追加 assistant 消息（增量），快照产出
+    # 4. End of turn: append the assistant message to history
+    #    (incremental), snapshot the output
     # ------------------------------------------------------------------
     _lifecycle.end_turn(session.cxt, response)
 
@@ -584,10 +643,10 @@ def chat_turn(
 
 
 # ---------------------------------------------------------------------------
-# 兼容再导出（测试锚点，签名不变）
+# Compat re-exports (test anchors, signatures unchanged)
 # ---------------------------------------------------------------------------
 
-_handle_node_transition = _fsm_node_transition  # noqa: F401（clarify 测试锚点）
+_handle_node_transition = _fsm_node_transition  # noqa: F401 (clarify test anchor)
 
 
 def chat(
@@ -596,5 +655,5 @@ def chat(
         all_sessions: Dict[str, Session],
         store: Optional["SessionStore"] = None,
 ) -> str:
-    """兼容入口：处理一轮对话，返回回复文本（等价 chat_turn(...).text）。"""
+    """Compat entry: process one dialogue turn, returning the reply text (equivalent to chat_turn(...).text)."""
     return chat_turn(query, session_id, all_sessions, store=store).text

@@ -1,8 +1,8 @@
-"""visualize 模块测试 -- 纯离线，只做结构渲染断言，不依赖 LLM。
+"""Tests for the visualize module -- fully offline, structural rendering assertions only, no LLM.
 
-fixture 为内联构建的 vis_demo pattern：
-ROUTE（含 jump_module 菜单 + 无 jump 重置边）+ 2×FSM（节点链 + is_end），
-覆盖 visualize 支持的全部结构特性。
+The fixture is an inline vis_demo pattern:
+ROUTE (jump_module menu + no-jump reset edges) + 2 FSM modules (node chains + is_end),
+covering every structural feature visualize supports.
 """
 
 import pytest
@@ -13,7 +13,7 @@ from dialogue.node import BaseNode
 from dialogue.pattern import Pattern
 from dialogue.register import discover_builtin_patterns, registry
 
-# vis_demo 的全部节点 code（见下方 pattern() fixture）
+# All node codes of vis_demo (see the pattern() fixture below)
 ALL_NODE_CODES = [
     "vis_route_root", "vis_menu_sales", "vis_menu_after", "vis_menu_chitchat",
     "vis_ask_brand", "vis_ask_budget", "vis_confirm",
@@ -23,7 +23,7 @@ ALL_NODE_CODES = [
 
 @pytest.fixture(scope="module")
 def demo():
-    discover_builtin_patterns()  # visualize.main 的 --list/--all 依赖全局注册表
+    discover_builtin_patterns()  # visualize.main's --list/--all depend on the global registry
     return Pattern(
         code="vis_demo",
         name="可视化测试助手",
@@ -135,7 +135,7 @@ def mermaid(demo):
 
 
 # ============================================================================
-# Mermaid 结构断言
+# Mermaid structure assertions
 # ============================================================================
 
 class TestMermaid:
@@ -146,7 +146,7 @@ class TestMermaid:
     def test_modules_rendered_as_subgraphs(self, mermaid):
         for code in ("vis_root", "vis_buy", "vis_after"):
             assert f"subgraph m_{code} [" in mermaid
-        # 入口模块排在最前
+        # Entry module is rendered first
         assert mermaid.index("m_vis_root") < mermaid.index("m_vis_buy")
 
     def test_module_type_in_title(self, mermaid):
@@ -177,7 +177,7 @@ class TestMermaid:
         assert "n_vis_menu_after -.->|jump_module| n_vis_after_ask_issue" in mermaid
 
     def test_route_reset_edge(self, mermaid):
-        # vis_menu_chitchat 无 jump_module，重置回路由根节点
+        # vis_menu_chitchat has no jump_module: resets back to the route root node
         assert "n_vis_menu_chitchat -.->|重置回根| n_vis_route_root" in mermaid
 
     def test_end_node_class(self, mermaid):
@@ -194,7 +194,7 @@ class TestMermaid:
         assert "style m_vis_buy fill:#f0fdf4,stroke:#16a34a" in mermaid
 
     def test_label_escaping(self, mermaid):
-        # 标签行成对引号闭合，不会破坏 mermaid 语法
+        # Label lines close their quotes in pairs, so mermaid syntax stays intact
         assert mermaid.count('["') == mermaid.count('"]')
 
     def test_escape_label_helper(self):
@@ -204,7 +204,7 @@ class TestMermaid:
 
 
 # ============================================================================
-# HTML / Markdown 渲染断言
+# HTML / Markdown renderer assertions
 # ============================================================================
 
 class TestRenderers:
@@ -214,22 +214,22 @@ class TestRenderers:
         assert "可视化测试助手" in out
         assert "vis_demo" in out
         assert 'class="mermaid"' in out
-        # mermaid 源码经 HTML 转义后嵌入
+        # The mermaid source is embedded after HTML escaping
         assert "flowchart TB" in out
-        # CDN 多源回退
+        # Multi-source CDN fallback
         assert "cdn.jsdelivr.net" in out
         assert "registry.npmmirror.com" in out
-        # 渲染失败降级区块
+        # Fallback block for render failures
         assert 'id="fallback"' in out
 
     def test_html_module_details(self, demo):
         out = visualize.render_pattern_html(demo)
         for code in ALL_NODE_CODES:
             assert code in out
-        # 模块卡片与类型徽标
+        # Module cards and type badges
         assert '<span class="badge route">ROUTE</span>' in out
         assert '<span class="badge fsm">FSM</span>' in out
-        # 节点表格含槽位与跳转信息
+        # Node tables include slot and jump info
         assert "brand" in out
         assert "vis_buy" in out
 
@@ -238,7 +238,6 @@ class TestRenderers:
         assert out.startswith("# Pattern: 可视化测试助手 (`vis_demo`)")
         assert "```mermaid" in out
         assert "## 模块与节点详情" in out
-        # 详情表包含全部节点
         for code in ALL_NODE_CODES:
             assert code in out
 
@@ -251,7 +250,7 @@ class TestRenderers:
 
 
 # ============================================================================
-# AGENT 模块（无节点）渲染
+# AGENT module (no nodes) rendering
 # ============================================================================
 
 class TestAgentModule:
@@ -266,7 +265,7 @@ class TestAgentModule:
             ],
         )
         m = visualize.pattern_to_mermaid(pattern)
-        # 无节点模块渲染 Agent 代表节点，入口边指向它
+        # A node-less module renders an Agent representative node; the entry edge points to it
         assert "n_t_chat__agent[" in m
         assert "Agent 对话" in m
         assert "START --> n_t_chat__agent" in m
@@ -275,7 +274,7 @@ class TestAgentModule:
 
 
 # ============================================================================
-# CLI 断言（vis_demo 为内联 fixture，注册表断言挂到保留的内置 pattern）
+# CLI assertions (vis_demo is an inline fixture; registry assertions attach to the preserved builtin patterns)
 # ============================================================================
 
 class TestCli:

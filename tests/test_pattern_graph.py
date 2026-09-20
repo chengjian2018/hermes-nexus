@@ -1,4 +1,4 @@
-"""Pattern 模块拓扑注册与注册期 fail fast 测试。"""
+"""Tests for pattern module-topology registration and registration-time fail fast."""
 
 import pytest
 
@@ -20,8 +20,8 @@ def test_module_map_and_node_map_registered():
     c = FSMModule(module_code="c")
     p = _mk_pattern([a, b, c])
     assert set(p.module_map) == {"a", "b", "c"}
-    # link 声明的邻接不产生运行期图（跳转检测只看 module_map 存在性），
-    # 仅做注册期校验
+    # Adjacency declared via links produces no runtime graph (jump detection
+    # only checks module_map membership); it is validated at registration only
     assert not hasattr(p, "dispatch_graph")
 
 
@@ -33,7 +33,7 @@ def test_dangling_link_raises():
 
 
 def test_dangling_jump_module_raises():
-    """节点 jump_module 指向不存在的模块 → 注册期悬空 fail fast。"""
+    """A node's jump_module pointing at a nonexistent module -> dangling-reference fail fast at registration."""
     menu = BaseNode(node_code="menu_x", node_name="x", jump_module="ghost")
     root = BaseNode(node_code="root", node_name="r", sub_nodes=["menu_x"])
     route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
@@ -58,7 +58,7 @@ def test_self_loop_raises():
 
 
 def test_agent_to_fsm_link_allowed():
-    """混合 pattern：AGENT → FSM 边合法（不拦）。"""
+    """Mixed pattern: an AGENT -> FSM edge is legal (not blocked)."""
     a = AgentModule(module_code="a", sub_modules=["f"])
     f = FSMModule(module_code="f", module_nodes=[
         BaseNode(node_code="f1", node_name="n1", is_end=True)
@@ -74,7 +74,7 @@ def test_max_hops_default_and_override():
 
 
 def test_route_jump_module_self_loop_raises():
-    """M-1：jump_module 指向自身模块 → 注册期自环 fail fast。"""
+    """M-1: jump_module pointing at its own module -> self-loop fail fast at registration."""
     menu = BaseNode(node_code="menu_self", node_name="m", jump_module="rt")
     root = BaseNode(node_code="root2", node_name="r", sub_nodes=["menu_self"])
     route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])

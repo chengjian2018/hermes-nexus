@@ -1,4 +1,4 @@
-"""R1-R4 注入刷新：逐轮按当前位置解析 + override 优先（spec §4）。"""
+"""R1-R4 injection refresh: per-turn resolution by current position + override priority (spec §4)."""
 
 from unittest.mock import patch
 
@@ -47,7 +47,7 @@ def _record_calls(calls):
 
 
 def test_r1_passes_position_and_override():
-    """R1：pattern/module/node + override 全部透传，且写 metadata pattern_code。"""
+    """R1: pattern/module/node + override all passed through, and metadata pattern_code written."""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     calls = []
@@ -59,13 +59,13 @@ def test_r1_passes_position_and_override():
     assert first["pattern_code"] == "pf"
     assert first["override"] == {"code": "x", "model": "m"}
     assert sessions["s1"].cxt.metadata["pattern_code"] == "pf"
-    # 会话内已定位 module/node 时 R1 就带上（首轮为空）
+    # once module/node are located within the session, R1 carries them (empty on the first turn)
     assert first["module_code"] in ("", "m1")
 
 
 def test_r2_agent_module_chat_path_uses_module_code():
-    """R2：AGENT 模块经 chat() 路径触发 AgentHandler，
-    get_llm_config 以 module_code=<agent模块code>、node_code="" 调用。"""
+    """R2: an AGENT module going through the chat() path triggers AgentHandler,
+    with get_llm_config called as module_code=<agent module code>, node_code=\"\"."""
     from dialogue.module import AgentModule
     agent_m = AgentModule(module_code="reception", module_name=" reception",
                           module_description="d", module_todo_description="t",
@@ -92,7 +92,7 @@ def test_r2_agent_module_chat_path_uses_module_code():
 
 
 def test_r3_refresh_after_node_resolution():
-    """R3：管线 handler 节点解析后按 module+node 刷新。"""
+    """R3: the pipeline handler refreshes by module+node after node resolution."""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     calls = []
@@ -104,10 +104,12 @@ def test_r3_refresh_after_node_resolution():
 
 
 def test_r4_route_menu_node_takes_effect_same_turn():
-    """R4：ROUTE 菜单命中切节点后当轮刷新（菜单节点配置驱动当轮 NLG）。
+    """R4: after a ROUTE menu hit switches the node, the refresh takes effect that same turn
+    (menu-node config drives that turn's NLG).
 
-    刷新点在 chat._detect_jump_after_stage（原 _RouteNodeAdvance 职责并入），
-    NLU 更新 nlu_result 后：先推进菜单节点 + R4 node 级刷新，再判跳转。
+    The refresh point lives in chat._detect_jump_after_stage (the former _RouteNodeAdvance
+    duty was merged in). After NLU updates nlu_result: advance the menu node + R4 node-level
+    refresh first, then judge jumps.
     """
     menu = BaseNode(node_code="menu_a", node_name="菜单A",
                     base_nlg_prompt="回答A")
@@ -121,7 +123,7 @@ def test_r4_route_menu_node_takes_effect_same_turn():
     sessions = {}
     _launch(pattern, sessions, sid="s2")
     calls = []
-    # RouteNLU/FSMNLU 打桩返回意图命中菜单（绕开真实 LLM 协议）
+    # RouteNLU/FSMNLU stubbed to return a menu-hit intent (bypassing the real LLM protocol)
     class _StubNLU:
         stage_name = "nlu"
         def execute(self, ctx):
@@ -133,19 +135,19 @@ def test_r4_route_menu_node_takes_effect_same_turn():
             ctx.nlg_result = {"content": "ok"}
             return ctx
     pattern.stages = [_StubNLU(), _StubNLG()]
-    # R1-R3 与 R4 刷新都经 chat 命名空间（R4 在 _detect_jump_after_stage 内）
+    # R1-R3 and the R4 refresh all go through the chat namespace (R4 inside _detect_jump_after_stage)
     with patch("chat.loop.build_provider"), \
          patch("chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s2", "选A")
     r4 = [c for c in calls if c["node_code"] == "menu_a"]
     assert r4, f"R4 应在菜单命中后按 node=menu_a 刷新，实际调用: {calls}"
-    # 菜单无 jump_module 配置 → 无模块跳转，留在路由模块
-    assert sessions["s2"].cxt.current_node_code == "root"  # 轮末重置回 root
+    # menu has no jump_module config -> no module jump, stays in the routing module
+    assert sessions["s2"].cxt.current_node_code == "root"  # turn-end reset back to root
     assert sessions["s2"].cxt.current_module_code == "r1"
 
 
 def test_override_wins_and_survives_turns():
-    """override 写入 cxt.llm_config 且逐轮不被冲掉。"""
+    """The override lands in cxt.llm_config and is not washed away across turns."""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     with patch("chat.loop.build_provider"):

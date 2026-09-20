@@ -1,4 +1,4 @@
-"""chat 层重入循环：same-turn transfer / ROUTE 跳转 / 超跳数强制收尾。"""
+"""Chat-layer reentry loop: same-turn transfer / ROUTE jumps / force close on max hops."""
 
 from unittest.mock import patch
 
@@ -6,11 +6,11 @@ from chat.session import Session
 from dialogue.module import AgentModule, ModuleLink, RouteModule
 from dialogue.node import BaseNode
 from dialogue.pattern import Pattern
-from test_agent_inject_transfer import ScriptedProvider, _mk_session  # 复用
+from test_agent_inject_transfer import ScriptedProvider, _mk_session
 
 
 def _agent_pattern(**kw):
-    """两 agent（reception → after_sales）+ 可选 max_hops。"""
+    """Two agents (reception -> after_sales) with optional max_hops."""
     after_sales = AgentModule(
         module_code="after_sales", module_name="售后维保",
         module_description="售后", module_todo_description="售后流程",
@@ -39,15 +39,15 @@ def _chat(sessions, sid, query):
 
 
 def test_same_turn_transfer_b_replies():
-    """A transfer → 同轮 B 接话，用户只听到 B。"""
+    """A transfers -> B takes over in the same turn; the user only hears B."""
     sessions = {}
     _launch(_agent_pattern(), sessions)
     provider = ScriptedProvider([
-        # A：决定移交（content 被抑制）
+        # A: decides to transfer (content suppressed)
         {"content": "转接中", "tool_calls": [{"id": "c1", "function": {
             "name": "transfer_to_after_sales",
             "arguments": '{"reason": "售后深入"}'}}]},
-        # B：承接回复
+        # B: takes over and replies
         {"content": "看到您有售后需求，我先了解一下具体情况。", "tool_calls": []},
     ])
     with patch("chat.loop.build_provider", return_value=provider):
@@ -57,13 +57,15 @@ def test_same_turn_transfer_b_replies():
 
 
 def test_max_hops_exceeded_force_close():
-    """连续 transfer 超过 max_hops=1：以当前模块强制收尾（prompt 注入勿再移交）。"""
+    """Consecutive transfers exceed max_hops=1: force close on the current
+    module (prompt injected with the no-more-handoff suffix)."""
     sessions = {}
     _launch(_agent_pattern(max_hops=1), sessions)
     provider = ScriptedProvider([
         {"content": "转接中", "tool_calls": [{"id": "c1", "function": {
             "name": "transfer_to_after_sales", "arguments": "{}"}}]},
-        # 强制收尾轮：B 仍想转回，但已超限 → 应直接回复
+        # Force-close round: B still wants to transfer back but the limit is
+        # reached -> it must reply directly
         {"content": "好的，我来处理您的售后问题。", "tool_calls": []},
     ])
     with patch("chat.loop.build_provider", return_value=provider):
@@ -72,8 +74,9 @@ def test_max_hops_exceeded_force_close():
 
 
 def test_force_close_route_returns_nonempty_reply():
-    """I-4：max_hops=1，agent transfer 进 ROUTE 后强制收尾——跳过跳转检测
-    （含 jump_module 命中），消费 NLG 回复，不产生空回复。"""
+    """I-4: max_hops=1, agent transfers into a ROUTE module and force close
+    kicks in -- jump detection is skipped (including jump_module hits), the
+    NLG reply is consumed, and no empty reply is produced."""
     from dialogue.module import RouteModule
     from dialogue.node import BaseNode
     from dialogue.base import PipelineStage
@@ -112,17 +115,19 @@ def test_force_close_route_returns_nonempty_reply():
     sessions = {}
     _launch(pattern, sessions, sid="sr")
     provider = ScriptedProvider([
-        # hop 0：前台 transfer 进 ROUTE 路由模块（同轮重入）
+        # hop 0: reception transfers into the ROUTE router module (same-turn reentry)
         {"content": "转接中", "tool_calls": [{"id": "c1", "function": {
             "name": "transfer_to_router",
             "arguments": '{"reason": "购车"}'}}]},
     ])
     with patch("chat.loop.build_provider", return_value=provider):
         reply = _chat(sessions, "sr", "我想买车")
-    # force_close 落在 ROUTE：不触发跳转（否则 menu_buy 命中 buy_agent → 空回复）
+    # force_close lands on ROUTE: no jump is triggered (otherwise menu_buy
+    # would hit buy_agent -> empty reply)
     assert isinstance(reply, str) and reply, f"force_close 后回复不应为空: {reply!r}"
     assert reply == "购车咨询由我来介绍吧"
     assert sessions["sr"].cxt.current_module_code == "router"
-    # force_close 跳过跳转但仍重置回 root：菜单节点无 sub_nodes，
-    # 若留在 menu_buy，下一轮 RouteNLU 候选为空 → 路由卡死
+    # force_close skips jump detection but still resets to root: menu nodes
+    # have no sub_nodes; staying on menu_buy would leave the next turn's
+    # RouteNLU with no routing candidates -> routing deadlock
     assert sessions["sr"].cxt.current_node_code == "route_root"

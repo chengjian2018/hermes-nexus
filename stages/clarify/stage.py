@@ -1,15 +1,15 @@
-"""ClarifyStage —— 双轨澄清一体化 stage（判别 + 检索 + 门控 + 生成）。
+"""ClarifyStage — integrated dual-track clarify stage (discrimination + retrieval + gating + generation).
 
-插入位置：FSM 管线 NLU 与 NLG 之间（仅 enable_clarify=True 的模块接入）。
+Insertion point: between NLU and NLG in the FSM pipeline (only modules with enable_clarify=True are wired in).
 
-执行流程（详见 spec 5.1）：
-1. 每轮重置 ctx.metadata["clarify"] = {"triggered": False}
-2. 触发判定：nlu_result.next_node == "clarify"
-3. 取固定澄清槽位 topic / keywords
-4. 组装检索 query：user_query + topic + keywords
-5. 知识库召回（专用 MultiPathRecaller）
-6. ClarifyRouteRule 门控 → mode 三选一
-7. 按 mode 选模板生成回复（本轮唯一的 NLG 调用），写 ctx.nlg_result
+Execution flow (see spec 5.1 for details):
+1. Reset ctx.metadata["clarify"] = {"triggered": False} each turn
+2. Trigger check: nlu_result.next_node == "clarify"
+3. Take the fixed clarify slots topic / keywords
+4. Assemble the retrieval query: user_query + topic + keywords
+5. Knowledge base recall (dedicated MultiPathRecaller)
+6. ClarifyRouteRule gating -> one of three modes
+7. Generate the reply from the template selected by mode (the only NLG call this turn), write ctx.nlg_result
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ CLARIFY_NODE_CODE = "clarify"
 
 
 class ClarifyStage(PipelineStage):
-    """双轨澄清 stage。"""
+    """Dual-track clarify stage."""
 
     stage_name = "clarify_stage"
 
@@ -43,11 +43,11 @@ class ClarifyStage(PipelineStage):
         self.default_prompt = default_prompt
 
     # ------------------------------------------------------------------
-    # LLM 生成（与 NLU/NLG 相同的调用链；测试中可整体替换）
+    # LLM generation (same call chain as NLU/NLG; can be wholly replaced in tests)
     # ------------------------------------------------------------------
 
     def _generate(self, prompt: str, llm_config: Optional[Dict[str, Any]] = None) -> str:
-        """调用 LLM 生成澄清回复。"""
+        """Call the LLM to generate the clarify reply."""
         if llm_config is None:
             from config.config import get_llm_config
             llm_config = get_llm_config()
@@ -63,16 +63,13 @@ class ClarifyStage(PipelineStage):
         )
         return result.get("content", "")
 
-    # ------------------------------------------------------------------
-    # 触发判定与槽位提取
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _is_triggered(ctx: DialogueContext) -> bool:
-        """触发判定：next_node == clarify。
+        """Trigger check: next_node == clarify.
 
-        NLU 输出的 next_node 不在 node_map（非法编码，且拓扑已注入非空）
-        时回落为 clarify——由澄清兜底承接，而不是静默保持当前节点。
+        When the NLU-emitted next_node is not in node_map (invalid code, and the
+        injected topology is non-empty), fall back to clarify — the clarify
+        fallback takes over instead of silently keeping the current node.
         """
         nlu_result = ctx.nlu_result or {}
         next_node = nlu_result.get("next_node", "")
@@ -94,10 +91,6 @@ class ClarifyStage(PipelineStage):
             keywords = [keywords]
         return {"topic": topic, "keywords": [str(k) for k in keywords]}
 
-    # ------------------------------------------------------------------
-    # 检索 query 组装与结果格式化
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _build_search_query(ctx: DialogueContext, open_slots: Dict[str, Any]) -> str:
         parts = [ctx.user_query, open_slots["topic"], *open_slots["keywords"]]
@@ -113,15 +106,17 @@ class ClarifyStage(PipelineStage):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # 检索执行（异常降级 → 空结果，门控自然走 fallback）
+    # Recall execution (exceptions degrade to an empty result; gating then
+    # naturally falls back)
     # ------------------------------------------------------------------
 
     def _do_recall(self, ctx: DialogueContext, search_query: str) -> List[Dict[str, Any]]:
-        """用组装好的 query 执行召回，返回融合结果；异常时返回空列表。
+        """Run recall with the assembled query and return fused results; return an empty list on error.
 
-        MultiPathRecaller.execute 以 ctx.user_query 为检索文本并写入
-        ctx.pre_recall_results —— 这里临时替换 user_query，执行后还原，
-        避免污染下游 stage 看到的原始问句。
+        MultiPathRecaller.execute uses ctx.user_query as the search text and writes
+        ctx.pre_recall_results — temporarily swap user_query here and restore it
+        after execution, so the original question seen by downstream stages
+        stays unpolluted.
         """
         original_query = ctx.user_query
         original_recall = ctx.pre_recall_results
@@ -137,22 +132,20 @@ class ClarifyStage(PipelineStage):
             ctx.user_query = original_query
             ctx.pre_recall_results = original_recall
 
-    # ------------------------------------------------------------------
-    # PipelineStage 接口
-    # ------------------------------------------------------------------
-
     def execute(self, ctx: DialogueContext) -> DialogueContext:
-        # 1. 每轮重置（防跨轮残留）
+        # 1. Per-turn reset (prevent cross-turn residue)
         ctx.metadata["clarify"] = {"triggered": False}
 
-        # 2. 触发判定（模块开关由管线装配侧保证，stage 只看意图）
+        # 2. Trigger check (the module switch is guaranteed by the pipeline
+        # assembly side; the stage only looks at intent)
         if not self._is_triggered(ctx):
             return ctx
 
         open_slots = self._extract_open_slots(ctx)
         search_query = self._build_search_query(ctx, open_slots)
 
-        # 3~6. 检索 + 门控（异常降级 fallback，永不阻塞主管线）
+        # 3-6. Recall + gating (exceptions degrade to fallback, never blocking
+        # the main pipeline)
         recall_results = self._do_recall(ctx, search_query)
         try:
             mode, adjusted = self.rule.route(
@@ -168,7 +161,7 @@ class ClarifyStage(PipelineStage):
             search_query,
         )
 
-        # 7. 按 mode 生成（本轮唯一的 NLG 调用）
+        # 7. Generate by mode (the only NLG call this turn)
         prompt = self._build_prompt(ctx, mode, open_slots, adjusted)
         try:
             content = self._generate(prompt, ctx.llm_config).strip()
@@ -176,7 +169,6 @@ class ClarifyStage(PipelineStage):
             logger.warning("澄清生成异常，使用兜底话术: %s", e, exc_info=True)
             content = "抱歉，这个问题我需要确认一下。我们继续刚才的任务好吗？"
 
-        # 8. 写回
         ctx.nlg_result = {"content": content}
         ctx.metadata["clarify"] = {
             "triggered": True,
@@ -186,10 +178,6 @@ class ClarifyStage(PipelineStage):
             "query": search_query,
         }
         return ctx
-
-    # ------------------------------------------------------------------
-    # prompt 组装
-    # ------------------------------------------------------------------
 
     def _build_prompt(
         self,

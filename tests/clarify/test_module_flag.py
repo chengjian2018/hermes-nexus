@@ -1,4 +1,4 @@
-"""enable_clarify 模块开关 + FSM NLU prompt 澄清意图指令测试。"""
+"""Tests for the enable_clarify module flag + the clarify-intent directive in the FSM NLU prompt."""
 
 
 def test_default_disabled():
@@ -16,7 +16,7 @@ def test_explicit_enabled():
 
 
 def test_kwargs_style_enabled():
-    """声明式 pattern 用 kwargs 传参，需同样生效。"""
+    """Declarative patterns pass kwargs; the flag must take effect the same way."""
     from dialogue.module import FSMModule
 
     m = FSMModule(module_code="m1", **{"enable_clarify": True})

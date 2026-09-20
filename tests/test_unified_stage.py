@@ -1,14 +1,15 @@
-"""统一阶段（单次调用 + structured output）离线测试。
+"""Unified stage (single call + structured output) offline tests.
 
-通过脚本化 FakeProvider 模拟 LLM 输出（不访问真实 API），覆盖：
-1. Pattern 自动发现 + module 级统一阶段注入（ROUTE / FSM 双形态）
-2. 端到端流程：每轮恰好 1 次 LLM 调用（两阶段为 2 次）、跳转与槽位正确
-3. prompt 装配：候选节点带回答范式、next_node 合法取值列表
-4. 非法 next_node 代码级硬 guard（保持当前节点，回复保留）
-5. 解析失败重试成功 / 重试耗尽兜底不崩溃
-6. PassThroughNLG 保留已生成回复
-7. 双轨澄清组合：偏题轮 clarify 信号 → kb 应答 + 拉回（澄清轮 2 次调用，
-   正常轮仍 1 次）；未开澄清模块的 clarify 信号被合法集硬 guard 拒绝
+Uses the scripted FakeProvider to simulate LLM output (no real API access), covering:
+1. Pattern auto-discovery + module-level unified stage injection (ROUTE / FSM dual forms)
+2. End-to-end flow: exactly 1 LLM call per turn (2 for the two-stage variant), correct jumps and slots
+3. Prompt assembly: candidate nodes carry answer styles, next_node allowed-values list
+4. Code-level hard guard against invalid next_node (keeps the current node, reply preserved)
+5. Parse-failure retry success / exhausted-retry fallback without crashing
+6. PassThroughNLG keeps the already-generated reply
+7. Dual-track clarify combination: off-topic turn emits a clarify signal → kb answer + bring back
+   on topic (2 calls on the clarify turn, still 1 on a normal turn); a clarify signal from a module
+   without clarify is rejected by the allowed-values hard guard
 """
 
 import logging
@@ -30,21 +31,21 @@ logging.basicConfig(level=logging.WARNING)
 
 @pytest.fixture(scope="session", autouse=True)
 def _fake_provider():
-    """注册脚本化 provider，测试全程复用。"""
+    """Register the scripted provider, reused throughout the tests."""
     register_fake_provider()
 
 
 @pytest.fixture(scope="module")
 def pattern():
-    """返回内联构建的统一阶段 pattern（节点 code/name 与
-    fake_provider 脚本约定保持一致）。"""
+    """Return the inline-built unified stage pattern (node codes/names stay
+    consistent with the fake_provider script conventions)."""
     from dialogue.module import FSMModule, RouteModule
     from dialogue.node import BaseNode
     from dialogue.pattern import Pattern
     from dialogue.register import discover_builtin_patterns
     from stages.unified import FSMUnifiedNLU, RouteUnifiedNLU
 
-    # AST 自动发现仍工作（挂到保留的内置 pattern 上验证）
+    # AST auto-discovery still works (verified against the retained builtin pattern)
     imported = discover_builtin_patterns()
     assert "dialogue.xianyu_agent_route" in imported, (
         f"xianyu_agent_route 未被自动发现，已发现: {imported}"
@@ -130,12 +131,12 @@ def pattern():
 
 @pytest.fixture()
 def sessions():
-    """每次测试独立的会话容器。"""
+    """A session container isolated per test."""
     return {}
 
 
 def launch(pattern, sessions, session_id="s1"):
-    """模拟 main.py 的 launch 流程：注册会话并注入管线上下文。"""
+    """Simulate main.py's launch flow: register the session and inject the pipeline context."""
     from chat.session import Session
 
     session = Session(session_id=session_id, pattern_code=pattern.code)
@@ -150,17 +151,18 @@ def launch(pattern, sessions, session_id="s1"):
 
 
 def chat(sessions, session_id, query):
-    """调用 chat.chat 处理一轮对话。"""
+    """Call chat.chat to process one dialogue turn."""
     from chat.chat import chat as chat_fn
 
     return chat_fn(query=query, session_id=session_id, all_sessions=sessions)
 
 
 def chat_once(pattern, sessions, query, expect_calls=1):
-    """处理一轮对话并断言恰好消耗 expect_calls 次 LLM 调用。
+    """Process one dialogue turn and assert exactly expect_calls LLM calls are consumed.
 
-    正常轮为 1 次（统一阶段核心收益）；ROUTE 静默分发轮目标 FSM 首节点
-    在同轮重入消化 query，故为 2 次（route 统一阶段 + FSM 统一阶段）。
+    A normal turn is 1 call (the core benefit of the unified stage); on a ROUTE silent-dispatch
+    turn, the target FSM first node re-enters within the same turn and digests the query, so it
+    is 2 calls (route unified stage + FSM unified stage).
     """
     before = FakeProvider.call_count
     reply = chat(sessions, "s1", query)
@@ -172,11 +174,11 @@ def chat_once(pattern, sessions, query, expect_calls=1):
 
 
 # ============================================================================
-# 结构与装配测试
+# Structure and wiring tests
 # ============================================================================
 
 def test_pattern_discovered_and_stage_wiring(pattern):
-    """Pattern 可被 AST 自动发现；ROUTE/FSM 模块均注入统一阶段。"""
+    """The pattern is AST-auto-discoverable; both ROUTE/FSM modules get the unified stage injected."""
     from dialogue.module import ModuleType
     from stages.unified import FSMUnifiedNLU, RouteUnifiedNLU
 
@@ -188,25 +190,25 @@ def test_pattern_discovered_and_stage_wiring(pattern):
     assert root_module.type == ModuleType.ROUTE
     assert buy_module.type == ModuleType.FSM
 
-    # module 级统一阶段注入（generate 单 stage 形态，经 GenerateSlot 解析命中）
+    # module-level unified stage injection (generate single-stage form, resolved via GenerateSlot)
     assert isinstance(root_module.generate, RouteUnifiedNLU)
     assert isinstance(buy_module.generate, FSMUnifiedNLU)
 
-    # 路由结构与菜单分发
+    # Routing structure and menu dispatch
     assert pattern.node_map["u_route_root"].sub_nodes == [
         "u_menu_sales", "u_menu_chitchat",
     ]
     assert pattern.node_map["u_menu_sales"].jump_module == "unified_buy"
     assert not hasattr(pattern.node_map["u_menu_chitchat"], "jump_module")
 
-    # FSM 节点链与终节点
+    # FSM node chain and end node
     assert pattern.node_map["u_ask_brand"].sub_nodes == ["u_ask_budget"]
     assert pattern.node_map["u_ask_budget"].sub_nodes == ["u_confirm"]
     assert pattern.node_map["u_confirm"].is_end is True
 
 
 def test_prompt_embeds_candidates_and_valid_values(pattern):
-    """统一阶段 prompt 携带候选节点回答范式与 next_node 合法取值。"""
+    """The unified stage prompt carries candidate-node answer styles and the next_node allowed values."""
     from dialogue.base import DialogueContext
     from stages.unified import FSMUnifiedNLU
 
@@ -218,47 +220,48 @@ def test_prompt_embeds_candidates_and_valid_values(pattern):
 
     prompt = FSMUnifiedNLU().prompt_build(ctx)
 
-    # 候选节点完整信息：编码 + 名称 + 槽位定义 + 回答范式
+    # Full candidate-node info: code + name + slot definition + answer style
     assert "u_ask_budget" in prompt
     assert "询问预算" in prompt
-    assert "预算区间" in prompt  # 候选节点槽位定义
-    assert "回答范式" in prompt  # 候选节点回答范式被带出
-    # 当前节点回答范式（保持当前节点时使用）
+    assert "预算区间" in prompt
+    assert "回答范式" in prompt
+    # Current node's answer style (used when keeping the current node)
     assert "汽车品牌" in prompt
-    # next_node 合法取值列表（JSON 数组，含空串与候选编码）
+    # next_node allowed-values list (JSON array containing the empty string and candidate codes)
     assert '"u_ask_budget"' in prompt
     assert '""' in prompt
 
 
 # ============================================================================
-# 端到端流程测试（每轮单次调用）
+# End-to-end flow tests (single call per turn)
 # ============================================================================
 
 def test_route_then_fsm_full_flow_single_call_per_turn(pattern, sessions):
-    """购车流程全链路：路由分发 → 品牌 → 预算 → 确认，每轮恰好 1 次调用。"""
+    """Full car-buying flow: route dispatch → brand → budget → confirm, exactly 1 call per turn."""
     session = launch(pattern, sessions)
 
-    # 第 1 轮：路由命中 u_menu_sales → 静默分发，FSM 首节点 u_ask_brand 同轮消化该句
-    # （route 统一阶段 + FSM 统一阶段 = 2 次调用；reply 来自 FSM 侧）
+    # Turn 1: routing hits u_menu_sales → silent dispatch; FSM first node u_ask_brand digests the
+    # sentence in the same turn (route unified stage + FSM unified stage = 2 calls; reply from the FSM side)
     reply = chat_once(pattern, sessions, "我想买车，看看有什么车型", expect_calls=2)
     assert "询问预算" in reply, f"回复应来自 FSM 首节点统一阶段直出，实际: {reply!r}"
     assert session.cxt.current_module_code == "unified_buy"
     assert session.cxt.current_node_code == "u_ask_budget"
     assert session.cxt.filled_slots["brand"] == "我想买车，看看有什么车型"
 
-    # 第 2 轮：u_ask_budget 消化，一次产出 budget 槽位 + 确认话术 + 跳转
+    # Turn 2: u_ask_budget digests it, producing the budget slot + confirmation reply + jump in one call
     reply = chat_once(pattern, sessions, "比亚迪")
     assert "确认购车信息" in reply
     assert session.cxt.current_node_code == "u_confirm"
     assert session.cxt.filled_slots["budget"] == "比亚迪"
 
-    # 第 3 轮：终节点，next_node 为空保持不动（budget 保持第 2 轮抽取值）
+    # Turn 3: end node; empty next_node keeps it in place (budget keeps the value extracted in turn 2)
     reply = chat_once(pattern, sessions, "预算20万左右")
     assert "确认购车信息" in reply
     assert session.cxt.current_node_code == "u_confirm"
     assert session.cxt.filled_slots["budget"] == "比亚迪"
 
-    # 槽位贯穿始终（brand 在静默分发轮被首节点用整句消化）；统一阶段观测元数据写入
+    # Slots carry through the whole flow (brand was digested with the full sentence by the first
+    # node in the silent-dispatch turn); unified-stage observation metadata written
     assert session.cxt.filled_slots == {
         "brand": "我想买车，看看有什么车型",
         "budget": "比亚迪",
@@ -268,7 +271,7 @@ def test_route_then_fsm_full_flow_single_call_per_turn(pattern, sessions):
 
 
 def test_chitchat_stays_route_root(pattern, sessions):
-    """闲聊意图：单次调用回复后重置回根节点，下一轮仍可正常路由。"""
+    """Chitchat intent: after a single-call reply it resets back to the root node; the next turn still routes normally."""
     session = launch(pattern, sessions)
 
     reply = chat_once(pattern, sessions, "你好呀")
@@ -276,40 +279,39 @@ def test_chitchat_stays_route_root(pattern, sessions):
     assert session.cxt.current_module_code == "unified_root"
     assert session.cxt.current_node_code == "u_route_root"
 
-    # 下一轮仍可路由到购车子模块（静默分发：2 次调用，FSM 首节点同轮消化）
+    # The next turn can still route to the buy sub-module (silent dispatch: 2 calls, FSM first node digests in the same turn)
     reply = chat_once(pattern, sessions, "我想买车", expect_calls=2)
     assert session.cxt.current_module_code == "unified_buy"
     assert session.cxt.current_node_code == "u_ask_budget"
 
 
 # ============================================================================
-# 硬 guard 与降级测试
+# Hard guard and fallback tests
 # ============================================================================
 
 def test_invalid_next_node_guarded(pattern, sessions):
-    """模型输出非法 next_node：代码级 guard 保持当前节点，回复保留。"""
+    """The model outputs an invalid next_node: the code-level guard keeps the current node, reply preserved."""
     session = launch(pattern, sessions)
 
     reply = chat_once(pattern, sessions, "跳到不存在节点")
 
-    # 非法转移边被拒绝：节点保持在根节点
     assert session.cxt.current_module_code == "unified_root"
     assert session.cxt.current_node_code == "u_route_root"
     assert session.cxt.nlu_result["next_node"] == ""
-    # 回复保留（仍返回给用户），观测元数据记录非法取值
+    # Reply preserved (still returned to the user); observation metadata records the invalid value
     assert "非法节点" in reply
     assert session.cxt.metadata["unified"]["invalid_next_node"] == "not_exist_node"
 
 
 def test_parse_failure_retry_recovers(pattern, sessions):
-    """首次输出非 JSON → 重试修正成功 → 正常分发（共 2 次调用）。"""
+    """First output is non-JSON → retry corrects it → normal dispatch (2 calls in total)."""
     session = launch(pattern, sessions)
     before = FakeProvider.call_count
 
     reply = chat(sessions, "s1", "解析失败重试 买车")
 
-    # 失败 + 重试（route 统一阶段）+ FSM 首节点失败 + 重试 = 4 次
-    # （query 仍含「解析失败重试」，重入的 FSM 首节点同样先失败再重试）
+    # Failure + retry (route unified stage) + FSM first-node failure + retry = 4 calls
+    # (the query still contains "parse failure retry"; the re-entered FSM first node also fails first, then retries)
     assert FakeProvider.call_count - before == 4
     assert session.cxt.current_module_code == "unified_buy"
     assert session.cxt.current_node_code == "u_ask_budget"
@@ -317,7 +319,7 @@ def test_parse_failure_retry_recovers(pattern, sessions):
 
 
 def test_parse_failure_exhausted_falls_back(pattern, sessions):
-    """重试后仍解析失败 → 兜底回复 + 保持当前节点，不抛异常。"""
+    """Parsing still fails after retry → fallback reply + keep the current node, no exception raised."""
     from stages.unified import FSMUnifiedNLU
 
     session = launch(pattern, sessions)
@@ -325,7 +327,7 @@ def test_parse_failure_exhausted_falls_back(pattern, sessions):
 
     reply = chat(sessions, "s1", "永远解析失败")
 
-    assert FakeProvider.call_count - before == 2  # 失败 + 重试耗尽
+    assert FakeProvider.call_count - before == 2
     assert reply == FSMUnifiedNLU.fallback_reply
     assert session.cxt.metadata["unified"]["parse_failed"] is True
     assert session.cxt.nlu_result == {"next_node": "", "slots": {}}
@@ -334,7 +336,7 @@ def test_parse_failure_exhausted_falls_back(pattern, sessions):
 
 
 def test_pass_through_nlg_keeps_existing_result():
-    """PassThroughNLG：有已生成回复时原样保留；缺失时置空并告警不崩溃。"""
+    """PassThroughNLG: keeps an existing generated reply as-is; when missing, sets it empty, warns, and does not crash."""
     from dialogue.base import DialogueContext
     from stages.unified import PassThroughNLG
 
@@ -351,11 +353,11 @@ def test_pass_through_nlg_keeps_existing_result():
 
 
 # ============================================================================
-# 开场白播报测试（零 LLM，纯拼接）
+# Opening broadcast tests (zero LLM, pure concatenation)
 # ============================================================================
 
 def test_opening_broadcast_default_fallback():
-    """未传 template：默认文案 + task_info 键值对逐行拼接。"""
+    """No template passed: default copy concatenated line by line with the task_info key-value pairs."""
     from dialogue.base import DialogueContext
     from stages.unified import OpeningBroadcastNLG
 
@@ -369,7 +371,7 @@ def test_opening_broadcast_default_fallback():
 
 
 def test_opening_broadcast_template_fields():
-    """传 template：task_info 字段经 str.format 嵌入。"""
+    """Template passed: task_info fields embedded via str.format."""
     from dialogue.base import DialogueContext
     from stages.unified import OpeningBroadcastNLG
 
@@ -382,7 +384,7 @@ def test_opening_broadcast_template_fields():
 
 
 def test_opening_broadcast_template_missing_field_falls_back():
-    """template 引用 task_info 缺失字段：告警回落默认拼接，不抛异常。"""
+    """Template references a task_info field that is missing: warn and fall back to the default concatenation, no exception raised."""
     from dialogue.base import DialogueContext
     from stages.unified import OpeningBroadcastNLG
 
@@ -397,14 +399,16 @@ def test_opening_broadcast_template_missing_field_falls_back():
 
 
 # ============================================================================
-# 双轨澄清组合测试（enable_clarify=True 的 FSM 模块）
+# Dual-track clarify combination tests (FSM module with enable_clarify=True)
 # ============================================================================
 
 def test_clarify_next_node_rejected_when_disabled(pattern, sessions):
-    """未开澄清的模块输出 clarify 信号：合法集硬 guard 回落为保持当前节点。
+    """A module without clarify outputs a clarify signal: the allowed-values hard guard falls
+    back to keeping the current node.
 
-    模型 reply 是"帮您确认"类承接承诺，但模块未装配澄清环节不会兑现，
-    因此回复一并替换为兜底话术（避免空承诺）。
+    The model's reply is an acknowledgment-style promise ("let me confirm for you"), but the
+    module has no clarify stage installed to honor it, so the reply is replaced with the
+    fallback copy as well (avoiding an empty promise).
     """
     from stages.unified import FSMUnifiedNLU
 
@@ -416,16 +420,17 @@ def test_clarify_next_node_rejected_when_disabled(pattern, sessions):
     assert session.cxt.current_node_code == "u_route_root"
     assert session.cxt.nlu_result["next_node"] == ""
     assert session.cxt.metadata["unified"]["invalid_next_node"] == "clarify"
-    assert reply == FSMUnifiedNLU.fallback_reply  # 空承诺回复被兜底替换
+    assert reply == FSMUnifiedNLU.fallback_reply
     assert "clarify" not in session.cxt.metadata
 
 
 def test_unified_with_clarify_off_topic_turn(pattern, sessions):
-    """统一阶段 + 双轨澄清：偏题轮 kb 应答 + 拉回，节点不动、槽位不污染。
+    """Unified stage + dual-track clarify: off-topic turn gets a kb answer + bring back on topic;
+    node unchanged, slots unpolluted.
 
-    管线为 [FSMUnifiedNLU, ClarifyStage, PassThroughNLG]：
-    澄清轮 = 统一调用 + 澄清生成共 2 次 LLM 调用（与两阶段+澄清持平），
-    正常轮仍为 1 次。
+    The pipeline is [FSMUnifiedNLU, ClarifyStage, PassThroughNLG]:
+    a clarify turn = unified call + clarify generation, 2 LLM calls in total (on par with
+    two-stage + clarify); a normal turn is still 1 call.
     """
     from stages.clarify import ClarifyRouteRule, ClarifyStage
     from stages.recaller import (
@@ -443,7 +448,7 @@ def test_unified_with_clarify_off_topic_turn(pattern, sessions):
         },
     ]
 
-    # 测试注入：给购车子模块开澄清（测完恢复，不污染同文件其他用例）
+    # Test injection: enable clarify on the buy sub-module (restored afterwards, so other cases in this file stay unpolluted)
     buy = pattern.module_map["unified_buy"]
     saved_flag = getattr(buy, "enable_clarify", False)
     saved_stage = getattr(buy, "clarify_stage", None)
@@ -460,29 +465,30 @@ def test_unified_with_clarify_off_topic_turn(pattern, sessions):
     try:
         session = launch(pattern, sessions)
 
-        # 第 1 轮：路由命中 → 静默分发，FSM 首节点 u_ask_brand 同轮消化该句
-        # （route 统一阶段 + FSM 统一阶段 = 2 次调用），推进到 u_ask_budget
+        # Turn 1: routing hits → silent dispatch; FSM first node u_ask_brand digests the sentence
+        # in the same turn (route unified stage + FSM unified stage = 2 calls), advancing to u_ask_budget
         chat_once(pattern, sessions, "我想买车", expect_calls=2)
         assert session.cxt.current_module_code == "unified_buy"
         assert session.cxt.current_node_code == "u_ask_budget"
         assert session.cxt.filled_slots.get("brand") == "我想买车"
 
-        # 第 2 轮：偏题（应问预算时反问收费）→ 统一阶段发 clarify 信号，
-        # ClarifyStage 覆写回复为 kb 应答 + 拉回（统一 + 澄清生成 = 2 次调用）
+        # Turn 2: off-topic (asking about fees when the budget should be asked) → the unified stage
+        # emits a clarify signal; ClarifyStage overwrites the reply with a kb answer + bring back
+        # on topic (unified + clarify generation = 2 calls)
         before = FakeProvider.call_count
         reply = chat(sessions, "s1", "还要收别的钱吗")
-        assert FakeProvider.call_count - before == 2  # 统一 + 澄清生成
+        assert FakeProvider.call_count - before == 2
 
         clarify_info = session.cxt.metadata["clarify"]
         assert clarify_info["triggered"] is True
         assert clarify_info["mode"] == "kb"
-        assert "上牌费与服务费" in reply  # kb 应答
-        assert "预算" in reply  # 拉回主线
-        assert session.cxt.current_node_code == "u_ask_budget"  # 节点不动
-        assert "topic" not in session.cxt.filled_slots  # 澄清槽位未污染
-        assert session.cxt.filled_slots.get("brand") == "我想买车"  # 业务槽位保留
+        assert "上牌费与服务费" in reply
+        assert "预算" in reply
+        assert session.cxt.current_node_code == "u_ask_budget"
+        assert "topic" not in session.cxt.filled_slots
+        assert session.cxt.filled_slots.get("brand") == "我想买车"
 
-        # 第 3 轮：恢复正常（回答预算）→ 澄清元数据重置，流程继续推进
+        # Turn 3: back to normal (answers the budget) → clarify metadata reset, flow keeps advancing
         reply = chat_once(pattern, sessions, "20万左右")
         assert session.cxt.metadata["clarify"]["triggered"] is False
         assert session.cxt.current_node_code == "u_confirm"

@@ -1,36 +1,41 @@
 """
-Unified stage —— 单次调用 + structured output：一次 LLM 调用同时产出
-意图/槽位（NLU）与回复话术（NLG）。
+Unified stage — single call + structured output: one LLM call produces both
+intent/slots (NLU) and the reply text (NLG).
 
-与默认 NLU → NLG 两阶段的差异：
-- 每轮只发起一次串行 LLM 调用（延迟/成本约减半）；
-- 决策（next_node/slots）与话术（reply）出自同一次推理，天然自洽；
-- next_node 由代码按「当前节点合法转移边」做硬校验，非法取值回落为
-  保持当前节点（确定性 guard，不依赖 prompt 约束）。
+Differences from the default two-stage NLU → NLG:
+- Only one serial LLM call per turn (latency/cost roughly halved);
+- The decision (next_node/slots) and the text (reply) come from the same inference,
+  naturally self-consistent;
+- next_node is hard-validated by code against the current node's legal transition
+  edges; illegal values fall back to staying on the current node (deterministic
+  guard, not reliant on prompt constraints).
 
-输出协议（单次调用返回的 JSON）：
-    {"reply": "给用户的回复话术", "next_node": "xx", "slots": {"slot1": ""}}
+Output protocol (JSON returned by the single call):
+    {"reply": "reply text for the user", "next_node": "xx", "slots": {"slot1": ""}}
 
-阶段产物拆写：
-- ctx.nlu_result = {"next_node", "slots"}      —— 下游节点跳转零改动
-- ctx.nlg_result = {"content": reply}          —— 下游回复提取零改动
-- ctx.metadata["unified"] = 观测信息（invalid_next_node / parse_failed 等）
+Stage output split-writes:
+- ctx.nlu_result = {"next_node", "slots"}      — downstream node jumps unchanged
+- ctx.nlg_result = {"content": reply}          — downstream reply extraction unchanged
+- ctx.metadata["unified"] = observability info (invalid_next_node / parse_failed etc.)
 
-接入方式（module 级 generate 注入，经默认骨架 GenerateSlot 解析命中）：
+Wiring (module-level generate injection, resolved via the default skeleton's GenerateSlot):
     FSMModule(generate=FSMUnifiedNLU())
     RouteModule(generate=RouteUnifiedNLU())
-（node 级 generate 优先于 module 级，见 stage_slots.py；PassThroughNLG
-保留为独立工具类，generate 单 stage 形态下不再需要占位 NLG）
+(node-level generate takes priority over module-level, see stage_slots.py; PassThroughNLG
+is kept as a standalone utility — with generate in single-stage form no placeholder
+NLG is needed)
 
-与双轨澄清组合（enable_clarify=True 的 FSM 模块）：
-    管线装配为 [统一阶段, ClarifyStage, PassThroughNLG]。
-    统一阶段按模板中的偏题特例输出 next_node="clarify"（合法集放行），
-    ClarifyStage 覆写 nlg_result 生成澄清回复，PassThroughNLG 放行；
-    澄清轮共 2 次 LLM 调用（统一 + 澄清生成），与两阶段+澄清持平，
-    正常轮仍为 1 次。
+Combined with dual-track clarify (FSM modules with enable_clarify=True):
+    The pipeline assembles as [unified stage, ClarifyStage, PassThroughNLG].
+    The unified stage outputs next_node="clarify" per the off-topic special case in
+    the template (admitted by the valid set); ClarifyStage overwrites nlg_result to
+    generate the clarify reply; PassThroughNLG lets it through;
+    a clarify turn costs 2 LLM calls (unified + clarify generation), on par with the
+    two-stage + clarify setup; normal turns stay at 1.
 
-ROUTE 模块下统一阶段生成的回复已依据所选菜单节点的回答范式，
-管线中随后的 route_advance / jump_module 分发逻辑不受影响。
+Under ROUTE modules the unified stage's reply already follows the chosen menu node's
+answer style; the subsequent route_advance / jump_module dispatch in the pipeline is
+unaffected.
 """
 
 from __future__ import annotations
@@ -54,13 +59,15 @@ logger = logging.getLogger(__name__)
 
 
 class _UnifiedBaseNLU(BaseNLU):
-    """统一阶段基类：一次调用完成理解与生成，拆写 nlu_result / nlg_result。
+    """Unified stage base class: one call completes understanding and generation, split-writing nlu_result / nlg_result.
 
-    子类只需提供默认模板与日志文案；解析容错与失败重试复用
-    ``BaseNLU._execute_with_retry``（重试 prompt 由本类覆写为三字段协议）。
+    Subclasses only supply the default template and log wording; parse tolerance and
+    failure retry reuse ``BaseNLU._execute_with_retry`` (the retry prompt is overridden
+    by this class to the three-field protocol).
     """
 
-    # 解析重试耗尽后的兜底话术：保证本轮有回复且保持当前节点
+    # Fallback reply after parse retries are exhausted: guarantees a reply this turn
+    # and staying on the current node
     fallback_reply = "抱歉，我没能理解您的意思，请您换个说法再告诉我一次。"
 
     def __init__(
@@ -70,17 +77,20 @@ class _UnifiedBaseNLU(BaseNLU):
     ):
         """
         Args:
-            response_format: 可选的 API 级结构化约束（如 ``{"type": "json_object"}``），
-                经 provider ``**kwargs`` 透传进请求 payload。默认 None —— 仅靠
-                prompt 协议约束输出格式，跨 provider 通用；服务端支持时建议开启。
-            fallback_reply: 解析重试耗尽后的兜底回复，默认使用类属性文案。
+            response_format: optional API-level structured constraint (e.g.
+                ``{"type": "json_object"}``), passed through into the request payload
+                via provider ``**kwargs``. Default None — the output format is
+                constrained only by the prompt protocol, portable across providers;
+                recommended when the server side supports it.
+            fallback_reply: fallback reply after parse retries are exhausted; defaults
+                to the class-attribute text.
         """
         self.response_format = response_format
         if fallback_reply is not None:
             self.fallback_reply = fallback_reply
 
     # ------------------------------------------------------------------
-    # LLM 调用：在 BaseNLU 基础上按需透传 response_format
+    # LLM call: passes response_format through on top of BaseNLU as needed
     # ------------------------------------------------------------------
 
     def _call_llm(
@@ -111,20 +121,21 @@ class _UnifiedBaseNLU(BaseNLU):
         return content
 
     # ------------------------------------------------------------------
-    # 候选节点与合法转移边
+    # Candidate nodes and legal transition edges
     # ------------------------------------------------------------------
 
     def _candidate_node_codes(self, cxt: DialogueContext) -> List[str]:
-        """当前节点的合法转移目标（sub_nodes）；无当前节点时为空。"""
+        """Legal transition targets of the current node (sub_nodes); empty when there is no current node."""
         node = cxt.get_current_node()
         return list(node.sub_nodes) if node is not None else []
 
     def _valid_next_values(self, cxt: DialogueContext) -> set:
-        """next_node 的合法取值集合：候选节点编码 + 空串（保持当前节点）。
+        """Legal values for next_node: candidate node codes + empty string (stay on current node).
 
-        模块开启双轨澄清（enable_clarify=True）时额外放行 "clarify"：
-        触发后由 ClarifyStage 覆写 nlg_result 生成澄清回复，
-        节点跳转守卫按 metadata["clarify"] 跳过，不会真的跳到不存在的节点。
+        When the module enables dual-track clarify (enable_clarify=True), "clarify" is
+        additionally admitted: once triggered, ClarifyStage overwrites nlg_result to
+        generate the clarify reply, and the node transition guard skips via
+        metadata["clarify"], so it never actually jumps to a nonexistent node.
         """
         valid = set(self._candidate_node_codes(cxt)) | {""}
         module = cxt.get_current_module()
@@ -133,19 +144,21 @@ class _UnifiedBaseNLU(BaseNLU):
         return valid
 
     def _format_valid_values(self, cxt: DialogueContext) -> str:
-        """合法取值列表的 prompt 文本（嵌入模板的 next_node 合法取值段）。"""
+        """Prompt text of the legal value list (embedded in the template's next_node valid-values section)."""
         return json.dumps(sorted(self._valid_next_values(cxt)), ensure_ascii=False)
 
     # ------------------------------------------------------------------
-    # 候选节点回答范式 —— 统一阶段需要"目的地的话术风格"才能一次生成
+    # Candidate nodes' answer styles — the unified stage needs the destination's
+    # text style to generate in a single pass
     # ------------------------------------------------------------------
 
     def _format_next_node_pattern(self, cxt: DialogueContext) -> str:
-        """候选后续节点（含回答范式）的 prompt 文本。
+        """Prompt text of the candidate next nodes (with answer styles).
 
-        相比两阶段 NLU 的 next_node 槽位（仅编码+名称+描述），这里额外带出
-        每个候选节点的槽位定义与回答范式：模型选节点与写回复在同一次推理内完成，
-        回复风格即所选节点的回答范式。
+        Compared with the two-stage NLU's next_node slot (code + name + description
+        only), this additionally carries each candidate node's slot definitions and
+        answer styles: the model picks the node and writes the reply within the same
+        inference, so the reply style is the chosen node's answer style.
         """
         parts: List[str] = []
         for code in self._candidate_node_codes(cxt):
@@ -174,11 +187,11 @@ class _UnifiedBaseNLU(BaseNLU):
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
-    # Prompt 装配（复用 BaseNLU 模板优先级 node > module > default）
+    # Prompt assembly (reuses BaseNLU template priority node > module > default)
     # ------------------------------------------------------------------
 
     def _build_template_kwargs(self, cxt: DialogueContext) -> Dict[str, str]:
-        """统一阶段的槽位词表：在 NLU 词表基础上增加回答范式与合法取值。"""
+        """The unified stage's slot vocabulary: the NLU vocabulary plus answer styles and legal values."""
         return {
             "cur_node": cxt.format_cur_node(stage="nlu"),
             "cur_answer_pattern": cxt.format_answer_pattern(),
@@ -193,7 +206,7 @@ class _UnifiedBaseNLU(BaseNLU):
         }
 
     def _build_retry_prompt(self, original_prompt: str, failed_output: str) -> str:
-        """解析失败重试 prompt：修正为 reply/next_node/slots 三字段协议。"""
+        """Parse-failure retry prompt: corrects the output to the reply/next_node/slots three-field protocol."""
         return (
             "## 原始任务\n"
             f"{original_prompt}\n\n"
@@ -210,18 +223,18 @@ class _UnifiedBaseNLU(BaseNLU):
         )
 
     # ------------------------------------------------------------------
-    # 单次调用主逻辑：解析 → 硬校验 → 拆写 nlu_result / nlg_result
+    # Single-call main logic: parse → hard validation → split-write nlu_result / nlg_result
     # ------------------------------------------------------------------
 
     def _execute_unified(self, ctx: DialogueContext) -> None:
-        """一次调用并拆写产物；任何失败都降级为兜底回复，不向上抛异常。"""
+        """One call and split-write of the outputs; any failure degrades to the fallback reply, never raising upward."""
         prompt = self.prompt_build(ctx)
         parsed = self._execute_with_retry(prompt, ctx.llm_config)
 
         unified_meta: Dict[str, Any] = {"triggered": True}
 
         if "raw" in parsed:
-            # 解析重试耗尽：保持当前节点 + 兜底话术
+            # Parse retries exhausted: stay on the current node + fallback reply
             logger.warning(
                 "统一阶段解析失败（含重试），使用兜底回复: session=%s",
                 ctx.session_id,
@@ -234,9 +247,11 @@ class _UnifiedBaseNLU(BaseNLU):
             valid_values = self._valid_next_values(ctx)
 
             if next_node not in valid_values:
-                # 硬 guard：非法转移边 → 保持当前节点。
-                # 被拒的若为 clarify 信号（模块未开双轨澄清），模型的 reply 多为
-                # "帮您确认一下"类承接承诺，而后续没有澄清环节兑现 —— 回复一并替换为兜底。
+                # Hard guard: illegal transition edge → stay on the current node.
+                # If the rejected value is a clarify signal (module without dual-track
+                # clarify enabled), the model's reply is usually a "let me confirm for
+                # you" take-over promise that no later clarify step will honor —
+                # replace the reply with the fallback as well.
                 logger.warning(
                     "统一阶段 next_node '%s' 不在合法转移边 %s 中，保持当前节点: %s",
                     next_node,
@@ -260,15 +275,15 @@ class _UnifiedBaseNLU(BaseNLU):
 
 
 # ============================================================================
-# FSM 模块统一阶段
+# FSM module unified stage
 # ============================================================================
 
 class FSMUnifiedNLU(_UnifiedBaseNLU):
-    """FSM 模块统一阶段：一次结构化调用完成意图/槽位抽取与回复生成。
+    """FSM module unified stage: one structured call completes intent/slot extraction and reply generation.
 
-    配套 ``PassThroughNLG``（generate dict 的 nlg 位）后，FSM 管线由
-    [NLU, NLG] 两次 LLM 调用变为统一阶段单次调用；
-    节点跳转与槽位合并逻辑（_handle_node_transition）零改动。
+    Paired with ``PassThroughNLG`` (the nlg position of the generate dict), the FSM
+    pipeline goes from [NLU, NLG] two LLM calls to a single unified-stage call;
+    node transition and slot merge logic (_handle_node_transition) unchanged.
     """
 
     stage_name = "fsm_unified"
@@ -293,14 +308,15 @@ class FSMUnifiedNLU(_UnifiedBaseNLU):
 
 
 # ============================================================================
-# ROUTE 模块统一阶段
+# ROUTE module unified stage
 # ============================================================================
 
 class RouteUnifiedNLU(_UnifiedBaseNLU):
-    """ROUTE 模块统一阶段：一次结构化调用完成意图分类与菜单节点回复生成。
+    """ROUTE module unified stage: one structured call completes intent classification and menu-node reply generation.
 
-    候选为路由根节点的菜单节点（含各自回答范式）；管线随后的
-    route_advance 会把当前节点切到所选菜单，jump_module 分发不受影响。
+    Candidates are the routing root's menu nodes (each with its answer style); the
+    pipeline's subsequent route_advance switches the current node to the chosen menu,
+    and jump_module dispatch is unaffected.
     """
 
     stage_name = "route_unified"
@@ -325,18 +341,20 @@ class RouteUnifiedNLU(_UnifiedBaseNLU):
 
 
 # ============================================================================
-# 占位 NLG —— 与统一阶段配对
+# Placeholder NLG — paired with the unified stage
 # ============================================================================
 
 class PassThroughNLG(PipelineStage):
-    """占位 NLG 阶段：保留统一阶段已写入的 nlg_result，跳过二次生成。
+    """Placeholder NLG stage: preserves the nlg_result already written by the unified stage, skipping a second generation.
 
-    用法：``module.generate = {"nlu": FSMUnifiedNLU()/RouteUnifiedNLU(),
-    "nlg": PassThroughNLG()}``（或统一阶段直接作 generate 单 stage 形态，
-    nlg 部件守卫自动 no-op），替换默认 NLG 的第二次 LLM 调用。
+    Usage: ``module.generate = {"nlu": FSMUnifiedNLU()/RouteUnifiedNLU(),
+    "nlg": PassThroughNLG()}`` (or the unified stage directly as the generate
+    single-stage form, where the nlg component guard auto no-ops), replacing the
+    default NLG's second LLM call.
 
-    澄清轮等其他先行阶段覆写 nlg_result 时同样直接放行；
-    若管线中没有阶段先行生成 nlg_result（装配错误），本轮回复为空并告警。
+    When earlier stages such as clarify turns overwrite nlg_result, it is likewise
+    passed through; if no stage earlier in the pipeline generated nlg_result (wiring
+    error), this turn's reply is empty and a warning is logged.
     """
 
     stage_name = "nlg_pass_through"
@@ -359,22 +377,24 @@ class PassThroughNLG(PipelineStage):
 
 
 # ============================================================================
-# 开场白播报 —— 零 LLM 纯拼接 stage
+# Opening broadcast — zero-LLM pure assembly stage
 # ============================================================================
 
 class OpeningBroadcastNLG(PipelineStage):
-    """开场白播报 stage：task_info 字段与文案模板拼接成开场白，直接写
-    nlg_result["content"]（零 LLM 调用）。
+    """Opening broadcast stage: assembles task_info fields with a text template into a greeting, written directly
+    to nlg_result["content"] (zero LLM calls).
 
-    装配：挂在入口节点的 ``generate``（单 stage 形态）。FSM 跳走后不再
-    回到该节点，天然只播一次；nlu_result 为空 → 跳转守卫保持当前节点，
-    直到业务节点接管。
+    Wiring: mounted on the entry node's ``generate`` (single-stage form). Once the FSM
+    transitions away it never returns to that node, so it naturally broadcasts only
+    once; nlu_result stays empty → the transition guard stays on the current node
+    until a business node takes over.
 
-    模板两级：
-    - ``template``（构造参数）：str.format 字段级嵌入 task_info 字段，
-      如 ``"您好，我是{product_name}的智能助手"``；
-    - 未传 / 格式化失败（缺字段等）：回落默认文案 + task_info 键值对
-      逐行拼接（与 ctx.format_task_info 同源同格式）。
+    Two template levels:
+    - ``template`` (constructor arg): str.format embeds task_info fields field by
+      field, e.g. ``"Hello, I am the intelligent assistant for {product_name}"``;
+    - Not provided / format failure (missing fields etc.): falls back to the default
+      text + task_info key-value pairs joined line by line (same source and format
+      as ctx.format_task_info).
     """
 
     stage_name = "opening_broadcast"
@@ -384,17 +404,18 @@ class OpeningBroadcastNLG(PipelineStage):
     def __init__(self, template: Optional[str] = None):
         """
         Args:
-            template: 开场白文案模板，``{field}`` 占位符对应 task_info 字段；
-                缺省回落类默认文案 + task_info 键值对拼接。
+            template: greeting text template; ``{field}`` placeholders map to
+                task_info fields; when omitted, falls back to the class default text
+                + task_info key-value assembly.
         """
         self.template = template
 
     def _task_info(self, ctx: DialogueContext) -> Dict[str, Any]:
-        """与 ctx.format_task_info 同源：task_basic_info 优先，metadata 回落。"""
+        """Same source as ctx.format_task_info: task_basic_info first, metadata as fallback."""
         return ctx.task_basic_info or ctx.metadata.get("task_info") or {}
 
     def _build_content(self, ctx: DialogueContext) -> str:
-        """拼接开场白：template.format 字段级填入；失败回落默认拼接。"""
+        """Assemble the greeting: template.format fills fields in; on failure falls back to default assembly."""
         task_info = self._task_info(ctx)
 
         if self.template:

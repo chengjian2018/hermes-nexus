@@ -1,14 +1,16 @@
-"""时间增强查询改写 stage —— 纯规则、零 LLM。
+"""Time-augmentation query rewrite stage — pure rules, zero LLM.
 
-复用 ``augmentation.augment_time``（jionlp 时间解析）在原文时间
-实体后追加可读时间标注，改写结果写入 ``ctx.rewritten_queries``：
+Reuses ``augmentation.augment_time`` (jionlp time parsing) to append a readable
+time annotation after time entities in the original text; the rewritten result
+is written to ``ctx.rewritten_queries``:
 
-    我下周一可以去 -> 我下周一(2026-09-07)可以去
+    "I can go next Monday" -> "I can go next Monday(2026-09-07)"
 
-与 LLM 版 ``QueryRewriter``（query.py）并列可选，通过 pattern/module/
-node 的 ``query`` 槽位属性配置使用（stage_slots.py 三层延迟解析）。
-不继承 ``BaseQueryRewriter``：该基类绑定 LLM 流（prompt_build /
-_call_llm / 重试），纯规则改写只需 ``PipelineStage.execute``。
+An alternative to the LLM-based ``QueryRewriter`` (query.py), selectable via the
+``query`` slot attribute on pattern/module/node (three-layer deferred resolution
+in stage_slots.py). Does not inherit ``BaseQueryRewriter``: that base class is
+bound to the LLM flow (prompt_build / _call_llm / retry); a pure-rule rewrite
+only needs ``PipelineStage.execute``.
 """
 
 import logging
@@ -21,10 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 class TimeAugQueryRewriter(PipelineStage):
-    """确定性查询改写：时间实体增强，无时间实体时原样返回。
+    """Deterministic query rewrite: time-entity augmentation; returns the text
+    unchanged when it contains no time entity.
 
-    相对时间（今天/下周等）的基准时间戳取 ``ctx.metadata["time_base"]``
-    （由 channel/调用方注入，如消息发生时刻）；未注入时用当前时间。
+    The base timestamp for relative times (today / next week etc.) comes from
+    ``ctx.metadata["time_base"]`` (injected by the channel/caller, e.g. the
+    moment the message was sent); falls back to the current time when absent.
     """
 
     stage_name = "time_aug_query_rewrite"

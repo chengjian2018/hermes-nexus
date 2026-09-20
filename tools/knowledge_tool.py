@@ -1,19 +1,25 @@
-"""知识库工具组 —— 商品/客服知识检索、商品目录、商品链接文本卡片。
+"""Knowledge tool set — product/CS knowledge search, product catalog, product link text card.
 
-移植自 Customer-Agent 的 Agent/CustomerAgent/tools/（get_product_knowledge /
-search_customer_service_knowledge / get_shop_products / send_goods_link），
-注册机制换成 hermes-nexus 的 ``registry.register()``（AST 自动发现）。
+Ported from Customer-Agent's Agent/CustomerAgent/tools/ (get_product_knowledge /
+search_customer_service_knowledge / get_shop_products / send_goods_link),
+with the registration mechanism swapped for hermes-nexus's
+``registry.register()`` (AST auto-discovery).
 
-与原版的差异（降级说明）：
-- 无 trusted dependencies 注入：``account_id`` 是工具参数，由 LLM 从系统提示
-  「## 任务信息」抄写（mock 服务可接受，演进路径见 ARCHITECTURE.md）
-- ``list_products`` 读知识库而非拼多多 API（认证来源不存在）
-- ``send_goods_link`` 返回链接文本而非副作用发送（webhook 模型只有一段回复
-  文本）；保留归属校验：goods_id 必须在当前 scope 知识库存在，防 LLM 编造
+Differences from the original (degradation notes):
+- no trusted dependency injection: ``account_id`` is a tool parameter, copied
+  by the LLM from the system prompt's task info section (acceptable for the
+  mock service; evolution path in ARCHITECTURE.md)
+- ``list_products`` reads the knowledge base instead of the Pinduoduo API
+  (the auth source does not exist here)
+- ``send_goods_link`` returns link text instead of side-effect sending (the
+  webhook model has a single reply text); ownership validation retained:
+  goods_id must exist in the current scope's knowledge base, preventing LLM
+  fabrication
 
-权限：``allowed_patterns={"customer_agent": True}`` —— domain 工具精确授权
-（customer_agent 为 Customer-Agent 整装迁移 pattern，见
-dialogue/customer_agent_route.py；原 knowledge_agent 演示 pattern 已删除）。
+Permissions: ``allowed_patterns={"customer_agent": True}`` — precise domain-tool
+authorization (customer_agent is the wholesale migration of Customer-Agent, see
+dialogue/customer_agent_route.py; the original knowledge_agent demo pattern was
+removed).
 """
 
 from typing import Any, Dict
@@ -24,7 +30,7 @@ from database.knowledge_store import (
 )
 from tools.register import registry, tool_error, tool_result
 
-_SCOPE_PREFIX = "xianyu"  # 当前唯一渠道；多渠道接入时再参数化
+_SCOPE_PREFIX = "xianyu"  # the only channel for now; parameterize when more channels land
 
 _ACCOUNT_ID_DESC = (
     "卖家账号 ID（account_id）。必须使用系统提示「## 任务信息」中列出的值，"
@@ -125,7 +131,7 @@ SEARCH_CS_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# list_products（降级版 get_shop_products：读知识库，无拼多多 API）
+# list_products (degraded get_shop_products: reads the knowledge base, no Pinduoduo API)
 # ---------------------------------------------------------------------------
 
 def _handle_list_products(args: Dict[str, Any]) -> str:
@@ -164,7 +170,7 @@ LIST_PRODUCTS_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# send_goods_link（文本版降级：返回链接文本，由 LLM 织入回复）
+# send_goods_link (text-only degradation: returns link text for the LLM to weave into the reply)
 # ---------------------------------------------------------------------------
 
 def _handle_send_goods_link(args: Dict[str, Any]) -> str:
@@ -178,8 +184,9 @@ def _handle_send_goods_link(args: Dict[str, Any]) -> str:
         return tool_error("goods_id 必须是整数", goods_id=goods_id)
 
     store = get_knowledge_store()
-    # 归属校验（对齐 Customer-Agent send_goods_link 的服务端校验思想）：
-    # goods_id 必须存在于当前 scope 的知识库，防 LLM 编造/串号
+    # Ownership validation (mirrors the server-side check idea of Customer-Agent
+    # send_goods_link): goods_id must exist in the current scope's knowledge
+    # base, preventing LLM fabrication / cross-account mixing
     rows = store.search_products(_scope(account_id), goods_id=goods_id)
     if not rows:
         return tool_error(
@@ -222,7 +229,7 @@ SEND_GOODS_LINK_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# 自注册（模块导入即注册，AST 扫描自动发现）
+# Self-registration (registered on module import; AST scan auto-discovery)
 # ---------------------------------------------------------------------------
 
 _KNOWLEDGE_TOOLS = [

@@ -1,19 +1,20 @@
-"""hermes-nexus 调试 CLI —— 命令行测试模板对话。
+"""hermes-nexus debug CLI — exercise template dialogues from the command line.
 
-子命令（fire 分发）:
-    cli.py chat                  交互 REPL（默认）
-    cli.py ask "你好"            单问单答（--session-id 可续聊库中会话）
-    cli.py list                  列出已注册 patterns / llm providers / tools
-    cli.py sessions              列出 data/dialogue.db 中的会话
+Subcommands (fire dispatch):
+    cli.py chat                  interactive REPL (default)
+    cli.py ask "Hello"           one-shot Q&A (--session-id resumes a session from the db)
+    cli.py list                  list registered patterns / llm providers / tools
+    cli.py sessions              list sessions in data/dialogue.db
 
-选择交互: 不带 --pattern/--llm 启动时出 prompt_toolkit 方向键菜单
-(pattern 单级; llm 两级 provider → models)。选定 pattern 后可输入
-task_info JSON（回车跳过；--task-info 直接传；customer_agent 等有 mock
-预设的 pattern 回车即用 mock，见 MOCK_TASK_INFO）。调试输出: -v 简要 / -vv 完整。
+Selection UX: starting without --pattern/--llm pops the prompt_toolkit arrow-key
+menu (pattern single-level; llm two-level provider → models). After picking a
+pattern you can enter task_info JSON (Enter skips; --task-info passes it
+directly; patterns with a mock preset such as customer_agent adopt the mock on
+Enter, see MOCK_TASK_INFO). Debug output: -v summary / -vv full.
 
-用法示例:
+Usage examples:
     .venv/bin/python cli.py chat --pattern xianyu_agent -vv
-    .venv/bin/python cli.py ask "这个还包邮吗" --session-id t1
+    .venv/bin/python cli.py ask "Does this ship free?" --session-id t1
     .venv/bin/python cli.py list patterns
 """
 
@@ -35,7 +36,7 @@ from tools.register import registry as tool_registry
 from config.config import get_llm_config, get_session_db_path
 
 # ============================================================================
-# ANSI 着色（NO_COLOR / 非 TTY 自动降级；见 https://no-color.org）
+# ANSI coloring (auto-falls back on NO_COLOR / non-TTY; see https://no-color.org)
 # ============================================================================
 
 _COLOR_OK = sys.stdout.isatty() and "NO_COLOR" not in os.environ
@@ -54,11 +55,11 @@ def red(t):    return _c(t, "31")
 
 
 # ============================================================================
-# 纯函数：菜单渲染 / verbose 格式化 / 斜杠命令解析（单测覆盖）
+# Pure functions: menu rendering / verbose formatting / slash command parsing (unit-tested)
 # ============================================================================
 
 def render_pattern_menu(title: str, patterns: List[Any]) -> str:
-    """数字菜单的可测渲染（实际选择用 prompt_toolkit radiolist）。"""
+    """Testable rendering of the numbered menu (actual selection uses the prompt_toolkit radiolist)."""
     lines = [bold(title)]
     for i, p in enumerate(patterns, 1):
         lines.append(f"  {i}. {p.code} — {p.name}")
@@ -68,10 +69,10 @@ def render_pattern_menu(title: str, patterns: List[Any]) -> str:
 
 
 def render_verbose_summary(before: Dict[str, Any], after: Dict[str, Any]) -> str:
-    """-v 层：node 转移、intent/next_node、slots 变化。
+    """-v level: node transitions, intent/next_node, slot changes.
 
-    before/after 为轮次快照 dict: current_node_code / current_module_code /
-    filled_slots / intent / next_node（缺省键视为未变化时忽略）。
+    before/after are per-turn snapshot dicts: current_node_code / current_module_code /
+    filled_slots / intent / next_node (missing keys are ignored as unchanged).
     """
     lines: List[str] = []
 
@@ -102,7 +103,7 @@ def render_verbose_summary(before: Dict[str, Any], after: Dict[str, Any]) -> str
 
 
 def render_verbose_full(cxt) -> str:
-    """-vv 层：完整 nlu/nlg JSON、recall、actions、agent tool 调用。"""
+    """-vv level: full nlu/nlg JSON, recall, actions, agent tool calls."""
     lines: List[str] = [dim("  ── context ──")]
 
     if getattr(cxt, "nlu_result", None):
@@ -137,10 +138,11 @@ def _safe_json(obj: Any) -> str:
 
 
 def parse_slash_command(line: str) -> Optional[Dict[str, Any]]:
-    """解析 REPL 斜杠命令；非斜杠输入返回 None。
+    """Parse REPL slash commands; return None for non-slash input.
 
-    返回 dict(name=..., arg=...)；arg 为命令后剩余文本（可空），
-    未知命令返回 dict(name="unknown", arg=原始命令词)。
+    Returns dict(name=..., arg=...); arg is the remaining text after the
+    command (may be empty). Unknown commands return
+    dict(name="unknown", arg=original command word).
     """
     stripped = line.strip()
     if not stripped.startswith("/"):
@@ -155,8 +157,8 @@ def parse_slash_command(line: str) -> Optional[Dict[str, Any]]:
 
 _SLASH_COMMANDS = ("help", "exit", "reset", "slots", "new", "llm")
 
-# provider/model 菜单的「维持 config 配置」固定项（spec §4.1：空 override =
-# 完全按 yaml 三层编排解析）
+# Fixed "维持 config 配置" entry of the provider/model menus (spec §4.1: an
+# empty override = resolve entirely via the yaml three-tier orchestration)
 KEEP_CONFIG = "__keep_config__"
 
 
@@ -166,7 +168,7 @@ def _keep_config_entry() -> Dict[str, str]:
 
 
 def _patch_select(picked: str):
-    """测试钩子：固定 select_from_menu 返回值。"""
+    """Test hook: pin the select_from_menu return value."""
     from unittest.mock import patch as _patch
     return _patch(__name__ + ".select_from_menu", return_value=picked)
 
@@ -180,7 +182,7 @@ def _provider_menu_entries() -> List[Dict[str, str]]:
 
 
 # ============================================================================
-# prompt_toolkit 交互：方向键菜单 + 主输入行
+# prompt_toolkit interaction: arrow-key menu + main input line
 # ============================================================================
 
 def _ptk_import():
@@ -194,13 +196,15 @@ def _ptk_import():
 
 
 def select_from_menu(title: str, entries: List[Dict[str, str]]) -> Optional[str]:
-    """内联方向键选择器；不可用/非 TTY/取消时降级数字输入。
+    """Inline arrow-key selector; falls back to number input on unavailability,
+    non-TTY, or cancel.
 
-    不用 radiolist_dialog：其全屏对话框里 Enter 只标记选中，还需 Tab 到
-    Ok 按钮再 Enter 才关闭——首按 Enter "卡住不动" 的体验即源于此。
-    自建 Application：↑↓ 移动、Enter 直接返回选中 value、Esc/中断取消。
+    radiolist_dialog is not used: in its full-screen dialog Enter only marks the
+    selection — you must Tab to the Ok button and press Enter again to close,
+    which is exactly why the first Enter felt "stuck". A custom Application:
+    ↑↓ to move, Enter returns the selected value directly, Esc/interrupt cancels.
 
-    entries: [{value, label, hint}]，返回 value 或 None（取消）。
+    entries: [{value, label, hint}]; returns the value, or None (cancelled).
     """
     mods = _ptk_import()
     if mods[0] is None or not (sys.stdout.isatty() and sys.stdin.isatty()):
@@ -225,7 +229,7 @@ def select_from_menu(title: str, entries: List[Dict[str, str]]) -> Optional[str]
             if i == state["index"]:
                 line = f"<ansicyan><b>{line}</b></ansicyan>"
             parts.append(line + "\n")
-        # FormattedTextControl callable 需返回扁平 fragments：整体转一次
+        # FormattedTextControl callables must return flat fragments: convert once, wholesale
         return to_formatted_text(HTML("".join(parts)))
 
     kb = KeyBindings()
@@ -253,7 +257,7 @@ def select_from_menu(title: str, entries: List[Dict[str, str]]) -> Optional[str]
     from prompt_toolkit.layout.containers import HSplit, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
 
-    # 动态重渲染：FormattedTextControl 的 text 支持 callable
+    # Dynamic re-rendering: FormattedTextControl.text accepts a callable
     body = FormattedTextControl(lambda: _render())
     app = Application(
         layout=Layout(HSplit([Window(content=body, dont_extend_height=True,
@@ -266,7 +270,7 @@ def select_from_menu(title: str, entries: List[Dict[str, str]]) -> Optional[str]
 
 
 def _select_by_number(title: str, entries: List[Dict[str, str]]) -> Optional[str]:
-    """数字菜单降级路径（无 prompt_toolkit / 非 TTY）。EOF 视为取消。"""
+    """Numbered-menu fallback path (no prompt_toolkit / non-TTY). EOF counts as cancel."""
     print(render_pattern_menu(title.replace("选择 ", ""), [
         type("P", (), {"code": e["value"], "name": e["label"],
                        "description": e.get("hint", "")})() for e in entries
@@ -284,7 +288,7 @@ def _select_by_number(title: str, entries: List[Dict[str, str]]) -> Optional[str
 
 
 class SlashCompleter:
-    """主输入行斜杠命令补全。"""
+    """Slash-command completion for the main input line."""
 
     def __init__(self):
         mods = _ptk_import()
@@ -314,18 +318,20 @@ class SlashCompleter:
 
 
 # ============================================================================
-# 会话装配（复刻 main.py _launch_session_core 的绑定流程，不依赖 FastAPI）
+# Session assembly (mirrors the binding flow of main.py _launch_session_core,
+# without depending on FastAPI)
 # ============================================================================
 
 def build_session(session_id: str, pattern_code: str,
                   llm_overrides: Optional[Dict[str, Any]] = None,
                   task_info: Optional[Dict[str, str]] = None) -> Session:
-    """创建 Session 并完成 pattern/llm 绑定。
+    """Create a Session and complete pattern/llm binding.
 
-    llm_overrides 非空时预置 metadata.llm_override（逐轮刷新下仍优先生效）；
-    model 必填（各 stage 以 llm_config["model"] 下标访问）。
-    task_info 复刻 main.py _launch_session_core 的双写：session.task_info
-    （落盘用）+ cxt.metadata["task_info"]（prompt 槽位 {__task_info__} 用）。
+    When llm_overrides is non-empty, preset metadata.llm_override (still wins
+    under per-turn refresh); model is required (each stage subscripts
+    llm_config["model"] directly). task_info mirrors the double write of
+    main.py _launch_session_core: session.task_info (for persistence) +
+    cxt.metadata["task_info"] (for the prompt slot {__task_info__}).
     """
     pattern = pattern_registry.get(pattern_code)
     if pattern is None:
@@ -341,9 +347,11 @@ def build_session(session_id: str, pattern_code: str,
         session.cxt.metadata["task_info"] = task_info
 
     if llm_overrides:
-        # 只写用户显式选择的 truthy 字段；空 override（如「维持 config 配置」）
-        # 不写 llm_override —— 否则空 dict 仍为 truthy，会 pin 全局快照，
-        # 三层覆盖 + 热生效全部失效（spec §4.1：空 override = 按 yaml 解析）
+        # Only write the truthy fields the user explicitly picked; an empty
+        # override (e.g. "维持 config 配置") must not write llm_override —
+        # otherwise the empty dict is still truthy and pins the global snapshot,
+        # disabling the three-tier override + hot reload entirely
+        # (spec §4.1: empty override = resolve from yaml)
         picked = {k: v for k, v in llm_overrides.items() if v}
         if picked:
             session.cxt.metadata["llm_override"] = picked
@@ -353,20 +361,21 @@ def build_session(session_id: str, pattern_code: str,
 
 def resolve_llm_choice(llm: str, model: str,
                        interactive: bool = True) -> Dict[str, Any]:
-    """把 --llm/--model flag 与交互菜单解析为 llm_overrides dict。
+    """Resolve the --llm/--model flags and interactive menus into an llm_overrides dict.
 
-    返回 {code, model}（均可能为空串 = 用 yaml 默认）。
+    Returns {code, model} (either may be an empty string = use yaml defaults).
     """
     code = llm or ""
     if not code and interactive:
-        # yaml 已配 provider 时静默沿用其默认（菜单只服务"想换"的场景）；
-        # 未配置才弹菜单选择
+        # When yaml already configures a provider, silently keep its default
+        # (the menu only serves users who want to switch); pop the menu only
+        # when nothing is configured
         try:
             code = get_llm_config().get("code") or ""
         except Exception:
             code = ""
         if code:
-            return {"code": "", "model": ""}  # 空 override = 完全用 yaml 默认
+            return {"code": "", "model": ""}  # empty override = use yaml defaults entirely
         if llm_registry.list_providers():
             picked = select_from_menu("选择 LLM provider", _provider_menu_entries())
             if picked == KEEP_CONFIG:
@@ -395,12 +404,13 @@ def resolve_llm_choice(llm: str, model: str,
 
 
 def parse_task_info(raw: Any) -> Optional[Dict[str, str]]:
-    """把 --task-info / 输入框的 task_info 解析为 dict。
+    """Parse the task_info from --task-info / the input prompt into a dict.
 
-    输入既可能是 JSON 字符串（input() 输入框），也可能是 dict —— fire 对
-    --task-info '{...}' 会自动字面量求值成 Python dict。
-    空输入 → None（未设置）；非法 JSON / 非 dict → SystemExit。
-    值统一转 str（launch 契约是 Dict[str, str]，xianyu channel 映射出来的也是 str）。
+    The input may be a JSON string (input() prompt) or a dict — fire
+    auto-evaluates --task-info '{...}' into a Python dict literal.
+    Empty input → None (unset); invalid JSON / non-dict → SystemExit.
+    Values are coerced to str (the launch contract is Dict[str, str], and what
+    the xianyu channel maps out is str too).
     """
     if raw is None:
         return None
@@ -418,26 +428,28 @@ def parse_task_info(raw: Any) -> Optional[Dict[str, str]]:
     return {str(k): str(v) for k, v in data.items()}
 
 
-# pattern 级 mock task_info（演示/联调预设：选择对应 pattern 后回车直接采用；
-# --task-info 或手输 JSON 优先）。account_id 与 cli.py knowledge-seed 的默认
-# scope（xianyu:demo）对齐——customer_agent 的目录预取/知识工具即取到种子数据。
+# Pattern-level mock task_info (demo/integration-debugging preset: pressing Enter
+# after picking the pattern adopts it directly; --task-info or hand-typed JSON
+# takes precedence). account_id aligns with the default scope (xianyu:demo) of
+# cli.py knowledge-seed — customer_agent's catalog prefetch / knowledge tools
+# then pick up the seed data.
 MOCK_TASK_INFO: Dict[str, Dict[str, str]] = {
     "customer_agent": {"channel": "xianyu", "account_id": "demo"},
 }
 
 
 def mock_task_info_for(pattern_code: str) -> Optional[Dict[str, str]]:
-    """返回 pattern 的 mock task_info 副本（无预设返回 None）。"""
+    """Return a copy of the pattern's mock task_info (None when no preset)."""
     preset = MOCK_TASK_INFO.get(pattern_code)
     return dict(preset) if preset else None
 
 
 def prompt_task_info(pattern_code: str, preset: str = "") -> Optional[Dict[str, str]]:
-    """选完 pattern 后的 task_info 输入框。
+    """task_info input prompt shown after picking a pattern.
 
-    - preset 非空（--task-info flag）只做解析不再询问（优先级最高）
-    - pattern 有 mock 预设：提示语带出 mock 内容，回车/EOF 直接采用
-    - 无 mock：回车跳过（原行为）；手输 JSON 恒优先于 mock
+    - preset non-empty (--task-info flag): parse only, never ask (highest precedence)
+    - pattern has a mock preset: the hint echoes the mock content; Enter/EOF adopts it
+    - no mock: Enter skips (original behavior); hand-typed JSON always beats the mock
     """
     if preset:
         return parse_task_info(preset)
@@ -457,7 +469,7 @@ def prompt_task_info(pattern_code: str, preset: str = "") -> Optional[Dict[str, 
 
 
 # ============================================================================
-# 轮次执行 + 持久化（SessionStore 与 web 服务共用同一 db）
+# Turn execution + persistence (SessionStore shares the same db with the web service)
 # ============================================================================
 
 def _snapshot(cxt) -> Dict[str, Any]:
@@ -473,7 +485,7 @@ def _snapshot(cxt) -> Dict[str, Any]:
 
 def run_turn(session: Session, query: str, sessions: Dict[str, Session],
              store: Optional[SessionStore], verbose: int = 0) -> str:
-    """执行一轮对话：快照 → chat() → 轮末快照回写 → verbose 渲染。"""
+    """Run one dialogue turn: snapshot → chat() → end-of-turn snapshot write-back → verbose rendering."""
     before = _snapshot(session.cxt)
 
     reply = chat_turn(query, session.session_id, sessions, store=store)
@@ -496,7 +508,7 @@ def run_turn(session: Session, query: str, sessions: Dict[str, Session],
 
 
 def _open_store(persist) -> Optional[SessionStore]:
-    # fire 把 --persist=false 解析成字符串 'false'（truthy！），归一化：
+    # fire parses --persist=false into the string 'false' (truthy!); normalize:
     if persist in (False, "false", "False", "0", 0, None):
         return None
     try:
@@ -511,7 +523,7 @@ def _find_or_create(session_id: str, pattern_code: str,
                     store: Optional[SessionStore],
                     sessions: Dict[str, Session],
                     task_info: Optional[Dict[str, str]] = None) -> Session:
-    """--session-id 命中库中未过期会话则恢复续聊，否则新建并落盘。"""
+    """Restore and continue when --session-id matches an unexpired session in the db; otherwise create new and persist."""
     if store is not None:
         for restored, _ in store.load_active_sessions(ttl_seconds=7 * 24 * 3600):
             if restored.session_id == session_id:
@@ -529,7 +541,7 @@ def _find_or_create(session_id: str, pattern_code: str,
                         restored.cxt.metadata["llm_override"] = picked
                 print(green(f"已恢复会话 {session_id} "
                             f"({restored.pattern_code})，继续对话"))
-                store.attach(restored)  # 恢复会话重挂 write-through
+                store.attach(restored)  # re-attach write-through for the restored session
                 sessions[session_id] = restored
                 return restored
 
@@ -557,9 +569,9 @@ HELP_TEXT = """\
 
 
 def _prompt_text(session: Session):
-    """REPL 提示符。prompt_toolkit 路径返回 formatted_text（自带着色，
-    不解析裸 ANSI 码——传 str 会把 \\033[... 原样显示成乱码）；
-    input() 降级路径返回带 ANSI 码的 str。"""
+    """REPL prompt. The prompt_toolkit path returns formatted_text (coloring built
+    in; raw ANSI codes are not parsed — a str would render \\033[...] verbatim as
+    mojibake); the input() fallback path returns an ANSI-coded str."""
     cfg = session.cxt.llm_config or {}
     model = cfg.get("model") or "默认model"
     text = f"你 ({session.pattern_code}/{model})> "
@@ -572,7 +584,7 @@ def _prompt_text(session: Session):
 def repl_loop(pattern_code: str, session_id: str, llm_overrides: Dict[str, Any],
               persist: bool, verbose: int,
               task_info: Optional[Dict[str, str]] = None) -> None:
-    """交互聊天主循环。"""
+    """Interactive chat main loop."""
     sessions: Dict[str, Session] = {}
     store = _open_store(persist)
 
@@ -628,7 +640,7 @@ def repl_loop(pattern_code: str, session_id: str, llm_overrides: Dict[str, Any],
 
 
 def _do_reset(session: Session, sessions: Dict[str, Session], store, verbose: int):
-    """/reset：同 pattern 重开新会话（沿用原 session_id、llm 配置与 task_info）。"""
+    """/reset: reopen a new session with the same pattern (keeps the original session_id, llm config and task_info)."""
     llm_override = session.cxt.metadata.get("llm_override")
     new_session = build_session(session.session_id, session.pattern_code,
                                 task_info=session.task_info)
@@ -636,14 +648,14 @@ def _do_reset(session: Session, sessions: Dict[str, Session], store, verbose: in
         new_session.cxt.metadata["llm_override"] = llm_override
     sessions[session.session_id] = new_session
     if store is not None:
-        store.create_session(new_session)  # 同 id 视为新一代（launch_epoch+1）
+        store.create_session(new_session)  # same id counts as a new generation (launch_epoch+1)
         store.attach(new_session)
     print(green(f"会话已重置: {session.session_id}"))
     return new_session
 
 
 def _do_new(arg: str, sessions: Dict[str, Session], store, llm_overrides, verbose: int):
-    """/new [pattern]：换 pattern 新会话。"""
+    """/new [pattern]: new session under a different pattern."""
     code = arg.strip() or _pick_pattern()
     if not code:
         print(yellow("未选择，保持当前会话"))
@@ -666,16 +678,17 @@ def _do_new(arg: str, sessions: Dict[str, Session], store, llm_overrides, verbos
 
 
 def _do_llm(session: Session, arg: str) -> None:
-    """/llm [code]：切换后续轮次的 provider/model。"""
+    """/llm [code]: switch the provider/model for subsequent turns."""
     overrides = resolve_llm_choice(arg.strip(), "", interactive=True)
     picked = {k: v for k, v in overrides.items() if v}
     if not picked:
-        # 「维持 config 配置」：删除 override，后续轮次按 yaml 三层解析
+        # "维持 config 配置": drop the override; later turns resolve via the yaml three tiers
         session.cxt.metadata.pop("llm_override", None)
         print(green("LLM 已切回 config 配置"))
         return
-    # 只写显式选择字段；连接字段（api_base 等）一律由解析时的
-    # llm_providers[code] 段提供，不得铺入全量快照（防跨 provider 串台）
+    # Only write explicitly picked fields; connection fields (api_base etc.)
+    # always come from the llm_providers[code] section at resolution time and
+    # must not be spread into the full snapshot (prevents cross-provider crosstalk)
     session.cxt.metadata["llm_override"] = picked
     print(green(f"LLM 已切换: {overrides['code']} / {overrides['model'] or '默认model'}"))
 
@@ -703,7 +716,7 @@ def _pick_pattern() -> str:
 
 
 # ============================================================================
-# fire 子命令
+# fire subcommands
 # ============================================================================
 
 def _ensure_discovery() -> None:
@@ -714,21 +727,23 @@ def _ensure_discovery() -> None:
 
 def chat(pattern: str = "", session_id: str = "cli", llm: str = "", model: str = "",
          task_info: str = "", verbose: int = 0, persist: bool = True) -> None:
-    """交互 REPL 测试模板对话。
+    """Interactive REPL for exercising template dialogues.
 
     Args:
-        pattern: pattern code（缺省出选择菜单）
-        session_id: 会话 id；带持久化时命中库中未过期会话则续聊
-        llm: provider code（缺省出选择菜单）
-        model: model 名（缺省且选了 provider 时出 model 菜单）
-        task_info: JSON 字符串（缺省则在选定 pattern 后出输入框，回车跳过）
-        verbose: 调试层级 0/1/2（命令行 -v/-vv 自动展开）
-        persist: 落盘 data/dialogue.db（默认开）
+        pattern: pattern code (selection menu pops up when omitted)
+        session_id: session id; with persistence, resumes when it matches an unexpired session in the db
+        llm: provider code (selection menu pops up when omitted)
+        model: model name (model menu pops up when omitted and a provider was picked)
+        task_info: JSON string (input prompt after the pattern is picked when omitted; Enter skips)
+        verbose: debug level 0/1/2 (-v/-vv expand automatically on the command line)
+        persist: persist to data/dialogue.db (on by default)
     """
     _ensure_discovery()
-    # 恢复优先序：显式 --pattern 新起会话；否则显式 --session-id 命中库中
-    # 未过期会话则直接恢复（不弹菜单）；两者都没有才弹菜单选择。
-    # fire 的默认参数值与用户显式传值不可区分，用 argv 检测显式传参。
+    # Restore precedence: an explicit --pattern starts a new session; otherwise an
+    # explicit --session-id matching an unexpired session in the db restores it
+    # directly (no menu); only when both are missing does the menu pop up.
+    # fire's default parameter values are indistinguishable from user-passed
+    # values, so detect explicit passing via argv.
     sid_specified = any(a == "--session-id" or a.startswith("--session-id=")
                         for a in sys.argv)
     restored_code = ""
@@ -748,7 +763,8 @@ def chat(pattern: str = "", session_id: str = "cli", llm: str = "", model: str =
         return
     task_info_dict = prompt_task_info(pattern_code, task_info)
     llm_overrides = resolve_llm_choice(llm, model, interactive=True)
-    # 默认 session-id 拼进程号：避免命中库中任意旧会话把刚选的 pattern 换掉
+    # Default session-id gets the pid appended: avoids matching any old session
+    # in the db that would swap out the just-picked pattern
     sid = session_id if (sid_specified or pattern) else f"{session_id}-{os.getpid()}"
     repl_loop(pattern_code, sid, llm_overrides, persist, verbose, task_info_dict)
 
@@ -756,11 +772,12 @@ def chat(pattern: str = "", session_id: str = "cli", llm: str = "", model: str =
 def ask(query: str, pattern: str = "", session_id: str = "cli-ask", llm: str = "",
         model: str = "", task_info: str = "", verbose: int = 0,
         persist: bool = True) -> None:
-    """单问单答（--session-id 可续聊库中会话）。"""
+    """One-shot Q&A (--session-id resumes a session from the db)."""
     _ensure_discovery()
     pattern_code = pattern
     if not pattern_code:
-        # one-shot 不出菜单：恢复已有会话时 pattern 从库中来；否则要求显式 --pattern
+        # one-shot shows no menu: when restoring an existing session the pattern
+        # comes from the db; otherwise an explicit --pattern is required
         store = _open_store(persist)
         if store is not None:
             for restored, _ in store.load_active_sessions(7 * 24 * 3600):
@@ -770,7 +787,8 @@ def ask(query: str, pattern: str = "", session_id: str = "cli-ask", llm: str = "
             store.close()
         if not pattern_code:
             raise SystemExit(red("ask 需要显式 --pattern，或 --session-id 命中已有会话"))
-    # one-shot 不再追加询问：--task-info 显式传则解析，否则无 task_info
+    # one-shot skips the extra prompt: parse --task-info when explicitly passed,
+    # otherwise no task_info
     task_info_dict = parse_task_info(task_info)
     llm_overrides = resolve_llm_choice(llm, model, interactive=False)
     sessions: Dict[str, Session] = {}
@@ -784,9 +802,10 @@ def ask(query: str, pattern: str = "", session_id: str = "cli-ask", llm: str = "
 
 
 def list_cmd(target: str = "all") -> None:
-    # 注意：不能命名为 list——会遮蔽内置 list()，模块内 f-string 的
-    # list(...) 会变成递归调用本函数。fire 子命令名在 fire.Fire dict 里映射。
-    """列出已注册对象: patterns | llms | tools | all。"""
+    # Note: must not be named list — it would shadow the builtin list(), and the
+    # list(...) inside this module's f-strings would become a recursive call to
+    # this function. The fire subcommand name is mapped in the fire.Fire dict.
+    """List registered objects: patterns | llms | tools | all."""
     _ensure_discovery()
     if target in ("patterns", "all"):
         patterns = pattern_registry.list_patterns()
@@ -810,7 +829,7 @@ def list_cmd(target: str = "all") -> None:
 
 
 def sessions(pattern_code: str = "", limit: int = 20) -> None:
-    """列出持久化会话（按 last_active_at 倒序）。"""
+    """List persisted sessions (last_active_at descending)."""
     try:
         store = SessionStore(get_session_db_path())
     except Exception as e:
@@ -836,16 +855,16 @@ def _fmt_ts(ts: float) -> str:
 
 
 def _expand_short_verbose(argv: List[str]) -> List[str]:
-    """把 -v/-vv/-vvv 展开为 --verbose=N（fire 不支持计数短 flag）。"""
+    """Expand -v/-vv/-vvv into --verbose=N (fire does not support counting short flags)."""
     mapping = {"-v": "--verbose=1", "-vv": "--verbose=2", "-vvv": "--verbose=3"}
     return [mapping.get(a, a) for a in argv]
 
 
 def knowledge_seed(scope: str = "xianyu:demo") -> None:
-    """给知识库填充演示种子数据（幂等）。
+    """Seed the knowledge base with demo seed data (idempotent).
 
     Args:
-        scope: 知识隔离域，格式 {channel}:{account_id}
+        scope: knowledge isolation domain, format {channel}:{account_id}
     """
     from database.knowledge_store import close_knowledge_store, get_knowledge_store
 

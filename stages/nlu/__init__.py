@@ -1,9 +1,9 @@
-"""NLU stage 包 — 意图识别与槽位抽取。
+"""NLU stage package — intent recognition and slot extraction.
 
 Exports:
-    - ``BaseNLU``: NLU stage 抽象基类。
-    - ``FSMNLU``: FSM 模块的意图识别与状态转移。
-    - ``RouteNLU``: 顶层路由模块的意图分类与分发。
+    - ``BaseNLU``: abstract base class for NLU stages.
+    - ``FSMNLU``: intent recognition and state transition for FSM modules.
+    - ``RouteNLU``: intent classification and dispatch for the top-level routing module.
 """
 
 from stages.nlu.nlu import BaseNLU, FSMNLU, RouteNLU

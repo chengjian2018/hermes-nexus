@@ -1,25 +1,28 @@
-"""customer_agent pattern —— Customer-Agent（兄弟项目）店铺客服的整装迁移。
+"""customer_agent pattern -- full migration of the Customer-Agent (sibling project) shop customer service.
 
-agent 注册：模块顶层 ``registry.register()``，AST 扫描自动发现（同
-xianyu_agent_route 习语）；知识工具组复用 tools/knowledge_tool.py
-（Customer-Agent 工具的前期移植），本 pattern 是其唯一 ACL 授权方。
+Agent registration: module-level ``registry.register()``, auto-discovered by
+AST scan (same idiom as xianyu_agent_route); the knowledge tool group reuses
+tools/knowledge_tool.py (an earlier port of the Customer-Agent tools), and
+this pattern is the only pattern granted ACL access to it.
 
-MessageBuilder 迁移（Customer-Agent ``custom/message_builder.py`` → 本项目
-一体化契约 ``messages_builder(module, cxt, extra_blocks) -> messages``）：
+MessageBuilder migration (Customer-Agent ``custom/message_builder.py`` -> this
+project's integrated contract ``messages_builder(module, cxt, extra_blocks) -> messages``):
 
-- ``build_dependencies(context)``：渠道 Context 抽 shop_id/user_id → 本项目
-  launch 层注入的 task_info（channel/account_id），经
-  ``cxt.task_basic_info or cxt.metadata["task_info"]`` 读取
-- ``fetch_product_list_text`` 每轮预取商品列表：直接调
-  ``knowledge_tool._handle_list_products``（对齐原版 builder 直调
-  get_shop_products 函数，不走 LLM 回合；异常吞掉返回空——原版同款防御），
-  产物为 ``[untrusted_product_catalog]`` 包裹文本
-- 目录进 **user 角色 untrusted 行**（绝不进 system——外部内容不获得指令
-  权威，原版后期演进出的安全实践）
-- 【当前会话信息】块追加在 system 尾部：account_id 等取值指引，防 LLM
-  编造工具参数
-- 历史三段式 / 回放守卫 / hooks 片段：组合 ``default_build_messages``
-  而非重写（extra_blocks 随之保留）
+- ``build_dependencies(context)``: the channel Context's shop_id/user_id ->
+  the task_info (channel/account_id) injected by this project's launch layer,
+  read via ``cxt.task_basic_info or cxt.metadata["task_info"]``
+- ``fetch_product_list_text`` prefetches the product list each turn: calls
+  ``knowledge_tool._handle_list_products`` directly (mirroring the original
+  builder's direct call of the get_shop_products function, no LLM round;
+  exceptions are swallowed and an empty value returned -- same defense as the
+  original); the output is ``[untrusted_product_catalog]``-wrapped text
+- The catalog goes into a **user-role untrusted line** (never into system --
+  external content gets no instruction authority, a security practice the
+  original evolved over time)
+- The 【当前会话信息】 block is appended at the end of system: guidance for
+  account_id and other values, preventing the LLM from fabricating tool args
+- History three segments / replay guard / hooks fragments: composed from
+  ``default_build_messages`` rather than rewritten (extra_blocks come along)
 """
 
 import logging
@@ -33,30 +36,32 @@ from tools.knowledge_tool import _handle_list_products
 
 logger = logging.getLogger(__name__)
 
-# 人工客服营业时间（Customer-Agent 读取业务配置，本 mock 服务暂用常量；
-# 接入真实渠道时演进为 config 项）
+# Human handoff business hours (Customer-Agent reads this from business config;
+# this mock service uses constants for now; promote to a config item when a
+# real channel is wired in)
 _BUSINESS_HOURS = {"start": "08:00", "end": "23:00"}
 
-# 预取目录条数（对齐 Customer-Agent 预取第一页 10 条）
+# Catalog prefetch size (aligned with Customer-Agent's prefetch of the first page, 10 items)
 _CATALOG_LIMIT = 10
 
 
 # ============================================================================
-# 迁移的 MessageBuilder（一体化契约：system + 目录行 + 三段式列表）
+# Migrated MessageBuilder (integrated contract: system + catalog line + three-segment list)
 # ============================================================================
 
 def _get_task_info(cxt) -> Dict[str, str]:
-    """任务依赖抽取：Customer-Agent build_dependencies 的对应物。
+    """Task dependency extraction: counterpart of Customer-Agent build_dependencies.
 
-    原版从渠道 Context 抽 shop_id/user_id；本项目 launch 层已把渠道侧
-    task_info（channel/account_id）写入 cxt（main.py 注入）。
+    The original extracts shop_id/user_id from the channel Context; in this
+    project the launch layer has already written the channel-side task_info
+    (channel/account_id) into cxt (injected by main.py).
     """
     raw = cxt.task_basic_info or cxt.metadata.get("task_info") or {}
     return {str(k): str(v) for k, v in dict(raw).items()}
 
 
 def _session_info_block(task_info: Dict[str, str]) -> str:
-    """【当前会话信息】块：逐字段消毒 + account_id 取值指引（防编造）。"""
+    """The 【当前会话信息】 block: per-field sanitization + account_id value guidance (guards against fabrication)."""
 
     def _safe(value: Any, limit: int = 256) -> str:
         return (str(value or "")
@@ -78,10 +83,11 @@ def _session_info_block(task_info: Dict[str, str]) -> str:
 
 
 def _prefetch_catalog(account_id: str) -> str:
-    """每轮预取店铺商品目录（Customer-Agent fetch_product_list_text 对应物）。
+    """Prefetch the shop product catalog each turn (counterpart of Customer-Agent fetch_product_list_text).
 
-    直调工具处理函数（不走 LLM 回合）；空目录 / 错误 JSON / 异常一律返回
-    空串跳过注入——预取失败绝不阻断对话（原版同款防御）。
+    Calls the tool handler directly (no LLM round); empty catalog / error
+    JSON / exceptions all return an empty string and skip injection -- a
+    failed prefetch never blocks the dialogue (same defense as the original).
     """
     try:
         catalog = _handle_list_products(
@@ -102,27 +108,28 @@ def _prefetch_catalog(account_id: str) -> str:
 
 
 def customer_agent_messages_builder(module, cxt, extra_blocks) -> List[Dict[str, Any]]:
-    """Customer-Agent MessageBuilder 迁移版（module 级 messages_builder）。
+    """Migrated Customer-Agent MessageBuilder (module-level messages_builder).
 
-    组装顺序对齐原版 build_messages：system（base_prompt 四块 + hooks 片段
-    + 【当前会话信息】）→ 产品目录 user untrusted 行 → 跨轮历史 → 显式
-    query → 本轮 hop 内行（后三段复用 default_build_messages）。
+    Assembly order mirrors the original build_messages: system (base_prompt
+    four blocks + hooks fragments + 【当前会话信息】) -> product catalog user
+    untrusted line -> cross-turn history -> explicit query -> current-hop
+    lines (the last three segments reuse default_build_messages).
     """
-    # 默认构建打底：system（含 extra_blocks）+ 三段式，hooks 片段随之保留
+    # Default build as the base: system (including extra_blocks) + three segments; hooks fragments ride along
     messages = default_build_messages(module, cxt, extra_blocks)
 
     task_info = _get_task_info(cxt)
     if not task_info:
         return messages
 
-    # 【当前会话信息】块追加 system 尾部；无 system 行则前置一条
+    # Append the 【当前会话信息】 block to the end of system; prepend a new line if there is no system line
     block = _session_info_block(task_info)
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = (messages[0]["content"] or "") + "\n" + block
     else:
         messages.insert(0, {"role": "system", "content": block})
 
-    # 产品目录预取 → user 角色 untrusted 行（紧跟 system，先于历史）
+    # Product catalog prefetch -> user-role untrusted line (right after system, before history)
     account_id = task_info.get("account_id", "").strip()
     if account_id:
         catalog = _prefetch_catalog(account_id)
@@ -134,7 +141,7 @@ def customer_agent_messages_builder(module, cxt, extra_blocks) -> List[Dict[str,
 
 
 # ============================================================================
-# 模块定义（base_prompt 移植自 Customer-Agent MessageBuilder._build_system_prompt）
+# Module definitions (base_prompt ported from Customer-Agent MessageBuilder._build_system_prompt)
 # ============================================================================
 
 _BASE_PROMPT = f"""\
@@ -195,10 +202,10 @@ customer_service = AgentModule(
         "list_products",
         "send_goods_link",
     ],
-    # 迁移的 MessageBuilder：会话信息块 + 每轮目录预取（untrusted 行）
+    # Migrated MessageBuilder: session info block + per-turn catalog prefetch (untrusted line)
     messages_builder=customer_agent_messages_builder,
-    # 声明边 → 框架自动生成 transfer_to_human_handoff（转人工，
-    # 对应 Customer-Agent move_conversation/transfer_conversation）
+    # Declared edge -> the framework auto-generates transfer_to_human_handoff (human handoff,
+    # corresponding to Customer-Agent move_conversation/transfer_conversation)
     sub_modules=["human_handoff"],
 )
 
@@ -220,7 +227,7 @@ human_handoff = AgentModule(
 
 
 # ============================================================================
-# Pattern 注册 —— 顶层 registry.register，由 AST 扫描自动发现
+# Pattern registration -- module-level registry.register, auto-discovered by AST scan
 # ============================================================================
 
 customer_agent_pattern = Pattern(

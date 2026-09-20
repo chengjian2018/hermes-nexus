@@ -28,7 +28,8 @@ class BaseNode:
         sub_nodes: list of sub-nodes (forms the state-machine transition graph).
         base_nlu_prompt: node-level NLU prompt template string.
         base_nlg_prompt: node-level NLG prompt template string.
-        generate/pre_recall/query/post_recall: 管线槽位配置（node 级最高优先级）。
+        generate/pre_recall/query/post_recall: pipeline slot config (node level
+            has highest priority).
     """
 
     def __init__(
@@ -58,9 +59,9 @@ class BaseNode:
         self.base_nlg_prompt = base_nlg_prompt
         self.answer_examples = answer_examples
 
-        # 管线槽位配置（三层优先级 node > module > pattern，执行期由
-        # stage_slots.resolve_stage 延迟解析；generate 支持单 stage 或
-        # {"nlu":…, "nlg":…} dict）
+        # Pipeline slot config (three-layer priority node > module > pattern,
+        # resolved lazily at execution time by stage_slots.resolve_stage;
+        # generate accepts a single stage or a {"nlu":…, "nlg":…} dict)
         self.generate = generate
         self.pre_recall = pre_recall
         self.query = query

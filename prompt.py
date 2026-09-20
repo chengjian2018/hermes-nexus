@@ -281,8 +281,8 @@ RECALL_RERANK_LLM_PROMPT = """## 任务描述
 """
 
 # ============================================================================
-# Unified Stage Prompt Template（单次调用 + structured output：
-# 一次同时输出回复话术 / 节点决策 / 槽位，供 stages/unified.py 使用）
+# Unified Stage Prompt Template (single call + structured output:
+# one shot emits reply text / node decision / slots; consumed by stages/unified.py)
 # ============================================================================
 
 FSM_UNIFIED_DEFAULT_PROMPT = """## 任务描述
@@ -398,7 +398,7 @@ ROUTE_UNIFIED_DEFAULT_PROMPT = """## 任务描述
 
 
 # ============================================================================
-# Agent Pattern（Module Dispatch）Prompt 模板（spec §4）
+# Agent Pattern (Module Dispatch) prompt templates (spec §4)
 # ============================================================================
 
 AGENT_TEAM_RULES_PROMPT = """## 团队协作规则
@@ -414,7 +414,7 @@ AGENT_PROJECTION_RECALL_PROMPT = """## 上一轮提示
 
 
 # ============================================================================
-# 会话历史压缩 Prompt（chat/compression.py 消费）
+# Session history compression prompt (consumed by chat/compression.py)
 # ============================================================================
 
 HISTORY_SUMMARY_PROMPT = """你是对话摘要助手。请简洁地总结以下对话的要点，保留：
@@ -430,13 +430,16 @@ HISTORY_SUMMARY_PROMPT = """你是对话摘要助手。请简洁地总结以下�
 
 
 # ============================================================================
-# 闲鱼卖家客服 Prompt 模板 —— 复刻 xianyu-auto-reply ai_reply_engine 的
-# 三套意图 system prompt（议价/技术/通用），叠加框架管线槽位
+# Xianyu seller customer-service prompt templates — ported from the three intent
+# system prompts (price/tech/default) of xianyu-auto-reply ai_reply_engine,
+# layered on top of the framework pipeline slots
 # ============================================================================
 
-# 语言约束复刻 _build_openai_messages 注入的 direct_rule + 各意图 prompt 的
-# 字数要求；议价参数/商品信息经 {__filled_slots__} / {__task_info__} 注入
-# （原实现拼在 user_prompt，此处走框架统一槽位词表）
+# Language constraints port the direct_rule injected by _build_openai_messages
+# plus the per-intent prompt word-count requirements; bargain params / product
+# info come in via {__filled_slots__} / {__task_info__}
+# (the original implementation concatenated them into user_prompt; here they go
+# through the framework's unified slot vocabulary)
 
 XIANYU_NLU_PROMPT = """
 【商品信息】

@@ -1,6 +1,6 @@
-"""cli.py 纯函数单测：斜杠解析 / verbose 渲染 / 菜单渲染 / 短 flag 展开。
+"""cli.py pure-function unit tests: slash parsing / verbose rendering / menu rendering / short flag expansion.
 
-不触网络、不触 LLM；REPL 交互与 fire 分发另行手动验收。
+No network, no LLM; REPL interaction and fire dispatch are accepted manually elsewhere.
 """
 
 import unittest.mock
@@ -129,7 +129,7 @@ class TestRenderPatternMenu:
         out = cli.render_pattern_menu(
             "t", [_FakePattern("a", "A", "")])
         lines = [l for l in out.split("\n") if l.strip()]
-        assert len(lines) == 2  # 标题 + 一行条目
+        assert len(lines) == 2  # header + one entry line
 
 
 # ============================================================================
@@ -156,7 +156,7 @@ class TestExpandShortVerbose:
 
 
 # ============================================================================
-# render_verbose_full（用桩 context 对象，不依赖引擎）
+# render_verbose_full (stubbed context object; engine not required)
 # ============================================================================
 
 class _FakeCxt:
@@ -190,7 +190,7 @@ class TestRenderVerboseFull:
         class Weird:
             pass
         out = cli.render_verbose_full(_FakeCxt(agent=Weird()))
-        assert "agent_result" in out  # 不抛异常即通过
+        assert "agent_result" in out
 
 
 # ============================================================================
@@ -235,7 +235,7 @@ class TestPromptTaskInfo:
             assert cli.prompt_task_info("p1") is None
 
     def test_preset_wins_over_mock(self):
-        """--task-info 显式传入优先于 pattern 的 mock 预设。"""
+        """An explicit --task-info wins over the pattern's mock preset."""
         with unittest.mock.patch("builtins.input") as inp:
             out = cli.prompt_task_info("customer_agent", '{"k": "v"}')
         assert out == {"k": "v"}
@@ -262,7 +262,7 @@ class TestMockTaskInfo:
                 "channel": "xianyu", "account_id": "demo"}
 
     def test_eof_applies_mock(self):
-        """非交互（管道）场景：EOF 也回落 mock，演示可脚本化。"""
+        """Non-interactive (piped) scenario: EOF also falls back to the mock, keeping demos scriptable."""
         with unittest.mock.patch("builtins.input", side_effect=EOFError):
             assert cli.prompt_task_info("customer_agent") == {
                 "channel": "xianyu", "account_id": "demo"}
@@ -274,8 +274,8 @@ class TestMockTaskInfo:
                 "account_id": "acct_9"}
 
     def test_preset_account_matches_seed_scope(self):
-        """mock 的 account_id 必须与 knowledge-seed 默认 scope 对齐，
-        目录预取/知识工具才能取到种子数据。"""
+        """The mock's account_id must match the knowledge-seed default scope,
+        so catalog prefetch / knowledge tools can reach the seeded data."""
         assert f"xianyu:{cli.mock_task_info_for('customer_agent')['account_id']}" \
             == cli.knowledge_seed.__defaults__[0]
 
@@ -291,8 +291,8 @@ class TestMockTaskInfo:
 
 class TestBuildSessionTaskInfo:
     def test_build_session_writes_task_info_both_places(self, monkeypatch):
-        """task_info 双写对齐 main._launch_session_core：
-        session.task_info（落盘）+ metadata（prompt 槽位）。"""
+        """task_info is written to two places, matching main._launch_session_core:
+        session.task_info (persisted) + metadata (prompt slot)."""
         from dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
@@ -315,12 +315,12 @@ class TestBuildSessionTaskInfo:
 
 
 # ============================================================================
-# KEEP_CONFIG 菜单 + llm_override 接线
+# KEEP_CONFIG menu + llm_override wiring
 # ============================================================================
 
 class TestKeepConfigMenu:
     def test_provider_menu_includes_keep_config(self):
-        """provider 菜单含「维持 config 配置」固定项，置首。"""
+        """The provider menu carries the fixed "维持 config 配置" entry, listed first."""
         entries = cli._provider_menu_entries()
         assert entries[0]["value"] == cli.KEEP_CONFIG
         assert "维持" in entries[0]["label"]
@@ -330,11 +330,11 @@ class TestKeepConfigMenu:
             assert cli.resolve_llm_choice("", "") == {"code": "", "model": ""}
 
     def test_pick_keep_config_in_model_menu_keeps_code(self):
-        """model 菜单选「维持」：保留已选 code，model 留空（回落全局默认）。"""
+        """Selecting "维持 config 配置" in the model menu: keep the chosen code, leave model empty (fall back to the global default)."""
         from fake_provider import FAKE_PROVIDER_CODE, register_fake_provider
 
         register_fake_provider()
-        # fake provider 未声明 models 列表 → 走 input() 手输分支，键入「维持」
+        # the fake provider declares no models list -> the input() manual-entry branch runs; the "维持 config 配置" option is typed in
         with unittest.mock.patch("builtins.input", return_value=cli.KEEP_CONFIG):
             result = cli.resolve_llm_choice(FAKE_PROVIDER_CODE, "")
         assert result == {"code": FAKE_PROVIDER_CODE, "model": ""}
@@ -342,7 +342,7 @@ class TestKeepConfigMenu:
 
 class TestBuildSessionOverride:
     def test_build_session_writes_override_not_llm_config(self, monkeypatch):
-        """--llm/--model 预置写 metadata.llm_override，不再直接写 llm_config。"""
+        """--llm/--model presets write metadata.llm_override instead of writing llm_config directly."""
         from fake_provider import fake_llm_config, register_fake_provider
 
         register_fake_provider()
@@ -360,7 +360,7 @@ class TestBuildSessionOverride:
 
 
 # ============================================================================
-# 终审修复回归（Final review C1 / C2）
+# Final-review regression fixes (Final review C1 / C2)
 # ============================================================================
 
 _YAML = """\
@@ -394,7 +394,7 @@ def _minimal_pattern(code):
 
 
 def _run_chat_turn(tmp_path, session):
-    """经 chat() 跑一轮：get_llm_config 打桩到 tmp yaml 的真实三层解析。"""
+    """Run one turn via chat(): get_llm_config stubbed onto a tmp yaml for real three-tier resolution."""
     from unittest.mock import patch as _patch
     import config.config as cfg_mod
     import chat.chat as chat_mod
@@ -418,8 +418,8 @@ def _run_chat_turn(tmp_path, session):
 class TestEmptyOverrideNotPinned:
     def test_empty_override_skips_metadata_and_layered_resolution(
             self, tmp_path, monkeypatch):
-        """空 override 经 build_session 不写 llm_override；
-        后续轮次走三层解析，model 取 pattern 层值（C1 回归）。"""
+        """An empty override writes no llm_override via build_session;
+        later turns use three-tier resolution and model comes from the pattern layer (C1 regression)."""
         from chat.session import Session
 
         pattern = _minimal_pattern("p_cli_test")
@@ -432,14 +432,14 @@ class TestEmptyOverrideNotPinned:
                               llm_overrides={"code": "", "model": ""})
         assert "llm_override" not in s.cxt.metadata
 
-        # 端到端：无 override → 解析走三层，pattern 层 model 生效
+        # End-to-end: no override -> resolution goes through the three tiers, pattern-layer model wins
         _run_chat_turn(tmp_path, s)
         assert s.cxt.llm_config["model"] == "pattern-layer-model"
 
     def test_cross_provider_override_connection_from_providers_section(
             self, tmp_path):
-        """/llm 切 provider：override 只含显式字段；连接字段来自
-        llm_providers.deepseek 段，不串台 openai 连接（C2 回归）。"""
+        """/llm provider switch: the override holds only explicitly chosen fields; connection fields come
+        from the llm_providers.deepseek section, not cross-wired into the openai connection (C2 regression)."""
         from chat.session import Session
 
         pattern = _minimal_pattern("p_cli_test")
@@ -447,7 +447,7 @@ class TestEmptyOverrideNotPinned:
         session.pattern = pattern
         session.cxt.module_map = pattern.module_map
         session.cxt.node_map = pattern.node_map
-        # 模拟 _do_llm 写入语义：只写显式选择字段
+        # Simulate the _do_llm write semantics: only explicitly chosen fields are written
         session.cxt.metadata["llm_override"] = {"code": "deepseek",
                                                 "model": "deepseek-chat"}
         _run_chat_turn(tmp_path, session)

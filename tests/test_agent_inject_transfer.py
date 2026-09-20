@@ -1,4 +1,4 @@
-"""run_agent：投影注入 / transfer 跳转事件 / tool 往返落盘测试。"""
+"""run_agent tests: projection injection / transfer jump events / tool round-trip persistence."""
 
 import json
 from unittest.mock import patch
@@ -11,7 +11,7 @@ from tools.register import registry as tool_registry
 
 
 # ---------------------------------------------------------------------------
-# 中性 mock 工具：模块级自注册，与内置工具互不干扰
+# Neutral mock tools: module-level self-registration, no interference with built-in tools
 # ---------------------------------------------------------------------------
 
 def _mock_lent_tool_handler(args, **kwargs):
@@ -88,7 +88,7 @@ def _mk_session():
 
 
 class ScriptedProvider:
-    """按脚本依次返回响应；记录收到的 messages/tools 供断言。"""
+    """Returns scripted responses in order; records received messages/tools for assertions."""
 
     def __init__(self, script):
         self.script = list(script)
@@ -108,7 +108,7 @@ def test_projection_block_contains_knowledge_and_tools():
         s.cxt.module_map["reception"], s.cxt.module_map)
     assert "售后维保" in block
     assert "保养预约" in block
-    assert "mock_lent_tool" in block   # 借出工具列在投影块
+    assert "mock_lent_tool" in block
 
 
 def test_transfer_tools_generated_per_link():
@@ -123,7 +123,7 @@ def test_transfer_tools_generated_per_link():
 
 
 def test_run_agent_direct_reply_with_lent_tool():
-    """inject 路径：A 借工具答完 → TurnResult(reply) + lent_by 记账。"""
+    """inject path: A borrows a tool and answers -> TurnResult(reply) plus lent_by bookkeeping."""
     from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "查下我的工单", stage="chat")
@@ -138,15 +138,14 @@ def test_run_agent_direct_reply_with_lent_tool():
     assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
     assert s.cxt.metadata["served_by_projection"] == {
         "module": "reception", "source": "after_sales"}
-    # tool 往返落 history
     tool_msgs = [m for m in s.cxt.history if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert tool_msgs[0].metadata.get("lent_by") == "after_sales"
 
 
 def test_run_agent_transfer_writes_jump_event():
-    """transfer 路径：A 调 transfer 工具 → 写 ModuleJumpEvent 到 cxt.actions，
-    reply 为空不出口；状态转移交由 chat 层 hop 循环消费（run_agent 不改状态）。"""
+    """transfer path: A calls the transfer tool → writes a ModuleJumpEvent to cxt.actions,
+    reply stays empty and is not emitted; state transition is left to the chat layer's hop loop (run_agent does not change state)."""
     from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "我要投诉整个售后流程", stage="chat")
@@ -163,16 +162,16 @@ def test_run_agent_transfer_writes_jump_event():
     assert events[0].target_module_code == "after_sales"
     assert events[0].reason == "售后投诉"
     assert events[0].source == "handoff_tool"
-    # 状态未由 run_agent 转移（chat 层消费事件时才转移）
+    # state is not transitioned by run_agent (the chat layer transitions when it consumes the event)
     assert s.cxt.current_module_code == "reception"
-    # A 的 content 不出口但保留进 history（suppressed）
+    # A's content is not emitted but is kept in history (suppressed)
     suppressed = [m for m in s.cxt.history
                   if m.role == "assistant" and m.metadata.get("suppressed")]
     assert len(suppressed) == 1
 
 
 def test_run_agent_transfer_rejected_backfills_error_and_continues():
-    """transfer 目标不存在于 module_map → 错误回填 tool result，继续 loop 普通回复。"""
+    """transfer target absent from module_map → the error is backfilled as the tool result and the loop continues with a normal reply."""
     from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "我要办个神奇业务", stage="chat")
@@ -185,42 +184,38 @@ def test_run_agent_transfer_rejected_backfills_error_and_continues():
     with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "好的，我直接为您处理。"
-    # 状态未变、无跳转事件
     assert s.cxt.current_module_code == "reception"
     assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
-    # 错误回填 tool 消息落 history
     tool_msgs = [m for m in s.cxt.history if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert tool_msgs[0].metadata.get("tool_name") == "transfer_to_ghost"
     assert "转移目标不存在" in tool_msgs[0].content
-    # LLM 第二轮收到了回填的 tool 结果
     second = provider.seen[1]["messages"]
     assert second[-1]["role"] == "tool"
     assert "转移目标不存在" in second[-1]["content"]
-    # 失败路径 content 不 suppress
     assistant_msgs = [m for m in s.cxt.history
                       if m.role == "assistant" and m.metadata.get("suppressed")]
     assert not assistant_msgs
 
 
 def test_lent_tools_respect_pattern_acl():
-    """I-1：借出路径同样受 pattern 级工具 ACL 约束（deny-by-default 不被架空）。"""
+    """I-1: the lend path is bound by the same pattern-level tool ACL (deny-by-default is not bypassed)."""
     from chat.loop import _resolve_lent_tools
     s = _mk_session()
     reception = s.cxt.module_map["reception"]
     p = s.pattern
     schemas, lent_by = _resolve_lent_tools(reception, p)
     names = [t["function"]["name"] for t in schemas]
-    # ACL 未授权 p/after_sales 的工具借不到
+    # tools not ACL-authorized for p/after_sales cannot be borrowed
     assert "acl_locked_tool" not in names
     assert "acl_locked_tool" not in lent_by
-    # ACL 已授权的仍可借
+    # ACL-authorized tools can still be borrowed
     assert "mock_lent_tool" in names
     assert lent_by["mock_lent_tool"] == "after_sales"
 
 
 def test_projection_recall_scoped_to_borrower():
-    """I-3：回看块仅在借方自身轮次注入（served_by_projection 轮首重置）。"""
+    """I-3: the look-back block is injected only on the borrower's own turns (served_by_projection resets at turn start)."""
     from chat.loop import run_agent
     s = _mk_session()
     s.cxt.metadata["served_by_projection"] = {
@@ -235,7 +230,7 @@ def test_projection_recall_scoped_to_borrower():
 
 
 def test_rejected_transfer_backfills_all_tool_calls():
-    """M-5：同轮普通工具 + 非法 transfer，被拒时两者都回填（避免 API 400）。"""
+    """M-5: same-turn normal tool + invalid transfer; when rejected, both are backfilled (avoids an API 400)."""
     from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "查工单顺便办个神奇业务", stage="chat")
@@ -251,19 +246,18 @@ def test_rejected_transfer_backfills_all_tool_calls():
     with patch("chat.loop.build_provider", return_value=provider):
         result = run_agent(s, s.cxt.module_map["reception"], s.cxt.metadata["llm_override"])
     assert result.reply == "好的，为您处理完毕。"
-    # 第二轮收到的 messages 尾部有两条 role=tool（全部 tool_call_id 有应答）
+    # the second round's messages end with two role=tool rows (every tool_call_id gets a response)
     second = provider.seen[1]["messages"]
     tool_msgs = [m for m in second if m.get("role") == "tool"]
     assert len(tool_msgs) == 2
     assert {m["tool_call_id"] for m in tool_msgs} == {"c1", "c2"}
     assert "转移目标不存在" in tool_msgs[1]["content"]
-    # 两个 tool 结果都落 history
     hist_tools = [m for m in s.cxt.history if m.role == "tool"]
     assert len(hist_tools) == 2
 
 
 def test_force_close_no_transfer_tools_and_prompt():
-    """M-6(b)：force_close 时不注入 transfer 工具且 prompt 含"勿再移交"。"""
+    """M-6(b): under force_close no transfer tools are injected and the prompt contains the force-close suffix."""
     from chat.loop import run_agent
     s = _mk_session()
     s.cxt.add_message("user", "帮我处理售后", stage="chat")
@@ -281,36 +275,34 @@ def test_force_close_no_transfer_tools_and_prompt():
 
 
 def test_chat_hop_consumes_transfer_event_same_turn():
-    """transfer 事件经 chat 层 hop 循环消费：目标模块同轮续答。"""
+    """The transfer event is consumed by the chat layer's hop loop: the target module answers in the same turn."""
     from chat.chat import chat as chat_fn
 
     s = _mk_session()
     sessions = {"s": s}
     provider = ScriptedProvider([
-        # A（reception）：transfer
+        # A (reception): transfer
         {"content": "转接中", "tool_calls": [{"id": "c1", "function": {
             "name": "transfer_to_after_sales",
             "arguments": '{"reason": "售后深入"}'}}]},
-        # B（after_sales）同轮续答
+        # B (after_sales) answers in the same turn
         {"content": "看到您有售后需求，已为您登记。", "tool_calls": []},
     ])
     with patch("chat.loop.build_provider", return_value=provider):
         text = chat_fn(query="帮我处理售后", session_id="s", all_sessions=sessions)
     assert text == "看到您有售后需求，已为您登记。"
-    # 状态已转移到目标模块（hop 消费后）
     assert s.cxt.current_module_code == "after_sales"
-    # 事件已被消费（actions 无 ModuleJumpEvent 残留）
     assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
-    # B 的回复入口走 agent loop（两次 LLM 调用：A transfer + B 答复）
+    # B's reply enters via the agent loop (two LLM calls: A's transfer + B's answer)
     assert len(provider.seen) == 2
 
 
 # ---------------------------------------------------------------------------
-# tool 轨迹完整记录（载荷形态：assistant 工具轮 content JSON + tool 行 metadata id）
+# tool trajectory recorded completely (payload form: assistant tool-round content JSON + tool row metadata id)
 # ---------------------------------------------------------------------------
 
 def test_tool_round_ids_paired_in_history():
-    """普通工具轮：assistant 载荷 tool_calls 与 tool 行 metadata id 一一配对。"""
+    """Normal tool round: assistant payload tool_calls pair one-to-one with tool row metadata ids."""
     from chat.loop import run_agent
     from dialogue.base import decode_tool_call_content
     s = _mk_session()
@@ -337,7 +329,7 @@ def test_tool_round_ids_paired_in_history():
 
 
 def test_transfer_turn_synthesizes_all_tool_results():
-    """transfer 轮：同响应混合普通工具 + transfer，全部合成 tool 行且 id 全配对。"""
+    """transfer round: the same response mixes normal tools + transfer; all are synthesized into tool rows with ids fully paired."""
     from chat.loop import run_agent
     from dialogue.base import decode_tool_call_content
     s = _mk_session()
@@ -363,7 +355,7 @@ def test_transfer_turn_synthesizes_all_tool_results():
     assert len(calls) == 2
 
     synthetic = [m for m in s.cxt.history if m.role == "tool"]
-    assert len(synthetic) == 2  # 每个tool call 一条，全配对
+    assert len(synthetic) == 2
     assert {m.metadata.get("tool_call_id") for m in synthetic} == {"c1", "c2"}
     assert all(m.metadata.get("synthetic") for m in synthetic)
     moved = [m for m in synthetic if m.content.startswith("[已移交至模块")]
@@ -372,7 +364,7 @@ def test_transfer_turn_synthesizes_all_tool_results():
 
 
 def test_rejected_transfer_records_tool_calls_on_assistant():
-    """幻觉目标错误回填路径：assistant 载荷带 tool_calls、tool 行带 id。"""
+    """Hallucinated-target error-backfill path: the assistant payload carries tool_calls and the tool row carries the id."""
     from chat.loop import run_agent
     from dialogue.base import decode_tool_call_content
     s = _mk_session()

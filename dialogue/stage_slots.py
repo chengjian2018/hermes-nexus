@@ -1,31 +1,42 @@
-"""管线槽位 —— pre_recall / query / post_recall / generate 四槽位轴，
-执行期三层延迟解析（node > module > pattern）+ 校验降级。
+"""Pipeline slots — the four-slot axis pre_recall / query / post_recall / generate,
+with three-layer lazy resolution at execution time (node > module > pattern)
+plus validated fallback.
 
-pattern.stages（或默认骨架）声明的是管线**形状**：
-- 具体 stage：原样执行（作者显式选择，可组成无 NLU、unified 单次调用等
-  任意形态；不做校验不替换）
-- 槽位：执行到该位置时由 runner 调 resolve_stage 解析
+pattern.stages (or the default skeleton) declares the pipeline **shape**:
+- Concrete stages: executed verbatim (an explicit choice by the author; they
+  can compose arbitrary shapes such as no NLU, unified single-call, etc.; no
+  validation, no substitution)
+- Slots: when execution reaches that position, the runner calls resolve_stage
 
-generate 双形态与惰性子部件（核心设计）：
-- 配置形态：单 stage（如 unified，一次调用自写 nlu_result/nlg_result）或
-  dict {"nlu": s1, "nlg": s2}（恰含两键且值合法，缺一即整层非法）
-- GenerateSlot 不在解析时绑定具体 stage，而是展开为结构：
-    ROUTE             → [nlu部件,                     nlg部件]
-    FSM+enable_clarify → [nlu部件, ClarifyStage,       nlg部件]
-    FSM 默认           → [nlu部件,                     nlg部件]
-  两个子部件在**各自执行时刻**独立做三层解析——ROUTE 下 chat 层的跳转检测
-  （chat._detect_jump_after_stage）在 nlu 部件后推进菜单节点并刷新节点级
-  LLM 配置，nlg 部件在节点切换后解析，菜单节点级 nlg 当轮生效（时机修复）；
-  FSM 下 ClarifyStage 先置 metadata["clarify"] 再跑 NLG，澄清语义不变。
-  single 形态只由 nlu 部件执行一次，nlg 部件对 single 恒 no-op：
-  - root single + 菜单 dict：nlg 部件重新解析取菜单 dict，root 的 single
-    已在 nlu 部件执行——nlg 部件正常执行菜单 nlg（菜单 dict 当轮生效）；
-  - root dict + 菜单 single：菜单 single 当轮不执行（nlg 部件 no-op），
-    下轮 nlu 部件在菜单节点解析时才生效。
+The two forms of generate and its lazy sub-parts (core design):
+- Config forms: a single stage (e.g. unified, one call that writes both
+  nlu_result/nlg_result itself) or a dict {"nlu": s1, "nlg": s2} (exactly the
+  two keys with valid values; missing either invalidates the whole layer)
+- GenerateSlot does not bind a concrete stage at resolution time; instead it
+  expands into structure:
+    ROUTE              → [nlu part,                  nlg part]
+    FSM+enable_clarify → [nlu part, ClarifyStage,    nlg part]
+    FSM default        → [nlu part,                  nlg part]
+  The two sub-parts each do three-layer resolution **at their own execution
+  moment** — under ROUTE, the chat layer's jump detection
+  (chat._detect_jump_after_stage) advances the menu node and refreshes
+  node-level LLM config after the nlu part, and the nlg part resolves after
+  the node switch, so menu-node-level nlg takes effect the same turn (timing
+  fix); under FSM, ClarifyStage sets metadata["clarify"] before NLG runs, so
+  clarify semantics are unchanged.
+  In single form only the nlu part executes it, once; the nlg part is always
+  a no-op for single:
+  - root single + menu dict: the nlg part re-resolves to the menu dict, and
+    the root's single already ran in the nlu part — the nlg part normally
+    executes the menu nlg (menu dict takes effect the same turn);
+  - root dict + menu single: the menu single does not execute this turn (the
+    nlg part is a no-op); it only takes effect on the next turn when the nlu
+    part resolves at the menu node.
 
-降级规则（全部槽位统一）：某层配置非法 → 警告 + 降级下一层；三层全空/
-全非法 → 召回/改写槽位 no-op（空列表），generate 落 builtin（按
-module.type：FSMNLU/FSMNLG 或 RouteNLU/RouteNLG）。
+Fallback rules (uniform across all slots): an invalid layer config → warning
++ fall back to the next layer; all three layers empty/invalid → recall/rewrite
+slots become no-ops (empty list), generate falls back to builtin (by
+module.type: FSMNLU/FSMNLG or RouteNLU/RouteNLG).
 """
 
 from __future__ import annotations
@@ -41,14 +52,15 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 槽位 sentinel
+# Slot sentinels
 # ============================================================================
 
 class StageSlot(PipelineStage):
-    """槽位基类：占位 marker，不实现执行逻辑。
+    """Slot base class: placeholder marker, implements no execution logic.
 
-    直接 execute（未经 runner 解析）立即抛错，fail fast 防止骨架被
-    误当具体管线裸跑（如 visualize / 自定义 runner）。
+    Calling execute directly (without going through the runner's resolution)
+    raises immediately — fail fast against a skeleton being mistakenly run
+    bare as a concrete pipeline (e.g. visualize / custom runners).
     """
 
     stage_name = "stage_slot"
@@ -61,35 +73,35 @@ class StageSlot(PipelineStage):
 
 
 class PreRecallSlot(StageSlot):
-    """预召回槽位：三层属性名 ``pre_recall``。"""
+    """Pre-recall slot: three-layer attribute name ``pre_recall``."""
 
     stage_name = "pre_recall_slot"
 
 
 class QuerySlot(StageSlot):
-    """查询改写槽位：三层属性名 ``query``。"""
+    """Query rewrite slot: three-layer attribute name ``query``."""
 
     stage_name = "query_slot"
 
 
 class PostRecallSlot(StageSlot):
-    """后召回槽位：三层属性名 ``post_recall``。"""
+    """Post-recall slot: three-layer attribute name ``post_recall``."""
 
     stage_name = "post_recall_slot"
 
 
 class GenerateSlot(StageSlot):
-    """生成槽位：三层属性名 ``generate``，single/dict 双形态（见模块 docstring）。"""
+    """Generate slot: three-layer attribute name ``generate``, single/dict dual form (see the module docstring)."""
 
     stage_name = "generate_slot"
 
 
 # ============================================================================
-# 校验与规整
+# Validation and normalization
 # ============================================================================
 
 def is_valid_stage(obj: Any) -> bool:
-    """鸭子类型 stage 校验：有 callable 的 ``execute``。"""
+    """Duck-typed stage validation: has a callable ``execute``."""
     return (
         obj is not None
         and hasattr(obj, "execute")
@@ -98,12 +110,12 @@ def is_valid_stage(obj: Any) -> bool:
 
 
 def normalize_generate(value: Any) -> Optional[Tuple[str, Any, Any]]:
-    """把 ``generate`` 配置值规整为分类元组；非法返回 None。
+    """Normalize a ``generate`` config value into a classified tuple; None if invalid.
 
     Returns:
-        ("dict", nlu, nlg) —— dict 恰含 nlu/nlg 两键且值均合法
-        ("single", stage, None) —— 单 stage 形态（unified 等）
-        None —— 缺键/多键/值非法/类型错误
+        ("dict", nlu, nlg) — dict with exactly the nlu/nlg keys, both values valid
+        ("single", stage, None) — single-stage form (unified etc.)
+        None — missing/extra keys, invalid values, or wrong types
     """
     if isinstance(value, dict):
         if set(value.keys()) != {"nlu", "nlg"}:
@@ -118,12 +130,12 @@ def normalize_generate(value: Any) -> Optional[Tuple[str, Any, Any]]:
 
 
 # ============================================================================
-# 三层配置读取（node > module > pattern）
+# Three-layer config lookup (node > module > pattern)
 # ============================================================================
 
 def _layered_values(attr: str, ctx: DialogueContext, module: Any,
                     pattern: Any) -> List[Tuple[str, Any]]:
-    """按 node > module > pattern 顺序收集已配置层 (层名, 原始值)。"""
+    """Collect configured layers as (layer name, raw value) in node > module > pattern order."""
     layers: List[Tuple[str, Any]] = []
     node = ctx.get_current_node()
     if node is not None:
@@ -136,7 +148,7 @@ def _layered_values(attr: str, ctx: DialogueContext, module: Any,
 
 def _resolve_generate(ctx: DialogueContext, module: Any,
                       pattern: Any) -> Tuple[str, Any, Any]:
-    """generate 三层解析（含整层降级）；全空/全非法 → builtin 分类元组。"""
+    """Three-layer generate resolution (with whole-layer fallback); all empty/invalid → the builtin classified tuple."""
     for layer_name, value in _layered_values("generate", ctx, module, pattern):
         normalized = normalize_generate(value)
         if normalized is not None:
@@ -146,7 +158,7 @@ def _resolve_generate(ctx: DialogueContext, module: Any,
             "且值合法，或为带 execute 的单 stage），整层降级: %r",
             layer_name, value,
         )
-    # builtin 兜底（按 module.type）
+    # Builtin fallback (by module.type)
     if getattr(module, "type", None) == ModuleType.ROUTE:
         from stages.nlu import RouteNLU
         from stages.nlg import RouteNLG
@@ -157,11 +169,11 @@ def _resolve_generate(ctx: DialogueContext, module: Any,
 
 
 # ============================================================================
-# generate 惰性子部件
+# generate lazy sub-parts
 # ============================================================================
 
 class _GenerateNLUPart(PipelineStage):
-    """generate 的 nlu 部件：执行时刻三层解析，dict 取 nlu / single 整体执行。"""
+    """The nlu part of generate: three-layer resolution at execution time; dict takes nlu / single executes the whole stage."""
 
     stage_name = "generate_nlu_part"
 
@@ -171,15 +183,17 @@ class _GenerateNLUPart(PipelineStage):
 
     def execute(self, ctx: DialogueContext) -> DialogueContext:
         _kind, nlu, _nlg = _resolve_generate(ctx, self.module, self.pattern)
-        # single 形态时 nlu 位即整个 stage（nlg 位为 None）
+        # In single form the nlu slot holds the entire stage (the nlg slot is None)
         return nlu.execute(ctx)
 
 
 class _GenerateNLGPart(PipelineStage):
-    """generate 的 nlg 部件：重新三层解析（此时节点可能已切到菜单）。
+    """The nlg part of generate: re-resolves the three layers (the node may
+    have switched to a menu node by then).
 
-    dict 形态 → 执行 nlg；single 形态 → no-op（single 已在 nlu 部件整体
-    执行，unified 自写 nlg_result，菜单节点级 single 下轮生效）。
+    dict form → executes nlg; single form → no-op (single already ran whole in
+    the nlu part; unified writes nlg_result itself, and a menu-node-level
+    single takes effect the next turn).
     """
 
     stage_name = "generate_nlg_part"
@@ -197,14 +211,15 @@ class _GenerateNLGPart(PipelineStage):
 
 
 # ============================================================================
-# 默认澄清 stage 工厂（自 chat.py _default_clarify_stage 迁入）
+# Default clarify stage factory (moved in from chat.py _default_clarify_stage)
 # ============================================================================
 
 def default_clarify_stage():
-    """构建默认 ClarifyStage：内存关键词召回 + 默认门控。
+    """Build the default ClarifyStage: in-memory keyword recall + default gating.
 
-    生产环境应在 module 上显式配置 clarify_stage（挂 ES 召回路径）；
-    默认实例保证开箱可用。
+    Production should configure clarify_stage explicitly on the module (the
+    ES-backed recall path); the default instance guarantees out-of-the-box
+    usability.
     """
     from stages.clarify import ClarifyRouteRule, ClarifyStage
     from stages.recaller import (
@@ -225,15 +240,18 @@ def default_clarify_stage():
 
 
 # ============================================================================
-# 槽位解析入口
+# Slot resolution entry point
 # ============================================================================
 
 def resolve_stage(stage: Any, ctx: DialogueContext, module: Any,
                   pattern: Any = None) -> List[Any]:
-    """返回待执行 stage 列表：槽位延迟解析，非槽位原样放行 ``[stage]``。
+    """Return the list of stages to execute: slots resolved lazily, non-slots
+    passed through as-is as ``[stage]``.
 
-    - GenerateSlot → 结构列表（nlg 部件在节点切换后独立解析，见模块 docstring）
-    - 召回/改写槽位 → 三层解析取第一个合法层 ``[stage]``；全空/全非法 → ``[]``
+    - GenerateSlot → structural list (the nlg part resolves independently after
+      the node switch; see the module docstring)
+    - Recall/rewrite slots → three-layer resolution takes the first valid layer
+      as ``[stage]``; all empty/invalid → ``[]``
     """
     if not isinstance(stage, StageSlot):
         return [stage]

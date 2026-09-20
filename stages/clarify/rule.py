@@ -1,16 +1,16 @@
-"""ClarifyRouteRule —— R1 规则门控（纯函数，不碰 LLM）。
+"""ClarifyRouteRule — R1 rule-based gating (pure functions, no LLM).
 
-输入召回结果与澄清槽位（topic / keywords），输出三选一模式：
-- "kb"       : 轨道一 —— 召回置信度高，基于业务知识库回答
-- "fallback" : 轨道二 —— 无召回或置信度低，问题响应 + 强拉回
-- "mixed"    : 模糊地带 —— 部分业务知识 + 问题响应
+Takes recall results and the clarify slots (topic / keywords) and outputs one of three modes:
+- "kb"       : track one — high recall confidence, answer from the business knowledge base
+- "fallback" : track two — no recall or low confidence, question-responsive reply + strong pull-back
+- "mixed"    : ambiguous zone — partial business knowledge + question-responsive reply
 
-门控规则（详见 spec 5.3）：
-- 召回为空 → fallback（无召回时的默认轨道）
-- 修正后 top score >= t_high → kb
-- t_low <= 修正后 top score < t_high → mixed
-- 修正项：topic / keywords 与 chunk 的 metadata.keywords（biz_keyword）重叠，
-  top score 加 keyword_bonus
+Gating rules (see spec 5.3 for details):
+- Empty recall -> fallback (default track when there is no recall)
+- Adjusted top score >= t_high -> kb
+- t_low <= adjusted top score < t_high -> mixed
+- Adjustment: when topic / keywords overlap the chunk's metadata.keywords (biz_keyword),
+  add keyword_bonus to the top score
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Tuple
 
 
 class ClarifyRouteRule:
-    """R1 门控规则。"""
+    """R1 gating rule."""
 
     def __init__(
         self,
@@ -37,16 +37,16 @@ class ClarifyRouteRule:
         topic: str,
         keywords: List[str],
     ) -> Tuple[str, List[Dict[str, Any]]]:
-        """门控判别，返回 (mode, 加分修正后的结果副本)。
+        """Gating decision; returns (mode, bonus-adjusted copy of the results).
 
         Args:
-            recall_results: 融合重排后的召回结果（标准化格式）。
-            topic: NLU 澄清槽位 —— 偏题问题主题。
-            keywords: NLU 澄清槽位 —— 偏题问句关键词列表。
+            recall_results: fused and reranked recall results (standardized format).
+            topic: NLU clarify slot — off-topic question subject.
+            keywords: NLU clarify slot — keyword list of the off-topic question.
 
         Returns:
-            (mode, adjusted_results)。adjusted_results 为浅拷贝列表，
-            top 结果命中关键词重叠时 score 已加成。
+            (mode, adjusted_results). adjusted_results is a shallow-copied list;
+            the top result's score is already boosted when it hits the keyword overlap.
         """
         if not recall_results:
             return "fallback", []
@@ -73,10 +73,10 @@ class ClarifyRouteRule:
         topic: str,
         keywords: List[str],
     ) -> bool:
-        """topic / keywords 是否与 top chunk 的业务关键词重叠。
+        """Whether topic / keywords overlap the top chunk's business keywords.
 
-        chunk 关键词取 ``metadata.keywords``（biz_keyword 字段标准化后所在位置），
-        逐词互查包含关系。
+        Chunk keywords come from ``metadata.keywords`` (where the standardized
+        biz_keyword field lives); inclusion is checked word by word in both directions.
         """
         chunk_keywords = [
             str(k) for k in (top.get("metadata", {}).get("keywords") or [])

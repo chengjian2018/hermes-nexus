@@ -1,4 +1,4 @@
-"""knowledge_store 单测：CRUD / scope 隔离 / jieba 检索 / 消毒。"""
+"""knowledge_store unit tests: CRUD / scope isolation / jieba search / sanitization."""
 
 import pytest
 
@@ -17,7 +17,7 @@ def store(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 写入与幂等
+# Writes and idempotency
 # ---------------------------------------------------------------------------
 
 def test_upsert_product_insert_then_update(store):
@@ -27,7 +27,7 @@ def test_upsert_product_insert_then_update(store):
     assert rows[0]["goods_name"] == "iPhone 13"
     assert rows[0]["price"] == "2699"
 
-    # 同 scope + goods_id 更新而非新增
+    # Same scope + goods_id updates the row instead of inserting
     store.upsert_product("xianyu:a1", 1001, "iPhone 13 黑色", price="2599")
     rows = store.search_products("xianyu:a1")
     assert len(rows) == 1
@@ -39,7 +39,7 @@ def test_upsert_keeps_old_fields_when_new_are_none(store):
     store.upsert_product("xianyu:a1", 1001, "iPhone", extracted_content="# 正文")
     store.upsert_product("xianyu:a1", 1001, "iPhone 改名", price="2000")
     row = store.search_products("xianyu:a1", goods_id=1001)[0]
-    assert row["extracted_content"] == "# 正文"  # None 不覆盖旧值
+    assert row["extracted_content"] == "# 正文"  # None does not overwrite old values
     assert row["price"] == "2000"
 
 
@@ -52,7 +52,7 @@ def test_add_cs_and_enabled_filter(store):
 
 
 # ---------------------------------------------------------------------------
-# scope 隔离
+# Scope isolation
 # ---------------------------------------------------------------------------
 
 def test_scope_isolation(store):
@@ -63,13 +63,13 @@ def test_scope_isolation(store):
     assert len(store.search_products("xianyu:a1")) == 1
     assert store.search_products("xianyu:a1")[0]["goods_name"] == "账号A的商品"
     assert store.search_products("xianyu:a2")[0]["goods_name"] == "账号B的商品"
-    # 跨 scope goods_id 也隔离
+    # goods_id is also isolated across scopes
     assert store.search_products("xianyu:a2", goods_id=1001) == []
     assert store.search_cs("xianyu:a2", "政策") == []
 
 
 # ---------------------------------------------------------------------------
-# 检索语义
+# Search semantics
 # ---------------------------------------------------------------------------
 
 def test_search_products_by_query(store):
@@ -77,7 +77,7 @@ def test_search_products_by_query(store):
     store.upsert_product("s", 2, "Switch OLED 游戏机", extracted_content="掌机")
     hits = store.search_products("s", query="阅读器 墨水屏")
     assert len(hits) == 1 and hits[0]["goods_id"] == 1
-    # 只命中正文词也应召回
+    # A query matching only content words should still recall
     hits = store.search_products("s", query="墨水屏")
     assert len(hits) == 1 and hits[0]["goods_id"] == 1
 
@@ -103,7 +103,7 @@ def test_cut_query_filters_short_words():
 
 
 # ---------------------------------------------------------------------------
-# 种子数据
+# Seed data
 # ---------------------------------------------------------------------------
 
 def test_seed_idempotent(store):
@@ -112,19 +112,19 @@ def test_seed_idempotent(store):
     ncs1 = len(store.search_cs("xianyu:demo", limit=50))
     assert n1 > 0 and ncs1 > 0
 
-    store.seed("xianyu:demo")  # 幂等：不翻倍
+    store.seed("xianyu:demo")  # idempotent: counts do not double
     assert len(store.search_products("xianyu:demo", limit=50)) == n1
     assert len(store.search_cs("xianyu:demo", limit=50)) == ncs1
 
 
 # ---------------------------------------------------------------------------
-# 消毒与格式化
+# Sanitization and formatting
 # ---------------------------------------------------------------------------
 
 def test_clean_untrusted_escapes_and_truncates():
     assert "＜script＞" in _clean_untrusted("<script>alert()</script>", 100)
     assert len(_clean_untrusted("x" * 1000, 50)) == 50
-    # 控制字符被滤掉，换行保留
+    # Control characters are filtered out; newlines are preserved
     assert "\n" in _clean_untrusted("a\x00b\nc", 100)
 
 
@@ -135,7 +135,7 @@ def test_format_result_untrusted_wrapper(store):
         store.search_products("s"), store.search_cs("s", "政策"))
     assert "＜untrusted_knowledge＞" in out
     assert "仅供事实参考" in out
-    assert "＜b＞" in out  # 尖括号全角化
+    assert "＜b＞" in out  # angle brackets converted to fullwidth
 
 
 def test_format_result_empty(store):
@@ -146,6 +146,6 @@ def test_format_catalog_compact_and_sanitized(store):
     store.upsert_product("s", 1, "商品[特价]", price="9.9")
     out = store.format_catalog(store.search_products("s"))
     assert "[untrusted_product_catalog]" in out
-    assert "［特价］" in out   # 方括号全角化
+    assert "［特价］" in out   # square brackets converted to fullwidth
     assert "正文" not in out or True
-    assert "extracted_content" not in out  # 目录不带知识正文字段名
+    assert "extracted_content" not in out  # catalog must not include the knowledge-content field name

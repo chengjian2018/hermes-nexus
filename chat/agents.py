@@ -1,14 +1,17 @@
 """
-AGENT 模块可插拔执行器接口 — 预留 agent 后端的替换点。
+Pluggable executor interface for AGENT modules — a reserved swap point for
+agent backends.
 
-现状 agent 执行硬连线到 loop.run_agent（ReAct 工具循环）。本模块把
-"怎么跑一个 agent 模块"抽象为 AgentRunner 协议：AgentHandler 只依赖协议，
-默认实现 LoopAgentRunner 委托 loop.run_agent，行为不变；后续接其他
-agent 后端（如 planner-executor、外部 agent 服务）时提供新实现注入即可，
-不动 chat 编排层。
+Agent execution is currently hard-wired to loop.run_agent (the ReAct tool
+loop). This module abstracts "how to run an agent module" behind the
+AgentRunner protocol: AgentHandler depends only on the protocol, and the
+default LoopAgentRunner delegates to loop.run_agent with unchanged behavior.
+Later agent backends (planner-executor, external agent services, ...) just
+provide a new implementation to inject — the chat orchestration layer stays
+untouched.
 
-不加 registry（CLAUDE.md：不引入新全局单例）——注入点为 chat()/chat_turn()
-的可选参数 agent_runner。
+No registry here (CLAUDE.md: no new global singletons) — the injection point
+is the optional agent_runner parameter of chat()/chat_turn().
 """
 
 import logging
@@ -22,13 +25,15 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class AgentRunner(Protocol):
-    """AGENT 模块执行器插件接口。
+    """Plugin interface for AGENT module executors.
 
-    实现方约定：
-    - 输入：session（含 cxt 历史/槽位）、模块、已解析的 llm_config
-    - 输出：TurnResult（reply 即回复；移交轮 reply 为空、跳转事件写入
-      cxt.actions，由 chat 层 hop 循环消费）
-    - force_close=True 时不产生新的转移（max_hops 耗尽强制收尾）
+    Implementor contract:
+    - Input: session (with cxt history/slots), module, resolved llm_config
+    - Output: TurnResult (reply is the response; on a transfer turn the
+      reply is empty and the jump event is written to cxt.actions, consumed
+      by the chat layer's hop loop)
+    - With force_close=True, produce no new transfers (forced close once
+      max_hops is exhausted)
     """
 
     def run(self, session: Session, module,
@@ -37,7 +42,7 @@ class AgentRunner(Protocol):
 
 
 class LoopAgentRunner:
-    """默认实现：委托 loop.run_agent（现状唯一执行路径）。"""
+    """Default implementation: delegates to loop.run_agent (the only execution path today)."""
 
     def run(self, session: Session, module,
             llm_config: Dict[str, Any], force_close: bool = False) -> TurnResult:

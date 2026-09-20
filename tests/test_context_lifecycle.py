@@ -1,4 +1,4 @@
-"""TurnLifecycle / ChatResult 离线单测（不依赖 LLM）。"""
+"""TurnLifecycle / ChatResult offline unit tests (no LLM dependency)."""
 
 from chat.context_lifecycle import TurnLifecycle
 from chat.response import ChatResult, build_chat_result
@@ -6,7 +6,7 @@ from dialogue.base import DialogueContext, ModuleJumpEvent
 
 
 def _make_cxt() -> DialogueContext:
-    """构造一个"上一轮残留"状态的 cxt：各类字段均非空。"""
+    """Build a cxt in a "leftover from the previous turn" state: every kind of field non-empty."""
     cxt = DialogueContext(session_id="s1", user_query="旧问题")
     cxt.current_module_code = "m1"
     cxt.current_node_code = "n1"
@@ -67,8 +67,8 @@ class TestBeginTurn:
         assert cxt.current_node_code == "n1"
         assert cxt.filled_slots == {"price": "100"}
         assert cxt.task_basic_info == {"city": "杭州"}
-        assert len(cxt.history) == history_len  # history 不清空
-        assert cxt.node_map == {} and cxt.module_map == {}  # 保持原引用
+        assert len(cxt.history) == history_len
+        assert cxt.node_map == {} and cxt.module_map == {}  # original references kept
 
     def test_persistent_metadata_keys_survive(self):
         cxt = _make_cxt()
@@ -78,7 +78,7 @@ class TestBeginTurn:
             assert key in cxt.metadata
 
     def test_idempotent_between_turns(self):
-        """连续两次 begin_turn（模拟两轮）结果一致。"""
+        """Two consecutive begin_turn calls (simulating two turns) behave consistently."""
         cxt = _make_cxt()
         lc = TurnLifecycle()
         lc.begin_turn(cxt, "q1")
@@ -86,18 +86,18 @@ class TestBeginTurn:
         lc.begin_turn(cxt, "q2")
         assert cxt.user_query == "q2"
         assert cxt.nlu_result is None
-        assert len(cxt.history) == 2  # 旧user + assistant回复1；q2 的 user 消息由 chat 层入
+        assert len(cxt.history) == 2  # old user + assistant reply 1; q2's user row is added by the chat layer
 
     def test_turn_history_start_snapshots_history_length(self):
-        """begin_turn 快照 turn_history_start（add user 之前的 history 长度）。"""
-        cxt = _make_cxt()  # 已含 1 条 user
+        """begin_turn snapshots turn_history_start (the history length before the user row is added)."""
+        cxt = _make_cxt()  # already contains 1 user row
         lc = TurnLifecycle()
         lc.begin_turn(cxt, "q1")
         assert cxt.turn_history_start == 1
         cxt.add_message("user", "q1", stage="chat")
         lc.end_turn(cxt, "回复1")
         lc.begin_turn(cxt, "q2")
-        assert cxt.turn_history_start == 3  # 旧user + q1 + 回复1
+        assert cxt.turn_history_start == 3  # old user + q1 + reply 1
 
 
 class TestEndTurn:
@@ -130,7 +130,7 @@ class TestChatResult:
         assert result.actions == [{"type": "old_action"}]
 
     def test_build_snapshots_jump_event_as_dict(self):
-        """残留的 ModuleJumpEvent（超跳数未消费）快照为观测 dict。"""
+        """A leftover ModuleJumpEvent (unconsumed after exceeding the hop limit) is snapshotted as an observation dict."""
         cxt = _make_cxt()
         cxt.actions.append(ModuleJumpEvent(
             target_module_code="m2", reason="r", source="nlu_jump"))
@@ -147,7 +147,7 @@ class TestChatResult:
         assert result == ChatResult(text="t", actions=[])
 
     def test_snapshot_is_copy_not_reference(self):
-        """快照须为拷贝：轮首 cxt.actions 重置后不影响已构建的 ChatResult。"""
+        """The snapshot must be a copy: resetting cxt.actions at turn start must not affect an already-built ChatResult."""
         cxt = _make_cxt()
         result = build_chat_result("t", cxt)
         cxt.actions.clear()

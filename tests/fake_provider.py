@@ -1,7 +1,7 @@
-"""脚本化 FakeProvider —— 离线测试共用的伪 LLM provider（不访问真实 API）。
+"""Scripted FakeProvider — fake LLM provider shared by offline tests (no real API access).
 
-按 prompt 内容区分 统一阶段 / NLU / NLG / 重试 四类请求并返回固定结果，
-供 route pattern 的逻辑测试与 API 测试复用。
+Distinguishes unified-stage / NLU / NLG / retry requests by prompt content and
+returns fixed results, reused by the route pattern's logic and API tests.
 """
 
 import json
@@ -32,7 +32,7 @@ class FakeProvider(BaseLLMProvider):
 
 
 def register_fake_provider() -> None:
-    """向 LLM 注册中心注册脚本化 provider（幂等）。"""
+    """Register the scripted provider with the LLM registry (idempotent)."""
     if not llm_registry.is_registered(FAKE_PROVIDER_CODE):
         llm_registry.register(
             code=FAKE_PROVIDER_CODE,
@@ -44,7 +44,7 @@ def register_fake_provider() -> None:
 
 
 def fake_llm_config() -> dict:
-    """返回使用 FakeProvider 的 llm_config。"""
+    """Return an llm_config that uses FakeProvider."""
     return {
         "code": FAKE_PROVIDER_CODE,
         "model": "fake-model",
@@ -54,11 +54,11 @@ def fake_llm_config() -> dict:
 
 
 # ============================================================================
-# 脚本化响应逻辑
+# Scripted response logic
 # ============================================================================
 
 def _extract_node_name(prompt: str) -> str:
-    """从 NLU/NLG prompt 的当前节点信息中提取节点名称。"""
+    """Extract the node name from the current-node info in NLU/NLG prompts."""
     for line in prompt.split("\n"):
         line = line.strip()
         if line.startswith("节点名称:"):
@@ -67,7 +67,7 @@ def _extract_node_name(prompt: str) -> str:
 
 
 def _extract_query(prompt: str) -> str:
-    """从 prompt 的「用户输入」段落提取第一行作为用户 query。"""
+    """Extract the first line after the user-input section marker as the user query."""
     marker = "### 用户输入"
     idx = prompt.find(marker)
     if idx == -1:
@@ -78,19 +78,19 @@ def _extract_query(prompt: str) -> str:
 
 
 def _route_nlu(query: str, retry: bool) -> str:
-    """路由根节点的脚本化意图分类结果。"""
+    """Scripted intent classification result for the route root node."""
     if "解析失败重试" in query and not retry:
-        return "这不是合法的 JSON 输出"  # 触发第一次解析失败
+        return "这不是合法的 JSON 输出"  # triggers the first parse failure
     if "永远解析失败" in query:
         return "这不是合法的 JSON 输出"
     if any(k in query for k in ("买车", "购车", "试驾", "看车", "询价", "车型")):
         return '{"next_node": "menu_sales", "slots": {}}'
-    return '{"next_node": "", "slots": {}}'  # 未知意图兜底
+    return '{"next_node": "", "slots": {}}'  # unknown-intent fallback
 
 
 def _fsm_nlu(node_name: str, query: str) -> str:
-    """FSM 节点的脚本化意图/槽位抽取结果。"""
-    # 偏题输入 → 澄清意图（固定槽位 topic/keywords）
+    """Scripted intent/slot extraction result for FSM nodes."""
+    # Off-topic input -> clarify intent (fixed topic/keywords slots)
     if any(k in query for k in ("收别的钱", "其他收费", "额外收费")):
         return json.dumps(
             {
@@ -110,16 +110,18 @@ def _fsm_nlu(node_name: str, query: str) -> str:
 
 
 def _unified(node_name: str, query: str, retry: bool) -> str:
-    """统一阶段（单次调用 + structured output）的脚本化结果。
+    """Scripted result for the unified stage (single call + structured output).
 
-    输出协议：{"reply", "next_node", "slots"}，reply 内嵌目标节点名称便于断言。
+    Output protocol: {"reply", "next_node", "slots"}; the reply embeds the
+    target node name for easier assertions.
     """
     if "解析失败重试" in query and not retry:
-        return "这不是合法的 JSON 输出"  # 触发第一次解析失败
+        return "这不是合法的 JSON 输出"  # triggers the first parse failure
     if "永远解析失败" in query:
         return "这不是合法的 JSON 输出"
     if "跳到不存在节点" in query:
-        # 模拟模型违反转移边约束，供代码级硬 guard 测试
+        # Simulates the model violating a transition-edge constraint, for the
+        # code-level hard-guard test
         return json.dumps(
             {
                 "reply": "统一回复: 非法节点",
@@ -129,7 +131,8 @@ def _unified(node_name: str, query: str, retry: bool) -> str:
             ensure_ascii=False,
         )
     if "硬造澄清意图" in query:
-        # 模拟未开澄清的模块输出了 clarify 信号，供合法集硬 guard 测试
+        # Simulates a module without clarify enabled emitting a clarify signal,
+        # for the allowed-set hard-guard test
         return json.dumps(
             {
                 "reply": "统一回复: 硬造澄清",
@@ -139,7 +142,8 @@ def _unified(node_name: str, query: str, retry: bool) -> str:
             ensure_ascii=False,
         )
 
-    # 偏题输入 → 澄清意图（固定槽位 topic/keywords，reply 简短承接）
+    # Off-topic input -> clarify intent (fixed topic/keywords slots, short
+    # acknowledgment reply)
     if any(k in query for k in ("收别的钱", "其他收费", "额外收费")):
         return json.dumps(
             {
@@ -150,7 +154,7 @@ def _unified(node_name: str, query: str, retry: bool) -> str:
             ensure_ascii=False,
         )
 
-    # 路由根节点：意图分类到菜单
+    # Route root node: classify intent to a menu
     if node_name == "统一路由根节点":
         if any(k in query for k in ("买车", "购车", "车型", "试驾", "询价")):
             return json.dumps(
@@ -175,7 +179,8 @@ def _unified(node_name: str, query: str, retry: bool) -> str:
             ensure_ascii=False,
         )
 
-    # FSM 节点：推进流程 + 槽位抽取，reply 为所选下一节点话术
+    # FSM nodes: advance the flow + extract slots; the reply is the chosen
+    # next node's script
     mapping = {
         "询问品牌": ("u_ask_budget", "brand", "统一回复: 询问预算"),
         "询问预算": ("u_confirm", "budget", "统一回复: 确认购车信息"),
@@ -192,7 +197,7 @@ def _unified(node_name: str, query: str, retry: bool) -> str:
 
 
 def _extract_xianyu_section(prompt: str, marker: str) -> str:
-    """从闲鱼 NLG prompt 的指定段落（### 开头）提取首行内容。"""
+    """Extract the first line of the given section (heading starting with ###) from a Xianyu NLG prompt."""
     idx = prompt.find(marker)
     if idx == -1:
         return ""
@@ -202,9 +207,10 @@ def _extract_xianyu_section(prompt: str, marker: str) -> str:
 
 
 def _xianyu_nlg(prompt: str) -> str:
-    """闲鱼意图 NLG prompt（XIANYU_*_NLG_PROMPT，含「买家消息」段落）。
+    """Xianyu intent NLG prompt (XIANYU_*_NLG_PROMPT, contains the buyer-message section).
 
-    回复带上任务描述的意图人设关键词，便于断言命中的菜单节点模板。
+    The reply carries the intent persona keyword from the task description,
+    so assertions can tell which menu-node template was hit.
     """
     task = ""
     for line in prompt.split("\n"):
@@ -222,39 +228,44 @@ def _xianyu_nlg(prompt: str) -> str:
 
 
 def scripted_response(prompt: str) -> str:
-    """按 prompt 类型返回脚本化 LLM 输出。"""
+    """Return the scripted LLM output for the prompt type."""
     node_name = _extract_node_name(prompt)
 
-    # 闲鱼意图 NLG prompt：无「节点名称」（走 node.base_nlg_prompt 意图模板），
-    # 以「### 买家消息」段落标识（先于通用 NLG 兜底判定）
+    # Xianyu intent NLG prompt: no node-name line (uses node.base_nlg_prompt
+    # intent templates); identified by the buyer-message section header
+    # (checked before the generic NLG fallback)
     if "### 买家消息" in prompt:
         return _xianyu_nlg(prompt)
 
-    # NLU 重试修正 prompt（含「修正要求」段落）→ 按协议返回正确格式
+    # NLU retry/repair prompt (contains the repair-requirements section)
+    # -> return the correct format per protocol
     if "修正要求" in prompt:
         query = _extract_query(prompt).replace("解析失败重试", "")
         if '"reply"' in prompt:
             return _unified(node_name, query, retry=True)
         return _route_nlu(query, retry=True)
 
-    # 统一阶段 prompt：含 reply + next_node 的三字段 JSON 协议（先于 NLU 判定）
+    # Unified-stage prompt: three-field JSON protocol with reply + next_node
+    # (checked before the NLU branch)
     if '"reply"' in prompt and '"next_node"' in prompt:
         return _unified(node_name, _extract_query(prompt), retry=False)
 
-    # NLU prompt：含 next_node JSON 输出要求
+    # NLU prompt: requires next_node JSON output
     if '"next_node"' in prompt:
         query = _extract_query(prompt)
         if node_name == "路由根节点":
             return _route_nlu(query, retry=False)
         return _fsm_nlu(node_name, query)
 
-    # 澄清 prompt（含「知识库召回内容」段落且非 NLU JSON 协议）→ 按模式返回
+    # Clarify prompt (contains the KB recall-content section and is not an
+    # NLU JSON protocol) -> return per mode
     if "知识库召回内容" in prompt and '"next_node"' not in prompt:
         if "召回内容为空或无相关内容" in prompt or "（无相关知识库内容）" in prompt:
             return "承接：该问题暂无法详细解答。请问您的预算大概是多少呢？"
         return "解答：除车价外仅收取上牌费与服务费。请问您的预算大概是多少呢？"
 
-    # NLG prompt：回复文本带上当前节点名称，便于断言 NLG 使用了哪个节点
+    # NLG prompt: the reply text carries the current node name, so assertions
+    # can tell which node NLG used
     if node_name:
         return f"回复: {node_name}"
     return "回复: 无当前节点"

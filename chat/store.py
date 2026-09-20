@@ -1,10 +1,14 @@
-"""SQLite 会话持久化 —— 消息事实源（逐条 write-through）+ 状态快照 + 审计。
+"""SQLite session persistence — source of truth for messages (per-message
+write-through) + state snapshots + audit.
 
-治理（TTL/逐出/存在性校验）在 main.py 内存中完成。消息经 ``attach`` 挂接
-的 message_sink 逐条即时落库（``append_message``，DB 为事实源——中途 crash
-不丢轮内消息）；轮末 ``save_snapshot`` 只回写 sessions 状态快照；startup
-``load_active_sessions`` 恢复；压缩经 ``replace_history`` 重排。单连接 +
-锁串行化（FastAPI sync 端点跑线程池，写流量极小）。
+Governance (TTL/eviction/existence checks) happens in main.py's in-memory
+state. Messages are persisted one by one, as they are added, through the
+message_sink wired up by ``attach`` (``append_message``; the DB is the source
+of truth — a mid-turn crash loses no messages); end of turn ``save_snapshot``
+only writes back the sessions state snapshot; startup restores via
+``load_active_sessions``; compression reorders rows via ``replace_history``.
+Single connection + lock serialization (FastAPI sync endpoints run on a
+thread pool; write traffic is tiny).
 """
 
 import json
@@ -51,7 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 
 
 class SessionStore:
-    """会话审计存储：sessions（状态快照）+ messages（行级消息流水）。"""
+    """Session audit store: sessions (state snapshots) + messages (row-level message log)."""
 
     def __init__(self, db_path: str):
         self._lock = threading.Lock()
@@ -67,14 +71,15 @@ class SessionStore:
             self._conn.close()
 
     # ------------------------------------------------------------------
-    # launch 落盘
+    # Launch persistence
     # ------------------------------------------------------------------
 
     def create_session(self, session: Session) -> None:
-        """落盘一个新会话（launch 时调用）。
+        """Persist a new session (called at launch).
 
-        同 session_id 重新 launch 视为新一代（launch_epoch + 1）：
-        旧代 messages 审计流水原地保留，sessions 行 upsert（created_at 重置）。
+        Re-launching the same session_id starts a new generation
+        (launch_epoch + 1): the old generation's message audit rows stay in
+        place and the sessions row is upserted (created_at reset).
         """
         now = time.time()
         request_id = (session.cxt.metadata or {}).get("request_id")
@@ -107,24 +112,28 @@ class SessionStore:
             )
 
     # ------------------------------------------------------------------
-    # 轮末落盘
+    # End-of-turn persistence
     # ------------------------------------------------------------------
 
     def attach(self, session: Session) -> None:
-        """挂接逐条 write-through：session 的每条 add_message 即时落库。
+        """Wire up per-message write-through: every add_message on the session
+        is persisted immediately.
 
-        sink 写失败在 ``DialogueContext.add_message`` 侧被吞（记日志不阻断
-        对话）；launch 时 create_session 失败也 attach——DB 中途恢复时不丢
-        消息。
+        Sink write failures are swallowed on the ``DialogueContext.add_message``
+        side (logged, never blocking the dialogue); attach also runs at launch
+        even when create_session fails — no messages are lost once the DB
+        recovers mid-way.
         """
         session.cxt.message_sink = (
             lambda msg: self.append_message(session, msg))
 
     def save_snapshot(self, session: Session) -> None:
-        """轮末回写 sessions 状态快照（模块/节点/槽位/活跃时间）。
+        """Write back the end-of-turn sessions state snapshot
+        (module/node/slots/last-active time).
 
-        消息追加职责已移至 ``append_message``（attach 后逐条 write-through），
-        本方法不再碰 messages 表——轮末一次事务回写状态即可。
+        Message appending has moved to ``append_message`` (per-message
+        write-through once attached); this method no longer touches the
+        messages table — one end-of-turn transaction to write back state.
         """
         now = time.time()
         filled_slots = json.dumps(session.cxt.filled_slots or {}, ensure_ascii=False)
@@ -144,11 +153,11 @@ class SessionStore:
             )
 
     # ------------------------------------------------------------------
-    # 逐条 write-through（DB 事实源）+ 压缩原语
+    # Per-message write-through (DB is the source of truth) + compression primitives
     # ------------------------------------------------------------------
 
     def _current_epoch(self, session_id: str) -> int:
-        """查 session 当代 epoch（无行视为 0；须持有 self._lock）。"""
+        """Return the session's current-generation epoch (0 if no row; requires self._lock held)."""
         row = self._conn.execute(
             "SELECT launch_epoch FROM sessions WHERE session_id = ?",
             (session_id,),
@@ -156,10 +165,13 @@ class SessionStore:
         return row["launch_epoch"] if row is not None else 0
 
     def append_message(self, session: Session, msg: SessionMessage) -> None:
-        """单条消息即时落库（message_sink 的写侧，add_message 逐条触发）。
+        """Persist a single message immediately (write side of message_sink,
+        triggered per add_message).
 
-        epoch 写时查询（与 save_turn 同 idiom）：内存逐出后重 launch 的在途轮
-        会落到新代，与现状批量写的偏差同类，非本次引入。
+        The epoch is looked up at write time (same idiom as save_turn): an
+        in-flight turn of a session evicted from memory and re-launched lands
+        in the new generation — same kind of deviation as the existing batch
+        write, not introduced here.
         """
         with self._lock, self._conn:
             epoch = self._current_epoch(session.session_id)
@@ -179,9 +191,11 @@ class SessionStore:
             )
 
     def get_history(self, session_id: str) -> List[SessionMessage]:
-        """当代 epoch 全量消息按 id 升序重建（压缩前 DB/内存对齐校验用）。
+        """Rebuild all messages of the current epoch in ascending id order
+        (used for the DB/memory alignment check before compression).
 
-        tool 轨迹在 content/metadata 载荷里原样往返（无需专列）。
+        Tool-call traces round-trip verbatim inside the content/metadata
+        payloads (no dedicated columns needed).
         """
         with self._lock:
             epoch = self._current_epoch(session_id)
@@ -204,12 +218,15 @@ class SessionStore:
     def replace_history(
         self, session: Session, summary_text: str, keep_idx: int
     ) -> None:
-        """压缩重排：删当代全部 → 插 summary 行 → 重插 ``history[keep_idx:]``。
+        """Compression rewrite: delete all rows of the current epoch → insert
+        the summary row → re-insert ``history[keep_idx:]``.
 
-        单事务；先做 DB 行数与 ``len(cxt.history)`` 对齐校验，不齐抛
-        ``RuntimeError``（事务回滚，DB 原样），调用方捕获后放弃压缩——
-        对不齐的历史绝不删。retained 行 id 会重排（AUTOINCREMENT 无法
-        插到前面），summary 天然排最前。
+        Single transaction; first checks the DB row count against
+        ``len(cxt.history)`` and raises ``RuntimeError`` on mismatch (the
+        transaction rolls back, DB untouched); the caller catches it and
+        abandons compression — out-of-sync history is never deleted.
+        Retained rows get renumbered ids (AUTOINCREMENT cannot insert before
+        existing rows); the summary naturally sorts first.
         """
         now = time.time()
         with self._lock, self._conn:
@@ -246,15 +263,17 @@ class SessionStore:
             )
 
     # ------------------------------------------------------------------
-    # 重启恢复
+    # Restart restore
     # ------------------------------------------------------------------
 
     def load_active_sessions(self, ttl_seconds: float) -> List[Tuple[Session, float]]:
-        """加载 ``last_active_at`` 未过期的会话（startup 恢复用）。
+        """Load sessions whose ``last_active_at`` has not expired (for startup
+        restore).
 
         Returns:
-            ``(Session, last_active_at 墙钟)`` 列表。Session.pattern 为 None、
-            node_map/module_map 为空——由调用方从注册中心解析注入。
+            List of ``(Session, wall-clock last_active_at)``. Session.pattern
+            is None and node_map/module_map are empty — resolved and injected
+            by the caller from the registries.
         """
         cutoff = time.time() - ttl_seconds
         with self._lock:
@@ -295,7 +314,7 @@ class SessionStore:
             return restored
 
     # ------------------------------------------------------------------
-    # 审计查询（只读）
+    # Audit queries (read-only)
     # ------------------------------------------------------------------
 
     def list_sessions(
@@ -304,7 +323,7 @@ class SessionStore:
         limit: int = 50,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """会话列表（按 last_active_at 倒序），含消息计数。"""
+        """Session list (descending by last_active_at), with message counts."""
         sql = """
             SELECT s.session_id, s.pattern_code, s.launch_epoch,
                    s.current_module_code,
@@ -324,7 +343,9 @@ class SessionStore:
             return [dict(r) for r in rows]
 
     def get_messages(self, session_id: str) -> Optional[List[Dict[str, Any]]]:
-        """某会话全程消息（含所有代次，带 launch_epoch；按 id 升序）；不存在返回 None。"""
+        """All messages of a session across every generation (with launch_epoch;
+        ascending by id); None if the session does not exist.
+        """
         with self._lock:
             exists = self._conn.execute(
                 "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)

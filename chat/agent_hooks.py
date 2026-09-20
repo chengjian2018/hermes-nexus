@@ -1,28 +1,28 @@
-"""Agent loop hooks —— run_agent 的多点叠加扩展机制（点位事件 + 声明解析 + dispatcher）。
+"""Agent loop hooks — run_agent's multi-point additive extension mechanism (hook-point events + declaration parsing + dispatcher).
 
-定位（与既有扩展点的边界，见 docs/plans/2026-09-04-agent-loop-hooks.md）：
-- hooks = **多点叠加**：同一点位挂 N 个 hook 按声明序执行，互不排斥；
-  改 messages 归 ``module.messages_builder``（产物终态，hook 只读），
-  换整个执行器归 ``AgentRunner``——本机制不提供第二种替换路径。
-- 能力等级 = ②变更：可改写工具调用（name/args）与工具结果、可注入
-  system prompt 片段；**无③控制权**（不能拦截/丢弃调用/制造移交——
-  非法调用的拦截是 loop 主流程的确定性校验，不是 hook 决策）。
+Positioning (boundary with the existing extension points, see docs/plans/2026-09-04-agent-loop-hooks.md):
+- hooks = **additive across points**: N hooks on the same point run in declaration order, not mutually exclusive;
+  replacing messages belongs to ``module.messages_builder`` (final artifact, hooks read-only),
+  swapping the whole executor belongs to ``AgentRunner`` — this mechanism provides no second replacement path.
+- Capability level = ② mutation: can rewrite tool calls (name/args) and tool results, and can inject
+  system prompt fragments; **no ③ control** (cannot intercept/drop calls/forge transfers —
+  interception of illegal calls is the loop main flow's deterministic validation, not a hook decision).
 
-声明（pattern 级，module 层整体替换，不 merge——同 stage 槽位语义）::
+Declaration (pattern level; a module-level declaration replaces it wholesale, no merge — same semantics as stage slots)::
 
     pattern.agent_hooks = {
-        "on_agent_start":  [fetch_shop_data],   # P1 返回 Optional[str] 片段
-        "on_tool_call":    [fix_tool_alias],    # P4 返回 Optional[RewriteToolCall]
-        "on_tool_result":  [redact_secrets],    # P5 返回 Optional[str]
+        "on_agent_start":  [fetch_shop_data],   # P1 returns an Optional[str] fragment
+        "on_tool_call":    [fix_tool_alias],    # P4 returns Optional[RewriteToolCall]
+        "on_tool_result":  [redact_secrets],    # P5 returns Optional[str]
         ...
     }
 
-错误语义（防御性）：hook 异常一律吞掉记日志 + 回退原值，绝不阻断对话；
-变更 hook 失败 = 用进 chain 前的当前值继续。
+Error semantics (defensive): hook exceptions are always swallowed, logged, and the original value kept; the dialogue is never blocked;
+a mutating hook failing = continue with the value as it was before entering the chain.
 
-只读纪律（docstring 约定，框架不做深拷贝——每轮拷贝 messages 代价不成
-比例）：``AgentStartEvent.cxt`` 与 ``LLMCallEvent.messages`` 为引用传递，
-hook 不得原地修改；要改 messages 的诉求走 messages_builder。
+Read-only discipline (docstring convention; the framework does not deep-copy — copying messages every
+turn is disproportionate): ``AgentStartEvent.cxt`` and ``LLMCallEvent.messages`` are passed by reference;
+hooks must not modify them in place; requests to change messages go through messages_builder.
 """
 
 from __future__ import annotations
@@ -33,30 +33,31 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# 全部合法点位（消费方见 loop.run_agent 的挂载点）
+# All legal hook points (consumed at the hook points in loop.run_agent)
 HOOK_POINTS = (
-    "on_agent_start",    # P1 进 loop、build system prompt 前（注入）
-    "on_llm_call",       # P2 每轮 LLM 调用前（观察）
-    "on_llm_response",   # P3 每轮 LLM 返回后（观察）
-    "on_tool_call",      # P4 单工具执行前（变更：name/args）
-    "on_tool_result",    # P5 单工具执行后、落 history 前（变更：结果串）
-    "on_transfer",       # P6 transfer 命中写跳转事件时（观察）
-    "on_agent_end",      # P7 出口：reply / transfer / max_rounds（观察）
+    "on_agent_start",    # P1: entering the loop, before building the system prompt (inject)
+    "on_llm_call",       # P2: before each turn's LLM call (observe)
+    "on_llm_response",   # P3: after each turn's LLM response (observe)
+    "on_tool_call",      # P4: before a single tool execution (mutate: name/args)
+    "on_tool_result",    # P5: after a single tool execution, before writing history (mutate: result string)
+    "on_transfer",       # P6: when a transfer hit writes a jump event (observe)
+    "on_agent_end",      # P7: exits: reply / transfer / max_rounds (observe)
 )
 
 HookMap = Dict[str, List[Callable[..., Any]]]
 
 
 # ============================================================================
-# 事件类型（每点位一份；全部携带 session_id / module_code）
+# Event types (one per hook point; all carry session_id / module_code)
 # ============================================================================
 
 @dataclass
 class AgentStartEvent:
-    """P1：进 loop、build system prompt 前。返回 Optional[str] 注入片段。
+    """P1: entering the loop, before building the system prompt. Returns an Optional[str] injected fragment.
 
-    cxt 为引用传递（只读纪律）：hook 从中读取槽位/metadata 决定取什么数，
-    但不写回——注入产物只经返回值走，避免跨轮/跨 hop 状态泄漏。
+    cxt is passed by reference (read-only discipline): the hook reads slots/metadata from it to
+    decide what data to fetch but does not write back — injected output travels only via the
+    return value, avoiding cross-turn/cross-hop state leakage.
     """
 
     session_id: str
@@ -66,7 +67,7 @@ class AgentStartEvent:
 
 @dataclass
 class LLMCallEvent:
-    """P2：每轮 LLM 调用前。观察（返回值被忽略）。messages 为引用（只读纪律）。"""
+    """P2: before each turn's LLM call. Observation (return value ignored). messages is a reference (read-only discipline)."""
 
     session_id: str
     module_code: str
@@ -77,7 +78,7 @@ class LLMCallEvent:
 
 @dataclass
 class LLMResponseEvent:
-    """P3：每轮 LLM 返回后（content/tool_calls 已解析）。观察。"""
+    """P3: after each turn's LLM response (content/tool_calls already parsed). Observation."""
 
     session_id: str
     module_code: str
@@ -88,8 +89,8 @@ class LLMResponseEvent:
 
 @dataclass
 class ToolCallEvent:
-    """P4：单个工具执行前。返回 Optional[RewriteToolCall]（链式：前一 hook
-    的改写反映进本 event 后再喂下一 hook）。"""
+    """P4: before a single tool execution. Returns Optional[RewriteToolCall] (chained: the previous
+    hook's rewrite is reflected into this event before it is fed to the next hook)."""
 
     session_id: str
     module_code: str
@@ -100,7 +101,7 @@ class ToolCallEvent:
 
 @dataclass
 class RewriteToolCall:
-    """P4 的改写返回值：仅给定的字段生效（部分改写），None = 不改。"""
+    """Rewrite return value for P4: only the given fields take effect (partial rewrite); None = no change."""
 
     name: Optional[str] = None
     args: Optional[Dict[str, Any]] = None
@@ -108,8 +109,8 @@ class RewriteToolCall:
 
 @dataclass
 class ToolResultEvent:
-    """P5：单个工具执行后、落 history 前。返回 Optional[str] 替换结果
-    （链式同 P4；改写后的结果同时进 LLM 回填与落库，不分叉）。"""
+    """P5: after a single tool execution, before writing history. Returns Optional[str] replacing the
+    result (chained like P4; the rewritten result goes to both the LLM backfill and the store — no fork)."""
 
     session_id: str
     module_code: str
@@ -121,7 +122,7 @@ class ToolResultEvent:
 
 @dataclass
 class TransferEvent:
-    """P6：transfer 命中、写跳转事件时。观察。"""
+    """P6: when a transfer hit writes a jump event. Observation."""
 
     session_id: str
     module_code: str
@@ -132,10 +133,10 @@ class TransferEvent:
 
 @dataclass
 class AgentEndEvent:
-    """P7：run_agent 三个出口。观察。
+    """P7: the three run_agent exits. Observation.
 
-    outcome: "reply"（直接答，reply 即出口文本）/ "transfer"（静默移交，
-    transfer_target 为目标模块）/ "max_rounds"（超轮次，reply 为兜底话术）。
+    outcome: "reply" (direct answer, reply is the exit text) / "transfer" (silent transfer,
+    transfer_target is the target module) / "max_rounds" (round limit exceeded, reply is the fallback text).
     """
 
     session_id: str
@@ -147,14 +148,14 @@ class AgentEndEvent:
 
 
 # ============================================================================
-# 声明解析（module 整体替换 pattern；非法配置降级跳过）
+# Declaration parsing (module replaces pattern wholesale; invalid config degrades to skip)
 # ============================================================================
 
 def resolve_agent_hooks(module: Any, pattern: Any = None) -> HookMap:
-    """解析生效的 hooks：module.agent_hooks 非空整体替换，否则 pattern 级。
+    """Resolve the effective hooks: a non-empty module.agent_hooks replaces wholesale, else the pattern level.
 
-    防御性校验（同 stage_slots 降级风格）：声明非 dict / 点位名未知 /
-    条目非 callable → warning 跳过该项，不抛错。
+    Defensive validation (same degradation style as stage_slots): a non-dict declaration /
+    unknown point name / non-callable entry → warning and skip that item, no raise.
     """
     raw = getattr(module, "agent_hooks", None)
     if not raw:
@@ -191,11 +192,11 @@ def resolve_agent_hooks(module: Any, pattern: Any = None) -> HookMap:
 
 
 # ============================================================================
-# Dispatcher（异常收口：吞掉记日志 + 回退原值）
+# Dispatcher (exception containment: swallow + log + fall back to the original value)
 # ============================================================================
 
 def fire(hooks: HookMap, point: str, event: Any) -> None:
-    """观察点通用派发：逐 hook 执行，异常吞掉记日志（返回值不接）。"""
+    """Generic dispatch for observation points: run hooks one by one; exceptions are swallowed and logged (return value unused)."""
     for hook in hooks.get(point, ()):
         try:
             hook(event)
@@ -206,7 +207,7 @@ def fire(hooks: HookMap, point: str, event: Any) -> None:
 
 
 def collect_fragments(hooks: HookMap, event: AgentStartEvent) -> List[str]:
-    """P1 派发：收集注入片段（声明序）；异常 hook 的片段丢弃。"""
+    """P1 dispatch: collect injected fragments (declaration order); an exception hook's fragment is dropped."""
     fragments: List[str] = []
     for hook in hooks.get("on_agent_start", ()):
         try:
@@ -222,7 +223,7 @@ def collect_fragments(hooks: HookMap, event: AgentStartEvent) -> List[str]:
 
 
 def _normalize_rewrite(rw: Any) -> Optional[RewriteToolCall]:
-    """容忍 RewriteToolCall 与同形 dict 两种返回形态；其余视作未改写。"""
+    """Accept both RewriteToolCall and a same-shaped dict as return forms; anything else counts as no rewrite."""
     if isinstance(rw, RewriteToolCall):
         return rw
     if isinstance(rw, dict):
@@ -238,17 +239,19 @@ def rewrite_tool_call(
     hooks: HookMap, event: ToolCallEvent, allowed_names: set,
     reserved_prefix: str = "",
 ) -> Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
-    """P4 派发：链式改写 name/args（hook₁ 的改写反映进 event 再喂 hook₂）。
+    """P4 dispatch: chained rewrite of name/args (hook₁'s rewrite is reflected into the event before feeding hook₂).
 
-    守卫（规则 2 的 dispatcher 层）：改写 name ∉ allowed_names（本轮 own+lent）
-    或带 reserved_prefix（transfer_to_）→ 拒绝该次改名 + warning；同一返回值
-    中合法部分照常应用（name 被拒、args 照用）。dispatcher 只保证"不让改写
-    变得更糟"——拒绝后回落到的名字若仍非法（原始调用本就是幻觉名），由
-    loop 主流程的最终校验兜底拦截。
+    Guards (rule 2 at the dispatcher layer): a rewritten name not in allowed_names (this turn's
+    own+lent) or carrying reserved_prefix (transfer_to_) → reject that rename + warning; the legal
+    parts of the same return value are applied as usual (name rejected, args applied). The dispatcher
+    only guarantees "a rewrite cannot make things worse" — if the name fallen back to after rejection
+    is still illegal (the original call was a hallucinated name to begin with), the loop main flow's
+    final validation catches it as the fallback.
 
     Returns:
-        (final_name, final_args, original)：original 为
-        ``{"name": 原名, "args": 原args}``，仅当实际发生改写时非 None（审计用）。
+        (final_name, final_args, original): original is
+        ``{"name": original name, "args": original args}``, non-None only when a rewrite actually
+        happened (for audit).
     """
     orig_name, orig_args = event.tool_name, event.args
     for hook in hooks.get("on_tool_call", ()):
@@ -287,10 +290,10 @@ def rewrite_tool_call(
 def rewrite_tool_result(
     hooks: HookMap, event: ToolResultEvent,
 ) -> Tuple[str, Optional[str]]:
-    """P5 派发：链式改写结果串。
+    """P5 dispatch: chained rewrite of the result string.
 
     Returns:
-        (final_result, original)：original 仅当实际发生改写时非 None。
+        (final_result, original): original is non-None only when a rewrite actually happened.
     """
     orig_result = event.result
     for hook in hooks.get("on_tool_result", ()):

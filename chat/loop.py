@@ -1,5 +1,6 @@
 """
-Agent dialogue loop — run_agent 双原语执行器（inject 投影直接答 / transfer 写跳转事件）。
+Agent dialogue loop — run_agent's dual-primitive executor
+(inject: projection answers directly / transfer: writes a jump event).
 
 Supports:
 - Two-layer tool filtering: pattern permissions + module.use_tools
@@ -48,17 +49,18 @@ TRANSFER_TOOL_PREFIX = "transfer_to_"
 # Max tool calling rounds to prevent infinite loops
 _MAX_TOOL_ROUNDS = 10
 
-# 系统提示总长超过该值时告警（投影膨胀观测）
+# Warn when the system prompt exceeds this length (projection bloat observability)
 _PROMPT_LENGTH_WARN = 4000
 
 
 @dataclass
 class TurnResult:
-    """单模块单轮执行结果。
+    """Result of running one turn of a single module.
 
-    reply 为空 + cxt.actions 含 ModuleJumpEvent = 本模块静默移交，
-    chat 层 hop 循环消费事件重路由；其余情况 reply 即出口回复。
-    actions 为预留通道（与 cxt.actions 同形），现有执行器不产生。
+    Empty reply + a ModuleJumpEvent in cxt.actions = this module silently
+    transferred; the chat layer's hop loop consumes the event and reroutes.
+    Otherwise reply is the outgoing response. actions is a reserved channel
+    (same shape as cxt.actions); the current executor never produces it.
     """
 
     reply: Optional[str] = None
@@ -70,7 +72,7 @@ def conversation(
     module,
     llm_config: Dict[str, Any],
 ) -> str:
-    """兼容 wrapper：调 run_agent，返回 reply（移交轮由 chat 层续答）。"""
+    """Compatibility wrapper: calls run_agent and returns reply (the chat layer continues transfer turns)."""
     result = run_agent(session, module, llm_config)
     return result.reply or ""
 
@@ -81,27 +83,32 @@ def run_agent(
     llm_config: Dict[str, Any],
     force_close: bool = False,
 ) -> TurnResult:
-    """执行单个 AGENT 模块一轮：inject 直接答 / transfer 写跳转事件返回。
+    """Run one turn of a single AGENT module: inject answers directly /
+    transfer writes a jump event and returns.
 
     Args:
         session: current session
         module: current module object (AgentModule)
         llm_config: LLM config dict with code, model, temperature, etc.
-        force_close: 强制收尾（max_hops 耗尽）：追加"勿再移交"提示且不注入 transfer 工具
+        force_close: force close (max_hops exhausted): appends the close-out
+            hint (_FORCE_CLOSE_SUFFIX) and does not inject transfer tools
 
     Returns:
-        TurnResult: reply 即回复；transfer 命中时 reply 为空，跳转事件
-        已写入 cxt.actions（ModuleJumpEvent），由 chat 层统一消费。
+        TurnResult: reply is the response; on a transfer hit, reply is empty
+        and the jump event has already been written to cxt.actions
+        (ModuleJumpEvent) for the chat layer to consume.
     """
     cxt = session.cxt
     provider = build_provider(llm_config)
 
-    # agent loop hooks（pattern 级声明，module 层 agent_hooks 整体替换；
-    # 空声明时各挂载点零开销直通）
+    # Agent loop hooks (declared at pattern level; a non-empty module-level
+    # agent_hooks replaces it wholesale; when empty, every hook point is a
+    # zero-overhead pass-through)
     hooks = resolve_agent_hooks(module, session.pattern)
 
-    # P1 on_agent_start：进 loop、messages 组装前取数注入。片段经
-    # extra_blocks 送达 builder（契约要求包含），hook 不写 cxt
+    # P1 on_agent_start: fetched and injected before the loop and messages
+    # assembly. Fragments reach the builder via extra_blocks (the contract
+    # requires including them); hooks do not write to cxt
     fragments = collect_fragments(
         hooks,
         AgentStartEvent(session_id=cxt.session_id,
@@ -112,16 +119,19 @@ def run_agent(
     lent_schemas, lent_by = _resolve_lent_tools(module, session.pattern)
     transfer_tools = [] if force_close else build_transfer_tools(module, cxt.module_map)
     tools = own_tools + lent_schemas + transfer_tools
-    # 主流程校验/ P4 守卫的本轮可用集合（own + lent；transfer 工具不在内——
-    # transfer 轮不走工具派发，改名走私前缀由守卫与校验双重拦截）
+    # Available set for main-flow validation / the P4 guard (own + lent;
+    # transfer tools excluded — transfer turns skip tool dispatch, and a
+    # rename smuggling the prefix is blocked by both guard and validation)
     allowed_names = {t.get("function", {}).get("name", "")
                      for t in own_tools + lent_schemas}
 
-    # Messages 一体化构建（system 内容与列表装配同源）：
-    # module.messages_builder > pattern.messages_builder > 默认三段式
+    # Integrated messages build (system content and list assembly share one
+    # source): module.messages_builder > pattern.messages_builder > default
+    # three-segment layout
     messages = build_agent_messages(module, cxt, pattern=session.pattern,
                                     extra_blocks=fragments)
-    # force_close 收尾后缀框架侧强制（控制流语义，任何 builder 不可破坏）
+    # force_close close-out suffix is enforced framework-side (control-flow
+    # semantics; no builder may break it)
     if force_close:
         _append_force_close_suffix(messages)
     _warn_prompt_length(messages, cxt, module)
@@ -136,7 +146,8 @@ def run_agent(
             round_idx + 1, cxt.session_id, module.module_code, len(tools),
         )
 
-        # P2 on_llm_call：每轮 LLM 调用前（messages 引用传递，只读纪律）
+        # P2 on_llm_call: before each LLM call (messages passed by reference,
+        # read-only discipline)
         if hooks:
             fire(hooks, "on_llm_call", LLMCallEvent(
                 session_id=cxt.session_id, module_code=module.module_code,
@@ -156,24 +167,24 @@ def run_agent(
         content = result.get("content", "") or ""
         tool_calls = result.get("tool_calls", []) or []
 
-        # P3 on_llm_response：每轮 LLM 返回后（content/tool_calls 已解析）
+        # P3 on_llm_response: after each LLM response (content/tool_calls
+        # already parsed)
         if hooks:
             fire(hooks, "on_llm_response", LLMResponseEvent(
                 session_id=cxt.session_id, module_code=module.module_code,
                 round_idx=round_idx, content=content,
                 tool_calls=tool_calls))
 
-        # 无工具调用 → inject 原语：直接回答
+        # No tool calls -> inject primitive: answer directly
         if not tool_calls:
             logger.info("Agent loop 完成，共 %d 轮", round_idx + 1)
-            # P7 on_agent_end：直接答出口
+            # P7 on_agent_end: direct-answer exit
             if hooks:
                 fire(hooks, "on_agent_end", AgentEndEvent(
                     session_id=cxt.session_id, module_code=module.module_code,
                     rounds=round_idx + 1, outcome="reply", reply=content))
             return TurnResult(reply=content)
 
-        # 本轮工具调用里是否含 transfer
         transfer_call = next(
             (tc for tc in tool_calls
              if tc.get("function", {}).get("name", "").startswith(TRANSFER_TOOL_PREFIX)),
@@ -183,8 +194,9 @@ def run_agent(
             target = transfer_call["function"]["name"][len(TRANSFER_TOOL_PREFIX):]
             transfer_reason = _transfer_reason(transfer_call)
 
-            # 目标不存在（无 sub_modules 边 / 幻觉调用）：错误回填继续 loop，
-            # 让 LLM 自行换路（真实 OpenAI 兼容 API 要求每个 tool_call_id 有应答）
+            # Target missing (no sub_modules edge / hallucinated call): backfill
+            # an error and keep looping so the LLM can pick another path (a real
+            # OpenAI-compatible API requires an answer for every tool_call_id)
             if target not in cxt.module_map:
                 logger.warning(
                     "[transfer] 目标 %s 不在 module_map 中，错误回填继续 loop",
@@ -199,10 +211,13 @@ def run_agent(
                     transfer_error=err)
                 continue
 
-            # transfer 命中：写跳转事件，本模块静默移交（content 不出口但
-            # 保留进 history），chat 层消费事件重路由到目标模块同轮续答。
-            # 该响应的每个 tool_call 都合成 tool 行（transfer 条记移交、其余
-            # 记未执行），保证下一轮回放时 assistant.tool_calls 全配对
+            # Transfer hit: write the jump event and silently hand off from this
+            # module (content is suppressed from output but kept in history);
+            # the chat layer consumes the event and reroutes to the target
+            # module within the same turn. Every tool_call of this response
+            # gets a synthetic tool row (transfer entry logged as transferred,
+            # the rest as not executed) so assistant.tool_calls replay fully
+            # paired on the next round
             cxt.add_message(
                 "assistant",
                 encode_tool_call_content(content or "", tool_calls),
@@ -228,7 +243,7 @@ def run_agent(
                 "[transfer] %s → %s（事件已写入 actions，移交 chat 层）",
                 module.module_code, target,
             )
-            # P6 on_transfer + P7 on_agent_end：移交出口
+            # P6 on_transfer + P7 on_agent_end: transfer exit
             if hooks:
                 fire(hooks, "on_transfer", TransferEvent(
                     session_id=cxt.session_id, module_code=module.module_code,
@@ -240,7 +255,8 @@ def run_agent(
                     transfer_target=target))
             return TurnResult()
 
-        # 普通工具调用：P4 改写 → 主流程校验 → 执行 → P5 改写 → 落 history
+        # Ordinary tool calls: P4 rewrite -> main-flow validation -> execute
+        # -> P5 rewrite -> append to history
         _dispatch_tool_calls(
             cxt, module, messages, content, tool_calls,
             hooks, allowed_names, lent_by, round_idx)
@@ -249,7 +265,7 @@ def run_agent(
         "Agent loop 达到最大轮次 %d，强制终止: session=%s",
         _MAX_TOOL_ROUNDS, cxt.session_id,
     )
-    # P7 on_agent_end：超轮次出口
+    # P7 on_agent_end: max-rounds-exceeded exit
     if hooks:
         fire(hooks, "on_agent_end", AgentEndEvent(
             session_id=cxt.session_id, module_code=module.module_code,
@@ -259,37 +275,46 @@ def run_agent(
 
 
 # ---------------------------------------------------------------------------
-# Tool round dispatch (P4/P5 + 主流程工具名校验)
+# Tool round dispatch (P4/P5 + main-flow tool-name validation)
 # ---------------------------------------------------------------------------
 
 def _dispatch_tool_calls(
     cxt, module, messages, content, tool_calls, hooks, allowed_names,
     lent_by, round_idx, transfer_error=None,
 ) -> None:
-    """工具轮统一派发：P4 改写 → 校验 → 落 assistant 载荷 → 执行 → P5 → 落 tool 行。
+    """Unified dispatch of a tool round: P4 rewrite -> validate -> append
+    assistant payload -> execute -> P5 -> append tool rows.
 
-    时序（规则 4）：先 P4 链式改写并应用回 tc（args 重序列化进
-    ``tc["function"]["arguments"]``——原地改写 LLM 返回的 tc dict，使
-    in-loop messages / history 载荷 / 执行三处共用改写后单一事实源），
-    再落 assistant JSON 载荷；``tool_call_id`` 永不改（协议配对命脉）。
+    Ordering (rule 4): P4 chained rewrite first, applied back to tc (args
+    re-serialized into ``tc["function"]["arguments"]`` — rewriting the tc
+    dict returned by the LLM in place, so in-loop messages / history payload
+    / execution all share the rewritten single source of truth), then the
+    assistant JSON payload is appended; ``tool_call_id`` is never changed
+    (the lifeline of protocol pairing).
 
-    主流程最终校验（规则 2 权威检查点）：最终 name ∉ allowed_names 一律
-    **不执行**，tool 行回填带可用工具清单的错误信息（模型下一轮自纠；
-    亦封堵 dispatch 只查注册不查 ACL 的旁路），metadata 沿用合成行约定
-    ``{"synthetic": True}``。P5 只对真实 ``_execute_tool`` 结果触发，不对
-    合成/回填串触发。
+    Main-flow final validation (rule 2, the authoritative checkpoint): any
+    final name not in allowed_names is **not executed**; the tool row is
+    backfilled with an error listing the available tools (the model
+    self-corrects next round; this also seals the bypass where dispatch only
+    checks registration and not ACL). Metadata follows the synthetic-row
+    convention ``{"synthetic": True}``. P5 only fires on a real
+    ``_execute_tool`` result, never on synthetic/backfilled strings.
 
-    transfer_error 非空 = transfer 目标非法的错误回填分支：transfer 条
-    （前缀判定已先行，规则 1 不可改写、不执行）回填该错误串，普通条照常
-    走 P4/校验/执行/P5 全流程。
+    Non-empty transfer_error = the error-backfill branch for an illegal
+    transfer target: the transfer entry (prefix determined earlier; rule 1 —
+    not rewritten, not executed) is backfilled with that error string, while
+    ordinary entries still go through the full P4 / validation / execution /
+    P5 flow.
 
-    审计 metadata：改写发生时 ``rewritten=True`` +
-    ``original_call``（P4，name/args 原值）/ ``original_result``（P5，原串）。
+    Audit metadata: when a rewrite happens, ``rewritten=True`` plus
+    ``original_call`` (P4, original name/args) / ``original_result``
+    (P5, original string).
     """
     session_id = cxt.session_id
     module_code = module.module_code
 
-    # 1. P4 链式改写 → 应用回 tc（transfer 条跳过：判定已先行）
+    # 1. P4 chained rewrite -> applied back to tc (transfer entries skipped:
+    #    their determination already happened earlier)
     rewrite_audits = {}
     for idx, tc in enumerate(tool_calls):
         name = tc.get("function", {}).get("name", "")
@@ -317,7 +342,8 @@ def _dispatch_tool_calls(
         if original is not None:
             rewrite_audits[idx] = original
 
-    # 2. assistant 载荷（改写后实况；id 不动保证回放配对）
+    # 2. assistant payload (post-rewrite reality; ids untouched to guarantee
+    #    replay pairing)
     messages.append({"role": "assistant", "content": content or None,
                      "tool_calls": tool_calls})
     cxt.add_message(
@@ -326,7 +352,8 @@ def _dispatch_tool_calls(
         stage="agent",
     )
 
-    # 3. 逐 tc：校验 → 执行（合法）/错误回填（非法、transfer 条）→ P5 → 落行
+    # 3. Per tc: validate -> execute (valid) / error backfill (invalid,
+    #    transfer entries) -> P5 -> append row
     for idx, tc in enumerate(tool_calls):
         name = tc.get("function", {}).get("name", "")
         call_id = tc.get("id", "")
@@ -379,11 +406,11 @@ def _dispatch_tool_calls(
 
 
 # ---------------------------------------------------------------------------
-# Transfer tool builders（投影块构建已迁 chat/messages.py）
+# Transfer tool builders (projection block building has moved to chat/messages.py)
 # ---------------------------------------------------------------------------
 
 def build_transfer_tools(module, module_map) -> list:
-    """由 sub_modules 逐边生成 transfer 工具（spec §4 §3.3）。"""
+    """Generate transfer tools edge-by-edge from sub_modules (spec §4 §3.3)."""
     tools = []
     for link in module.sub_modules:
         target = module_map.get(link.target)
@@ -412,17 +439,19 @@ def build_transfer_tools(module, module_map) -> list:
 
 # ---------------------------------------------------------------------------
 # System Prompt construction
-# （四块结构 + hooks 扩展块已迁 chat/messages.py 的 build_system_prompt，
-#  与 messages 一体化构建同源；本模块仅保留框架侧强制项）
+# (four-block structure + hooks extension blocks have moved to
+#  build_system_prompt in chat/messages.py — same source as the integrated
+#  messages build; this module keeps only framework-enforced items)
 # ---------------------------------------------------------------------------
 
-# force_close 收尾后缀（超跳数防死循环的控制流语义，任何 messages_builder
-# 不可破坏——run_agent 在 builder 返回后由 _append_force_close_suffix 强制）
+# force_close close-out suffix (control-flow semantics that prevents infinite
+# loops when hops are exhausted; no messages_builder may break it — run_agent
+# enforces it via _append_force_close_suffix after the builder returns)
 _FORCE_CLOSE_SUFFIX = "\n请直接回应用户，勿再移交。"
 
 
 def _append_force_close_suffix(messages: List[Dict[str, Any]]) -> None:
-    """追加收尾后缀到首条 system 行；无 system 行则前置一条。"""
+    """Append the close-out suffix to the first system row; prepend one if none exists."""
     for m in messages:
         if m.get("role") == "system":
             m["content"] = (m.get("content") or "") + _FORCE_CLOSE_SUFFIX
@@ -432,7 +461,8 @@ def _append_force_close_suffix(messages: List[Dict[str, Any]]) -> None:
 
 
 def _warn_prompt_length(messages, cxt, module) -> None:
-    """system 行长度告警（投影膨胀观测；覆盖 hooks 注入与后缀后的真实长度）。"""
+    """Warn on system row length (projection bloat observability; measures the
+    real length after hooks injection and the suffix)."""
     system_row = next(
         (m for m in messages if m.get("role") == "system"), None)
     if system_row is None:
@@ -504,11 +534,12 @@ def _resolve_tools(module, pattern=None) -> List[Dict[str, Any]]:
 
 
 def _resolve_lent_tools(module, pattern):
-    """解析借入工具 schema 与 name→来源域映射（spec §3.3 权限）。
+    """Resolve borrowed tool schemas and the name -> source-domain mapping
+    (spec §3.3 permissions).
 
     Returns:
-        (schemas, lent_by)：schemas 为 OpenAI 格式列表；lent_by 为
-        {tool_name: 来源 module_code}。
+        (schemas, lent_by): schemas is a list in OpenAI format; lent_by is
+        {tool_name: source module_code}.
     """
     schemas, lent_by = [], {}
     for link in module.sub_modules:
@@ -518,8 +549,9 @@ def _resolve_lent_tools(module, pattern):
         if target is None:
             continue
         allowed = set(target.use_tools or []) & set(link.lend_tools)
-        # 二次过滤：借出路径同样受 pattern 级工具 ACL 约束（deny-by-default），
-        # 以借方（target 模块）为 ACL 名义主体——不架空 get_allowed_tools_for_pattern
+        # Second-pass filter: the lending path is bound by the same pattern-level
+        # tool ACL (deny-by-default), with the borrower (target module) as the
+        # ACL subject — this must not bypass get_allowed_tools_for_pattern
         if not allowed:
             continue
         if pattern is not None:
@@ -563,7 +595,7 @@ def _execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _transfer_reason(transfer_call) -> str:
-    """解析 transfer 工具调用参数中的移交上下文（reason）。"""
+    """Parse the transfer context (reason) from a transfer tool call's arguments."""
     args = _parse_args(transfer_call)
     reason = args.get("reason", "") if isinstance(args, dict) else ""
     return str(reason or "")

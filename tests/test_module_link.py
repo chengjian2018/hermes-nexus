@@ -1,4 +1,4 @@
-"""ModuleLink 归一化与模块头部投影测试。"""
+"""Tests for ModuleLink normalization and module header projection."""
 
 from dialogue.module import AgentModule, FSMModule, ModuleLink
 
@@ -9,7 +9,7 @@ def test_str_link_normalized_with_knowledge_default():
     link = mod.sub_modules[0]
     assert isinstance(link, ModuleLink)
     assert link.target == "b"
-    assert link.lend_knowledge is True   # 旧写法默认借知识
+    assert link.lend_knowledge is True   # the legacy string form lends knowledge by default
     assert link.lend_tools == []
 
 

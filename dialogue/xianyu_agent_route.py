@@ -1,48 +1,54 @@
 """
-闲鱼卖家客服 Route 模式 —— 复刻 tmp_xianyu.XianyuReplyBot 的 agent 对话管理。
+Xianyu seller customer service Route pattern — replicates tmp_xianyu.XianyuReplyBot's
+agent dialogue management.
 
-复刻来源：dialogue/tmp_xianyu.py（XianyuReplyBot / IntentRouter / 三领域 Agent），
-prompt 模板取自 prompt.py 的 XIANYU_* 系列。
+Replication source: dialogue/tmp_xianyu.py (XianyuReplyBot / IntentRouter / the three
+domain Agents); prompt templates come from the XIANYU_* series in prompt.py.
 
-Pattern 结构（ROUTE 模式）：
+Pattern structure (ROUTE pattern):
 
     xianyu_agent (Pattern, entry: xianyu_root, query=TimeAugQueryRewriter)
-    └── xianyu_root (RouteModule)   全部节点留在路由模块，无 jump_module
-        ├── xy_route_root      路由根节点（sub_nodes = 意图菜单）
-        ├── xy_menu_price      议价菜单（议价次数未达上限）
-        ├── xy_menu_price_refuse  议价拒绝菜单（达上限 → 固定话术，零 LLM）
-        ├── xy_menu_tech       技术问答菜单
-        └── xy_menu_default    通用客服菜单
+    └── xianyu_root (RouteModule)   all nodes stay in the routing module, no jump_module
+        ├── xy_route_root      routing root node (sub_nodes = intent menu)
+        ├── xy_menu_price      bargain menu (bargain round count below the cap)
+        ├── xy_menu_price_refuse  bargain refusal menu (cap reached → fixed script, zero LLM)
+        ├── xy_menu_tech       tech Q&A menu
+        └── xy_menu_default    general customer service menu
 
-对话管理映射（tmp_xianyu → 本框架）：
-    IntentRouter 三级路由（tech 关键词/正则优先 → price 关键词/正则 → LLM 兜底）
-      → XianyuIntentNLU：detect_intent 本地规则层（原关键词表并入 tmp_xianyu
-        的词表与正则）+ XIANYU_NLU_PROMPT LLM 兜底（输出四类
-        price/tech/no_reply/default，非法输出回落 default）
-    ClassifyAgent 判为 no_reply（提示词爆破/与商品售卖无关）
-      → FixedNLG 输出空回复；channel 契约 reply 为空 = 不发送
-        （原实现返回 "-" 由外挂方自行过滤）
-    PriceAgent 动态温度 min(0.3 + 0.15×议价轮次, 0.9)、TechAgent 0.4、
-    DefaultAgent 0.7、max_tokens 500
-      → FixedNLG._tuned_llm_config 按意图改写 llm_config 副本
-    PriceAgent 注入 ▲当前议价轮次
-      → NLU 把议价参数写入 filled_slots，NLG prompt 追加【议价设置】块
-    _safe_filter 违禁词过滤（微信/QQ/支付宝/银行卡/线下）
+Dialogue-management mapping (tmp_xianyu → this framework):
+    IntentRouter three-tier routing (tech keywords/regex first → price keywords/regex → LLM fallback)
+      → XianyuIntentNLU: detect_intent local rule layer (original keyword table merged with
+        tmp_xianyu's word lists and regexes) + XIANYU_NLU_PROMPT LLM fallback (outputs the four
+        classes price/tech/no_reply/default; invalid output falls back to default)
+    ClassifyAgent classifies as no_reply (prompt flooding / unrelated to the item on sale)
+      → FixedNLG outputs an empty reply; channel contract: empty reply = not sent
+        (the original implementation returned "-" and let the plugin side filter it)
+    PriceAgent dynamic temperature min(0.3 + 0.15×bargain round, 0.9), TechAgent 0.4,
+    DefaultAgent 0.7, max_tokens 500
+      → FixedNLG._tuned_llm_config rewrites a copy of llm_config per intent
+    PriceAgent injects ▲current bargain round
+      → NLU writes the bargain params into filled_slots; the NLG prompt appends the
+        bargain-settings block
+    _safe_filter blocked-word filtering (WeChat/QQ/Alipay/bank card/offline)
       → FixedNLG._safe_filter
-    _extract_bargain_count（从 system 消息回溯议价次数）
-      → NLU 按用户消息 metadata.intent=price 计数（框架侧无 system 议价消息）
-    议价轮数达上限 → 固定拒绝话术、零 LLM（tmp_xianyu 无此机制，以升温策略
-    柔性守住底线；本 pattern 保留显式阈值拒绝，议价行为可预期、可测试）
-      → xy_menu_price_refuse + answer_examples 文案 marker 短路
+    _extract_bargain_count (counts bargain rounds by tracing system messages)
+      → NLU counts user messages with metadata.intent=price (the framework has no
+        system-side bargain messages)
+    Bargain round count reaching the cap → fixed refusal script, zero LLM (tmp_xianyu
+    has no such mechanism and relied on the rising-temperature policy to softly hold
+    the line; this pattern keeps the explicit threshold refusal so bargain behavior
+    stays predictable and testable)
+      → xy_menu_price_refuse + answer_examples text marker short-circuit
 
-已知的刻意简化：
-    - TechAgent 的 enable_search（DashScope extra_body）与 top_p=0.8 不透传：
-      框架 BaseNLG._call_llm 签名固定，温度/长度经 llm_config 副本调优
+Known deliberate simplifications:
+    - TechAgent's enable_search (DashScope extra_body) and top_p=0.8 are not passed
+      through: the framework BaseNLG._call_llm signature is fixed; temperature/length
+      are tuned via a llm_config copy
 
-消息入口：channel/xianyu.py（默认回复 API 外挂决策口），
-设 XIANYU_CHANNEL_PATTERN=xianyu_agent 即接入。
+Message entry: channel/xianyu.py (default-reply API plugin decision port);
+set XIANYU_CHANNEL_PATTERN=xianyu_agent to plug in.
 
-注册方式：模块顶层 ``registry.register(Pattern(...))``，AST 扫描自动发现。
+Registration: module-level ``registry.register(Pattern(...))``, auto-discovered by AST scan.
 """
 
 import logging
@@ -65,38 +71,39 @@ from prompt import (
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# 本地意图检测 —— 复刻 IntentRouter 的规则层（技术优先）
+# Local intent detection — replicates the IntentRouter rule layer (tech first)
 # ============================================================================
 
-# 技术相关关键词（原关键词表 + tmp_xianyu IntentRouter tech 词表）
+# Tech keywords (original keyword table + tmp_xianyu IntentRouter tech word list)
 TECH_KEYWORDS = [
     "怎么用", "参数", "坏了", "故障", "设置", "说明书",
     "功能", "用法", "教程", "驱动",
     "规格", "型号", "连接", "对比",
 ]
 
-# 价格相关关键词（原关键词表，含闲鱼语境的"刀""包个邮"等 +
-# tmp_xianyu IntentRouter price 词表）
+# Price keywords (original keyword table, including Xianyu-context haggle slang such
+# as the "dao" price-cut term and free-shipping requests, + tmp_xianyu IntentRouter
+# price word list)
 PRICE_KEYWORDS = [
     "便宜", "优惠", "刀", "降价", "价格", "多少钱",
     "能少", "还能", "最低", "底价", "实诚价", "到100", "能到",
     "包个邮", "砍价", "价",
 ]
 
-# tmp_xianyu IntentRouter 正则层（在清洗后的文本上匹配）
+# tmp_xianyu IntentRouter regex tier (matched against the cleaned text)
 TECH_PATTERNS = [r"和.+比"]
 PRICE_PATTERNS = [r"\d+元", r"能少\d+"]
 
-# 意图 → 菜单节点编码（refuse 由议价轮数控制另行改判；
-# no_reply 落 default 菜单，由 NLG 按 intent 短路为空回复）
+# Intent → menu node code (refuse is re-decided separately via the bargain round count;
+# no_reply lands on the default menu, where NLG short-circuits to an empty reply by intent)
 INTENT_TO_MENU = {
     "price": "xy_menu_price",
     "tech": "xy_menu_tech",
     "default": "xy_menu_default",
 }
 
-# 议价默认设置（复刻 _get_default_settings；账号级配置经
-# ctx.metadata["bargain_settings"] 注入，未注入时用此默认）
+# Bargain defaults (replicates _get_default_settings; account-level config is injected
+# via ctx.metadata["bargain_settings"]; this default applies when not injected)
 DEFAULT_BARGAIN_SETTINGS = {
     "max_bargain_rounds": 3,
     "max_discount_percent": 10,
@@ -105,19 +112,20 @@ DEFAULT_BARGAIN_SETTINGS = {
 
 
 def detect_intent(message: str) -> str:
-    """本地规则意图检测 —— 复刻 IntentRouter.detect 的关键词/正则两级。
+    """Local rule-based intent detection — replicates IntentRouter.detect's keyword/regex tiers.
 
-    纯本地、零 LLM（LLM 兜底层在 XianyuIntentNLU，需 ctx.llm_config）。
-    技术优先：金额与技术词并存时先归 tech（与 XIANYU_NLU_PROMPT 的
-    分类标准一致）。
+    Purely local, zero LLM (the LLM fallback tier lives in XianyuIntentNLU, which
+    needs ctx.llm_config). Tech first: when amounts and tech words co-occur, classify
+    as tech (consistent with the classification standard of XIANYU_NLU_PROMPT).
 
     Args:
-        message: 买家消息
+        message: buyer message
 
     Returns:
-        意图: price / tech / default（default 表示本地未命中，交上层兜底）
+        intent: price / tech / default (default means no local hit; the upper layer falls back)
     """
-    # 复刻 IntentRouter：过滤表情/标点后匹配（\w 保留字母数字与下划线）
+    # Replicates IntentRouter: match after stripping emoji/punctuation
+    # (\w keeps alphanumerics and underscore)
     text_clean = re.sub(r"[^\w一-龥]", "", message.lower())
 
     if any(kw in text_clean for kw in TECH_KEYWORDS):
@@ -132,14 +140,14 @@ def detect_intent(message: str) -> str:
 
 
 def _effective_query(cxt) -> str:
-    """取改写后的买家消息：query 槽位（TimeAugQueryRewriter）已在本轮
-    generate 之前执行，rewritten_queries[0] 即时间增强结果；槽位 no-op
-    或未配置时回落原 query。"""
+    """Get the rewritten buyer message: the query slot (TimeAugQueryRewriter) runs
+    earlier this turn before generate, so rewritten_queries[0] is the time-augmentation
+    result; falls back to the original query when the slot is a no-op or unconfigured."""
     return (cxt.rewritten_queries or [cxt.user_query])[0]
 
 
 def _get_bargain_settings(cxt) -> dict:
-    """取议价设置：metadata 注入优先，缺省回 DEFAULT_BARGAIN_SETTINGS。"""
+    """Get bargain settings: metadata injection takes priority, defaulting to DEFAULT_BARGAIN_SETTINGS."""
     settings = dict(DEFAULT_BARGAIN_SETTINGS)
     injected = cxt.metadata.get("bargain_settings") or {}
     settings.update({k: v for k, v in injected.items() if v is not None})
@@ -147,11 +155,12 @@ def _get_bargain_settings(cxt) -> dict:
 
 
 def _count_bargain_rounds(cxt) -> int:
-    """统计当前会话已发生的议价轮数。
+    """Count the bargain rounds that have already happened in the current session.
 
-    复刻原实现"统计该 chat 历史中 intent=price 的 user 消息数"：
-    每轮 NLU 把 intent 写进该轮 user 消息的 metadata，此处按 metadata
-    回溯计数（当前轮的 user 消息已入库，计入本数）。
+    Replicates the original "count user messages with intent=price in the chat
+    history": each turn's NLU writes the intent into that turn's user message
+    metadata; counting traces back through metadata (the current turn's user
+    message is already stored and is included in the count).
     """
     count = 0
     for msg in cxt.history:
@@ -163,43 +172,45 @@ def _count_bargain_rounds(cxt) -> int:
 
 
 # ============================================================================
-# NLU stage —— 本地规则分类 + LLM 兜底（ClassifyAgent）
+# NLU stage — local rule classification + LLM fallback (ClassifyAgent)
 # ============================================================================
 
 class XianyuIntentNLU(BaseNLU):
-    """闲鱼意图分类 stage —— 复刻 IntentRouter 规则层 + ClassifyAgent 兜底。
+    """Xianyu intent classification stage — replicates the IntentRouter rule layer + ClassifyAgent fallback.
 
-    契约与框架 NLU 一致（execute(ctx) -> ctx，写 ctx.nlu_result），
-    挂在 RouteModule 模块级 generate dict 的 nlu 位（node 无覆盖时生效）。
+    Contract matches the framework NLU (execute(ctx) -> ctx, writes ctx.nlu_result);
+    mounted at the nlu position of the RouteModule module-level generate dict
+    (takes effect when the node has no override).
 
-    路由层级（复刻 IntentRouter.detect 的三级策略，技术优先）：
-        1. 本地 tech 关键词/正则（detect_intent，零 LLM）
-        2. 本地 price 关键词/正则（detect_intent，零 LLM）
-        3. LLM 兜底（XIANYU_NLU_PROMPT，四类 price/tech/no_reply/default；
-           调用失败或输出非法标签时回落 default）
+    Routing tiers (replicates IntentRouter.detect's three-tier strategy, tech first):
+        1. Local tech keywords/regex (detect_intent, zero LLM)
+        2. Local price keywords/regex (detect_intent, zero LLM)
+        3. LLM fallback (XIANYU_NLU_PROMPT, four classes price/tech/no_reply/default;
+           falls back to default on call failure or invalid output label)
 
-    nlu_result 结构（对齐框架 NLU 契约）：
-        {"next_node": <菜单节点编码>, "slots": {...}, "intent": <原始意图>}
+    nlu_result structure (aligned with the framework NLU contract):
+        {"next_node": <menu node code>, "slots": {...}, "intent": <raw intent>}
 
-    slots 复刻 generate_reply 的议价参数注入：
+    slots replicate generate_reply's bargain parameter injection:
         bargain_count / max_bargain_rounds / max_discount_percent /
-        max_discount_amount —— 经 filled_slots 供 NLG prompt 带入
+        max_discount_amount — carried into the NLG prompt via filled_slots
     """
 
     stage_name = "xianyu_intent_nlu"
 
-    # LLM 输出的合法标签（no_reply 最特定，先匹配）
+    # Valid labels for LLM output (no_reply is the most specific, matched first)
     _VALID_INTENTS = ("no_reply", "price", "tech", "default")
 
     def _default_prompt_template(self) -> str:
         return XIANYU_NLU_PROMPT
 
     def prompt_build(self, cxt) -> str:
-        """构建 LLM 兜底分类 prompt。
+        """Build the LLM fallback classification prompt.
 
-        XIANYU_NLU_PROMPT 只留了 {__task_info__}/{__history__} 两个槽位
-        （BaseNLU 的 kwargs 词表不含 task_info，此处自行组装）；买家当前
-        消息复刻 ClassifyAgent._build_messages 单列一段，不依赖 history 末行。
+        XIANYU_NLU_PROMPT keeps only the {__task_info__}/{__history__} slots
+        (BaseNLU's kwargs vocabulary lacks task_info, so it is assembled here); the
+        buyer's current message replicates ClassifyAgent._build_messages as a
+        standalone section, not relying on the last history line.
         """
         slots = {
             "task_info": cxt.format_task_info(),
@@ -210,15 +221,16 @@ class XianyuIntentNLU(BaseNLU):
         return prompt
 
     def execute(self, ctx):
-        # 1-2. 本地规则层（技术优先，零 LLM）
+        # 1-2. Local rule layer (tech first, zero LLM)
         intent = detect_intent(_effective_query(ctx))
 
-        # 3. LLM 兜底：本地未命中（default）时走 ClassifyAgent
+        # 3. LLM fallback: run ClassifyAgent when the local layer misses (default)
         if intent == "default":
             intent = self._classify_via_llm(ctx)
 
-        # 当前轮 user 消息回填 intent（消息已入 history：chat() 先
-        # add_message 再跑管线）——议价计数按此回溯
+        # Backfill intent onto the current turn's user message (already in history:
+        # chat() adds the message before running the pipeline) — bargain counting
+        # traces back through this
         for msg in reversed(ctx.history):
             if msg.role == "user":
                 msg.metadata["intent"] = intent
@@ -229,16 +241,18 @@ class XianyuIntentNLU(BaseNLU):
 
         bargain_count = 0
         if intent == "price":
-            # 复刻议价轮数控制：count 含当前轮，>= max_bargain_rounds
-            # 即拒绝（第 max 次砍价收到固定拒绝话术）
+            # Replicates the bargain round count control: count includes the current
+            # round; refuse once >= max_bargain_rounds (the max-th haggle gets the
+            # fixed refusal script)
             bargain_count = _count_bargain_rounds(ctx)
             if bargain_count >= settings["max_bargain_rounds"]:
                 next_node = "xy_menu_price_refuse"
 
-        # 议价参数随槽位合并进 filled_slots，供 NLG prompt 注入。
-        # 注意 ROUTE 路径框架在 stages 之后才做 slots → filled_slots 合并，
-        # 而 NLG 在 stages 内执行 —— 故此处同时直写 filled_slots（相同键，
-        # 框架后续合并幂等），保证 NLG 当轮可见
+        # Bargain params merge into filled_slots as slots for NLG prompt injection.
+        # Note the ROUTE path's framework only merges slots → filled_slots after the
+        # stages, while NLG runs inside the stages — so this also writes filled_slots
+        # directly (same keys, the framework's later merge is idempotent), guaranteeing
+        # NLG visibility within the turn
         bargain_slots = {
             "bargain_count": bargain_count,
             "max_bargain_rounds": settings["max_bargain_rounds"],
@@ -254,7 +268,7 @@ class XianyuIntentNLU(BaseNLU):
         return ctx
 
     def _classify_via_llm(self, ctx) -> str:
-        """LLM 意图兜底 —— 复刻 ClassifyAgent（含 no_reply 反爆破类目）。"""
+        """LLM intent fallback — replicates ClassifyAgent (including the no_reply anti-flooding class)."""
         try:
             raw = self._call_llm(self.prompt_build(ctx), ctx.llm_config)
         except Exception as e:
@@ -264,7 +278,7 @@ class XianyuIntentNLU(BaseNLU):
 
     @classmethod
     def _sanitize_intent(cls, raw: str) -> str:
-        """清洗 LLM 分类输出：仅认四类标签，非法输出回落 default。"""
+        """Sanitize LLM classification output: only the four labels are accepted; invalid output falls back to default."""
         text = (raw or "").strip().lower()
         for label in cls._VALID_INTENTS:
             if label in text:
@@ -273,33 +287,37 @@ class XianyuIntentNLU(BaseNLU):
 
 
 # ============================================================================
-# NLG stage —— no_reply 空回复 / 议价拒绝固定话术 / 意图级 prompt 生成
+# NLG stage — no_reply empty reply / bargain refusal fixed script / intent-level prompt generation
 # ============================================================================
 
 class FixedNLG(BaseNLG):
-    """闲鱼 NLG stage —— 复刻三领域 Agent 的回复生成 + 安全过滤。
+    """Xianyu NLG stage — replicates the three domain Agents' reply generation + safety filtering.
 
-    三条路径（前两条零 LLM 短路）：
-        1. intent=no_reply  → 空回复（channel 契约 reply 空 = 不发送；
-           复刻原实现返回 "-"）
-        2. 议价拒绝节点     → 固定拒绝话术（answer_examples 带 marker 文案）
-        3. 意图菜单节点     → 节点 base_nlg_prompt（XIANYU_*_NLG_PROMPT）
-           + 议价上下文（price 意图）+ 买家消息 → 单次 LLM + 违禁词过滤
+    Three paths (the first two short-circuit with zero LLM):
+        1. intent=no_reply  → empty reply (channel contract: empty reply = not sent;
+           replicates the original "-" return)
+        2. bargain refusal node → fixed refusal script (answer_examples carry the
+           marker text)
+        3. intent menu node → node base_nlg_prompt (XIANYU_*_NLG_PROMPT)
+           + bargain context (price intent) + buyer message → single LLM call +
+           blocked-word filtering
 
-    挂在模块级 generate dict 的 nlg 位（node 无覆盖时生效；chat 层跳转检测
-    在 nlu 部件后已推进菜单节点并刷新节点级 LLM 配置，本 stage 读到的当前
-    节点即命中菜单）。节点级 generate 的 nlg 优先于本 stage
-    （node > module，stage_slots.py 三层解析）。
+    Mounted at the nlg position of the module-level generate dict (takes effect when
+    the node has no override; the chat layer's jump detection runs after the nlu
+    component and has already advanced the menu node and refreshed node-level LLM
+    config, so the current node this stage reads is the matched menu). Node-level
+    generate's nlg takes priority over this stage (node > module, stage_slots.py
+    three-tier resolution).
     """
 
     stage_name = "fixed_nlg"
 
-    # 议价拒绝固定文案（复刻 ai_reply_engine 硬编码）
+    # Fixed bargain refusal text (replicates the ai_reply_engine hardcode)
     REFUSE_TEXT = "抱歉，这个价格已经是最优惠的了，不能再便宜了哦！"
-    # 命中标记：NLG 按当前节点 answer_examples 匹配到该文案即短路
+    # Hit marker: NLG short-circuits when the current node's answer_examples match this text
     _MARKER = REFUSE_TEXT
 
-    # 复刻 XianyuReplyBot._safe_filter 的违禁词表与替换文案
+    # Blocked-word list and replacement text, replicating XianyuReplyBot._safe_filter
     BLOCKED_PHRASES = ("微信", "QQ", "支付宝", "银行卡", "线下")
     SAFE_REMINDER = "[安全提醒]请通过平台沟通"
 
@@ -307,11 +325,12 @@ class FixedNLG(BaseNLG):
         return XIANYU_DEFAULT_NLG_PROMPT
 
     def prompt_build(self, cxt) -> str:
-        """构建意图级 NLG prompt。
+        """Build the intent-level NLG prompt.
 
-        模板只留了 {__task_info__}/{__history__} 槽位；议价上下文与买家
-        消息复刻 tmp_xianyu 的拼接方式（system 尾部追加议价轮次、
-        user 消息单列）在此追加。
+        The template keeps only the {__task_info__}/{__history__} slots; the bargain
+        context and buyer message replicate tmp_xianyu's assembly (bargain round
+        appended to the system tail, user message as a standalone section) and are
+        appended here.
         """
         template = self._resolve_prompt_template(cxt)
         kwargs = self._build_template_kwargs(cxt)
@@ -322,19 +341,20 @@ class FixedNLG(BaseNLG):
         if (cxt.nlu_result or {}).get("intent") == "price":
             prompt += self._bargain_block(cxt)
 
-        # 复刻 BaseAgent._build_messages：买家当前消息单列（user 角色）
+        # Replicates BaseAgent._build_messages: the buyer's current message as a
+        # standalone section (user role)
         prompt += "\n### 买家消息\n" + _effective_query(cxt)
         return prompt
 
     def execute(self, ctx):
         intent = (ctx.nlu_result or {}).get("intent")
 
-        # 1. no_reply：空回复，channel 不发送（零 LLM）
+        # 1. no_reply: empty reply, the channel does not send it (zero LLM)
         if intent == "no_reply":
             ctx.nlg_result = {"content": ""}
             return ctx
 
-        # 2. 议价拒绝节点：固定话术（零 LLM）
+        # 2. Bargain refusal node: fixed script (zero LLM)
         node = ctx.get_current_node()
         if node is not None and any(
             self._MARKER in (ex or "") for ex in (node.answer_examples or [])
@@ -342,18 +362,18 @@ class FixedNLG(BaseNLG):
             ctx.nlg_result = {"content": self.REFUSE_TEXT}
             return ctx
 
-        # 3. 意图菜单节点：单次 LLM 生成 + 违禁词过滤
+        # 3. Intent menu node: single LLM generation + blocked-word filtering
         prompt = self.prompt_build(ctx)
         raw = self._call_llm(prompt, self._tuned_llm_config(ctx))
         ctx.nlg_result = {"content": self._safe_filter(raw.strip())}
         return ctx
 
     # ------------------------------------------------------------------
-    # tmp_xianyu 各 Agent 生成策略的等价实现
+    # Equivalent implementations of the tmp_xianyu per-Agent generation strategies
     # ------------------------------------------------------------------
 
     def _bargain_block(self, cxt) -> str:
-        """议价上下文块 —— 复刻 PriceAgent 的 ▲当前议价轮次注入。"""
+        """Bargain context block — replicates PriceAgent's ▲current bargain round injection."""
         slots = cxt.filled_slots
         defaults = DEFAULT_BARGAIN_SETTINGS
         count = slots.get("bargain_count", 0)
@@ -367,11 +387,12 @@ class FixedNLG(BaseNLG):
         )
 
     def _tuned_llm_config(self, ctx):
-        """按意图调温 —— 复刻三 Agent 温度策略。
+        """Tune temperature by intent — replicates the three Agents' temperature policies.
 
-        PriceAgent 动态温度 min(0.3 + 0.15×议价轮次, 0.9)、TechAgent 0.4、
-        DefaultAgent 0.7，max_tokens 统一 500。改写 llm_config 副本而非
-        覆写 _call_llm（后者签名固定，且测试 spy 挂在 BaseNLG._call_llm）。
+        PriceAgent dynamic temperature min(0.3 + 0.15×bargain round, 0.9), TechAgent
+        0.4, DefaultAgent 0.7, max_tokens uniformly 500. Rewrites an llm_config copy
+        rather than overriding _call_llm (the latter's signature is fixed, and test
+        spies are attached to BaseNLG._call_llm).
         """
         cfg = ctx.llm_config
         if not cfg:
@@ -390,14 +411,14 @@ class FixedNLG(BaseNLG):
 
     @classmethod
     def _safe_filter(cls, text: str) -> str:
-        """安全过滤 —— 复刻 XianyuReplyBot._safe_filter。"""
+        """Safety filtering — replicates XianyuReplyBot._safe_filter."""
         if any(p in text for p in cls.BLOCKED_PHRASES):
             return cls.SAFE_REMINDER
         return text
 
 
 # ============================================================================
-# RouteModule —— 顶层路由：根节点 + 意图菜单（全部留在本模块）
+# RouteModule — top-level routing: root node + intent menu (all nodes stay in this module)
 # ============================================================================
 
 xy_route_root = BaseNode(
@@ -429,7 +450,8 @@ xy_menu_price_refuse = BaseNode(
     node_description="议价轮数已达上限，礼貌坚持底价",
     node_todo_description="命中议价意图且轮数达上限，输出固定拒绝话术",
     sub_nodes=[],
-    # 固定文案即 FixedNLG 的命中标记（marker 匹配则零 LLM 短路）
+    # The fixed text doubles as FixedNLG's hit marker (marker match short-circuits
+    # with zero LLM)
     answer_examples=[
         "抱歉，这个价格已经是最优惠的了，不能再便宜了哦！",
     ],
@@ -468,15 +490,16 @@ xianyu_root = RouteModule(
                   xy_menu_tech, xy_menu_default],
     generate={
         "nlu": XianyuIntentNLU(),
-        # 模块级 NLG：no_reply/拒绝节点零 LLM 短路，其余菜单节点按
-        # node.base_nlg_prompt 意图模板生成（温度/长度按意图调优）
+        # Module-level NLG: zero-LLM short-circuit for no_reply/refusal nodes; other
+        # menu nodes generate from the node.base_nlg_prompt intent template
+        # (temperature/length tuned per intent)
         "nlg": FixedNLG(),
     },
 )
 
 
 # ============================================================================
-# Pattern 注册 —— 顶层 registry.register，由 AST 扫描自动发现
+# Pattern registration — module-level registry.register, auto-discovered by AST scan
 # ============================================================================
 
 xianyu_agent_pattern = Pattern(
@@ -485,8 +508,9 @@ xianyu_agent_pattern = Pattern(
     description="对话管理：ROUTE 每轮独立意图检测（本地规则 + LLM 兜底）+ 议价轮数控制 + 意图级 prompt",
     entry_module_code="xianyu_root",
     modules=[xianyu_root],
-    # 查询改写槽位：时间实体增强（零 LLM）——买家消息中的相对时间
-    # （"明天下午"等）先解析为绝对时间标注，再进 NLU/NLG prompt
+    # Query rewrite slot: time augmentation (zero LLM) — relative times in buyer
+    # messages ("tomorrow afternoon" etc.) are resolved into absolute-time
+    # annotations before entering the NLU/NLG prompts
     query=TimeAugQueryRewriter(),
 )
 

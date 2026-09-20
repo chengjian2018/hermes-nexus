@@ -1,21 +1,21 @@
 """
-Pattern 可视化 -- 把 Pattern / Module / Node 的结构关系渲染成图。
+Pattern visualization -- renders the structural relationships of a Pattern / Module / Node as a diagram.
 
-三种输出格式（共用同一个 Mermaid 生成器，零第三方依赖）：
-- html    : 自包含 HTML，内嵌 mermaid.js 多 CDN 回退加载，浏览器直接打开
-- md      : Mermaid Markdown，GitHub / IDE 可直接渲染
-- mermaid : 纯 mermaid 源码文本
+Three output formats (all sharing the same Mermaid generator, zero third-party dependencies):
+- html    : self-contained HTML with mermaid.js loaded via multi-CDN fallback, opens directly in a browser
+- md      : Mermaid Markdown, renders directly on GitHub / in IDEs
+- mermaid : plain mermaid source text
 
-图与结构的映射约定：
-- Module -> subgraph，按 ROUTE / FSM / AGENT 类型着不同底色
-- Node   -> 节点，标签含 node_code、名称、槽位；终态节点单独着色
-- node.sub_nodes   -> 实线箭头（FSM 节点跳转；可跨模块，与 node_map 全局查找语义一致）
-- node.jump_module -> 虚线箭头 jump_module（跨模块分发，指向目标模块首节点）
-- ROUTE 菜单节点无 jump_module -> 虚线箭头「重置回根」回到路由根节点
-- AGENT 模块（无节点）-> subgraph 内渲染一个「Agent 对话」代表节点
-- entry_module_code -> 「⏵ 开始」虚拟节点指向入口模块首节点
+Diagram-to-structure mapping conventions:
+- Module -> subgraph, filled with a distinct color per ROUTE / FSM / AGENT type
+- Node   -> node, labeled with node_code, name, and slots; terminal nodes colored separately
+- node.sub_nodes   -> solid arrow (FSM node jumps; may cross modules, consistent with node_map's global lookup semantics)
+- node.jump_module -> dashed arrow jump_module (cross-module dispatch, pointing at the target module's first node)
+- ROUTE menu node without jump_module -> dashed arrow 「重置回根」 back to the routing root node
+- AGENT module (no nodes) -> renders a representative 「Agent 对话」 node inside the subgraph
+- entry_module_code -> a 「⏵ 开始」 virtual node pointing at the entry module's first node
 
-用法：
+Usage:
     python -m dialogue.visualize --list
     python -m dialogue.visualize xianyu_agent                   # diagrams/xianyu_agent.html
     python -m dialogue.visualize xianyu_agent --format md      # Mermaid Markdown
@@ -38,17 +38,17 @@ from dialogue.register import discover_builtin_patterns, registry
 
 
 # ============================================================================
-# 基础工具
+# Basic utilities
 # ============================================================================
 
 def _sanitize_id(raw: Any, prefix: str) -> str:
-    """把任意 code 转成合法的 mermaid ID（字母数字下划线）。"""
+    """Convert an arbitrary code into a valid mermaid ID (alphanumerics and underscores)."""
     ident = re.sub(r"\W", "_", str(raw or "anonymous"))
     return f"{prefix}{ident}"
 
 
 def _escape_label(text: Any) -> str:
-    """转义 mermaid 标签中的特殊字符（引号 / 反斜杠 / 换行）。"""
+    """Escape special characters in mermaid labels (quotes / backslashes / newlines)."""
     return (
         str(text or "")
         .replace("\\", "\\\\")
@@ -58,19 +58,19 @@ def _escape_label(text: Any) -> str:
 
 
 def _slot_keys(node: Any) -> List[str]:
-    """节点的槽位 key 列表（用于图标签与详情表）。"""
+    """The node's slot key list (used for graph labels and the details table)."""
     slots = getattr(node, "node_slots", None) or {}
     return list(slots.keys()) if isinstance(slots, dict) else []
 
 
 def _module_type(module: Any) -> ModuleType:
-    """模块类型（未知类型按 AGENT 兜底，保证可渲染）。"""
+    """Module type (unknown types fall back to AGENT so rendering always works)."""
     mtype = getattr(module, "type", None)
     return mtype if isinstance(mtype, ModuleType) else ModuleType.AGENT
 
 
 def _ordered_modules(pattern: Pattern) -> List[Any]:
-    """模块列表，入口模块排最前，保证图的阅读顺序与对话进入顺序一致。"""
+    """Module list with the entry module first, keeping the diagram's reading order aligned with dialogue entry order."""
     modules = list(getattr(pattern, "modules", None) or [])
     entry = pattern.module_map.get(pattern.entry_module_code) if getattr(pattern, "entry_module_code", None) else None
     if entry is not None and entry in modules:
@@ -80,21 +80,21 @@ def _ordered_modules(pattern: Pattern) -> List[Any]:
 
 
 # ============================================================================
-# Mermaid 生成
+# Mermaid generation
 # ============================================================================
 
 def pattern_to_mermaid(pattern: Pattern) -> str:
-    """把 Pattern 渲染为 mermaid flowchart 源码。
+    """Render a Pattern as mermaid flowchart source.
 
     Args:
-        pattern: 已注册的 Pattern 对象
+        pattern: a registered Pattern object
 
     Returns:
-        str: mermaid flowchart 源码
+        str: mermaid flowchart source
     """
     modules = _ordered_modules(pattern)
 
-    # node_code -> mermaid 节点 ID；module_code -> Agent 代表节点 ID
+    # node_code -> mermaid node ID; module_code -> Agent representative node ID
     node_ids: Dict[str, str] = {}
     agent_ids: Dict[str, str] = {}
     for module in modules:
@@ -106,7 +106,7 @@ def pattern_to_mermaid(pattern: Pattern) -> str:
             agent_ids[module.module_code] = _sanitize_id(f"{module.module_code}__agent", "n_")
 
     def module_entry_id(module: Any) -> Optional[str]:
-        """模块的进入点 ID：首节点；无节点模块用 Agent 代表节点。"""
+        """The module's entry ID: its first node; node-less modules use the Agent representative node."""
         if module.module_nodes:
             return node_ids.get(module.module_nodes[0].node_code)
         return agent_ids.get(module.module_code)
@@ -123,7 +123,7 @@ def pattern_to_mermaid(pattern: Pattern) -> str:
     agent_nodes: List[str] = []
 
     # ------------------------------------------------------------------
-    # 1. 每个模块一个 subgraph，节点与模块内 sub_nodes 边
+    # 1. One subgraph per module, with edges among the module's sub_nodes
     # ------------------------------------------------------------------
     for module in modules:
         mid = _sanitize_id(module.module_code, "m_")
@@ -143,7 +143,7 @@ def pattern_to_mermaid(pattern: Pattern) -> str:
             lines.append(f'        {aid}["{_agent_node_label(module)}"]')
             agent_nodes.append(aid)
 
-        # 模块内节点跳转边（sub_nodes 指向的节点可能在其他模块，node_map 全局可查）
+        # In-module node jump edges (a sub_nodes target may live in another module; node_map is a global lookup)
         for node in module.module_nodes:
             for sub_code in node.sub_nodes or []:
                 if sub_code in node_ids:
@@ -152,7 +152,7 @@ def pattern_to_mermaid(pattern: Pattern) -> str:
         lines.append("    end")
 
     # ------------------------------------------------------------------
-    # 2. 跨模块边：入口、jump_module 分发、ROUTE 重置回根
+    # 2. Cross-module edges: entry, jump_module dispatch, ROUTE reset-to-root
     # ------------------------------------------------------------------
     entry_module = (
         pattern.module_map.get(pattern.entry_module_code)
@@ -179,11 +179,11 @@ def pattern_to_mermaid(pattern: Pattern) -> str:
                 and root_id is not None
                 and node.node_code != module.module_nodes[0].node_code
             ):
-                # ROUTE 菜单节点未声明 jump_module -> 重置回路由根节点
+                # ROUTE menu node without jump_module -> reset back to the routing root node
                 add_edge(f"{nid} -.->|重置回根| {root_id}")
 
     # ------------------------------------------------------------------
-    # 3. 样式：模块按类型着色（入口模块加粗）、终态 / Agent 节点、开始节点
+    # 3. Styling: modules colored by type (entry module bolded), terminal / Agent nodes, start node
     # ------------------------------------------------------------------
     module_style = {
         ModuleType.ROUTE: "fill:#eff6ff,stroke:#3b82f6",
@@ -208,7 +208,7 @@ def pattern_to_mermaid(pattern: Pattern) -> str:
 
 
 def _node_label(node: Any) -> str:
-    """节点标签：code + 名称（终态追加标记）+ 槽位。"""
+    """Node label: code + name (terminal marker appended) + slots."""
     parts = [str(node.node_code or "?"), str(node.node_name or "")]
     if getattr(node, "is_end", False):
         parts[1] = f"{parts[1]} · 终态"
@@ -219,33 +219,33 @@ def _node_label(node: Any) -> str:
 
 
 def _agent_node_label(module: Any) -> str:
-    """AGENT 模块的代表节点标签。"""
+    """Label for the AGENT module's representative node."""
     parts = [str(module.module_code or "?"), str(module.module_name or ""), "Agent 对话"]
     return "<br/>".join(_escape_label(p) for p in parts if p)
 
 
 # ============================================================================
-# 模块 / 节点详情（HTML 与 Markdown 共用的数据整理）
+# Module / node details (data preparation shared by HTML and Markdown)
 # ============================================================================
 
 def _module_summary(pattern: Pattern) -> Tuple[int, int]:
-    """统计模块数与节点数（Agent 代表节点不计入）。"""
+    """Count modules and nodes (Agent representative nodes are not counted)."""
     modules = list(getattr(pattern, "modules", None) or [])
     node_count = sum(len(m.module_nodes or []) for m in modules)
     return len(modules), node_count
 
 
 def _escape_cell(text: Any) -> str:
-    """Markdown 表格单元格转义（竖线与换行）。"""
+    """Escape Markdown table cell text (pipes and newlines)."""
     return str(text or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
 # ============================================================================
-# Markdown 渲染
+# Markdown rendering
 # ============================================================================
 
 def render_pattern_markdown(pattern: Pattern) -> str:
-    """把 Pattern 渲染为含 mermaid 图与详情表的 Markdown 文档。"""
+    """Render a Pattern as a Markdown document with the mermaid diagram and details tables."""
     module_count, node_count = _module_summary(pattern)
     lines: List[str] = [
         f"# Pattern: {pattern.name} (`{pattern.code}`)",
@@ -326,7 +326,7 @@ def render_pattern_markdown(pattern: Pattern) -> str:
 
 
 # ============================================================================
-# HTML 渲染
+# HTML rendering
 # ============================================================================
 
 _HTML_TEMPLATE = Template(
@@ -466,7 +466,7 @@ $details
 
 
 def render_pattern_html(pattern: Pattern) -> str:
-    """把 Pattern 渲染为自包含 HTML（浏览器直接打开即可查看）。"""
+    """Render a Pattern as self-contained HTML (open it directly in a browser to view)."""
     module_count, node_count = _module_summary(pattern)
     escaped_mermaid = html.escape(pattern_to_mermaid(pattern))
     return _HTML_TEMPLATE.substitute(
@@ -482,7 +482,7 @@ def render_pattern_html(pattern: Pattern) -> str:
 
 
 def _modules_html(pattern: Pattern) -> str:
-    """模块 / 节点详情卡片（图下方补充完整信息）。"""
+    """Module / node detail cards (complete information supplementing the diagram below it)."""
     esc = html.escape
     parts: List[str] = []
 
@@ -552,18 +552,18 @@ def _modules_html(pattern: Pattern) -> str:
 
 
 # ============================================================================
-# 渲染入口与 CLI
+# Rendering entry points and CLI
 # ============================================================================
 
 def render_pattern(pattern: Pattern, fmt: str = "html") -> str:
-    """按格式渲染 Pattern。
+    """Render a Pattern in the given format.
 
     Args:
-        pattern: 已注册的 Pattern 对象
-        fmt: 输出格式，html / md / mermaid
+        pattern: a registered Pattern object
+        fmt: output format, html / md / mermaid
 
     Returns:
-        str: 渲染结果文本
+        str: the rendered text
     """
     if fmt == "html":
         return render_pattern_html(pattern)
@@ -580,7 +580,7 @@ def _default_out_path(pattern_code: str, fmt: str) -> Path:
 
 
 def _write_one(pattern: Pattern, fmt: str, out: Optional[str]) -> None:
-    """渲染单个 pattern 并写文件，打印输出路径。"""
+    """Render a single pattern, write it to a file, and print the output path."""
     content = render_pattern(pattern, fmt)
     out_path = Path(out) if out else _default_out_path(str(pattern.code), fmt)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -589,7 +589,7 @@ def _write_one(pattern: Pattern, fmt: str, out: Optional[str]) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """CLI 入口：python -m dialogue.visualize [pattern_code] [--format ...] [-o ...]"""
+    """CLI entry: python -m dialogue.visualize [pattern_code] [--format ...] [-o ...]"""
     parser = argparse.ArgumentParser(
         prog="python -m dialogue.visualize",
         description="将已注册的 Pattern 渲染为可视化图（HTML / Markdown / mermaid 源码）",

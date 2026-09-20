@@ -1,7 +1,7 @@
-"""SessionStore 单元测试 —— 建表/落盘/增量追加/恢复/查询。
+"""SessionStore unit tests -- table creation / persist / incremental append / restore / queries.
 
-全部使用 tmp 文件 DB + 原生 sqlite3 断言（不经过被测读 API），
-fake session 手工构造，不依赖 FastAPI 与 LLM。
+All cases use a tmp-file DB + raw sqlite3 assertions (never the read APIs under test);
+fake sessions are hand-built, with no FastAPI or LLM dependency.
 """
 
 import json
@@ -12,7 +12,7 @@ from chat.store import SessionStore
 
 
 def make_session(session_id="s1", pattern_code="xianyu_agent"):
-    """构造一个带任务信息的最小 Session。"""
+    """Build a minimal Session with task info."""
     session = Session(session_id=session_id, pattern_code=pattern_code)
     session.task_info = {"caller": "pytest"}
     session.cxt.metadata["request_id"] = f"req-{session_id}"
@@ -38,16 +38,16 @@ def fetch_all(db_path, sql, params=()):
 
 
 def test_init_idempotent(tmp_path):
-    """重复对同一文件建 store（幂等 DDL）不抛异常。"""
+    """Creating a store repeatedly against the same file (idempotent DDL) must not raise."""
     db = str(tmp_path / "t.db")
     store1 = SessionStore(db)
     store1.close()
-    store2 = SessionStore(db)  # 不抛即通过
+    store2 = SessionStore(db)
     store2.close()
 
 
 def test_create_session_roundtrip(tmp_path):
-    """launch 落盘：sessions 行字段与 JSON 列往返一致。"""
+    """Launch persist: sessions row fields and JSON columns round-trip exactly."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
@@ -69,11 +69,11 @@ def test_create_session_roundtrip(tmp_path):
 
 
 def test_create_session_keeps_old_trail(tmp_path):
-    """同 session_id 重新 launch：旧 messages 保留（代次方案），sessions 行 epoch+1。"""
+    """Re-launch with the same session_id: old messages kept (generation scheme), sessions row epoch+1."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     store.create_session(make_session())
-    # 手工塞一条旧消息模拟上一轮流水
+    # Manually insert an old message to simulate the previous generation's trail
     conn = sqlite3.connect(db)
     with conn:
         conn.execute(
@@ -82,7 +82,7 @@ def test_create_session_keeps_old_trail(tmp_path):
         )
     conn.close()
 
-    store.create_session(make_session())  # 重新 launch
+    store.create_session(make_session())  # re-launch
     store.close()
 
     assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 1
@@ -91,7 +91,7 @@ def test_create_session_keeps_old_trail(tmp_path):
 
 
 def test_write_through_writes_current_epoch(tmp_path):
-    """重 launch 后：新消息带当代 epoch=1，旧消息 epoch=0。"""
+    """After re-launch: new messages carry the current epoch=1, old messages epoch=0."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
@@ -99,7 +99,7 @@ def test_write_through_writes_current_epoch(tmp_path):
     store.attach(session)
     session.cxt.add_message("user", "第一代", stage="chat")
 
-    store.create_session(make_session())  # 重新 launch，epoch=1
+    store.create_session(make_session())  # re-launch, epoch=1
     session.cxt.add_message("user", "第二代", stage="chat")
     store.close()
 
@@ -111,7 +111,7 @@ def test_write_through_writes_current_epoch(tmp_path):
 
 
 def test_load_active_sessions_restores_current_epoch_only(tmp_path):
-    """恢复只取当代消息：旧代消息保留在 DB 但不进 history。"""
+    """Restore takes only the current generation: old-generation messages stay in the DB but never enter history."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session("alive")
@@ -130,7 +130,7 @@ def test_load_active_sessions_restores_current_epoch_only(tmp_path):
 
 
 def test_get_messages_includes_all_epochs(tmp_path):
-    """审计：get_messages 返回全部代次消息，带 launch_epoch 键，id 升序。"""
+    """Audit: get_messages returns messages from every generation, with a launch_epoch key, ordered by id ascending."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
@@ -148,19 +148,19 @@ def test_get_messages_includes_all_epochs(tmp_path):
 
 
 def test_write_through_appends_incrementally(tmp_path):
-    """两轮对话：消息逐条即时落库，轮末快照只回写状态（无双写）。"""
+    """Two turns of dialogue: messages are written to the DB one by one immediately; the end-of-turn snapshot only writes back state (no double write)."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
     store.create_session(session)
     store.attach(session)
 
-    # 第一轮：user + assistant（逐条 write-through）
+    # Round 1: user + assistant (per-message write-through)
     session.cxt.add_message("user", "你好", stage="chat")
     session.cxt.add_message("assistant", "您好", stage="chat")
     store.save_snapshot(session)
 
-    # 第二轮前状态变化 + 新消息
+    # State changes + new messages ahead of round 2
     session.cxt.filled_slots["brand"] = "特斯拉"
     session.cxt.current_node_code = "buy_ask_budget"
     session.cxt.add_message("user", "我想买车", stage="chat")
@@ -172,18 +172,18 @@ def test_write_through_appends_incrementally(tmp_path):
     assert [m["content"] for m in msgs] == ["你好", "您好", "我想买车", "回复"]
     assert all(m["session_id"] == "s1" for m in msgs)
     assert msgs[0]["role"] == "user" and msgs[1]["role"] == "assistant"
-    # 无双写：DB 行数与内存 history 长度一致
+    # No double write: the DB row count matches the in-memory history length
     assert len(msgs) == len(session.cxt.history)
 
     row = fetch_one(db, "SELECT * FROM sessions WHERE session_id = 's1'")
     assert row["current_node_code"] == "buy_ask_budget"
     assert json.loads(row["filled_slots"]) == {"brand": "特斯拉"}
-    # 第二轮后 last_active_at 被刷新（大于 created_at）
+    # After round 2, last_active_at has been refreshed (greater than created_at)
     assert row["last_active_at"] >= row["created_at"]
 
 
 def test_write_through_message_metadata_json(tmp_path):
-    """消息 metadata 列 JSON 往返。"""
+    """Message metadata column JSON round-trip."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
@@ -199,7 +199,7 @@ def test_write_through_message_metadata_json(tmp_path):
 
 
 def test_snapshot_without_new_messages_only_refreshes_state(tmp_path):
-    """无新消息时 save_snapshot 只刷新状态，不插行不抛异常。"""
+    """With no new messages, save_snapshot only refreshes state: no row inserted, no exception."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session()
@@ -207,14 +207,14 @@ def test_snapshot_without_new_messages_only_refreshes_state(tmp_path):
     store.attach(session)
     session.cxt.add_message("user", "q", stage="chat")
     store.save_snapshot(session)
-    store.save_snapshot(session)  # 无新增
+    store.save_snapshot(session)
     store.close()
 
     assert fetch_one(db, "SELECT COUNT(*) FROM messages")[0] == 1
 
 
 def test_load_active_sessions_restores_fields(tmp_path):
-    """恢复：history/filled_slots/当前节点/任务信息还原；pattern 留空由调用方解析。"""
+    """Restore: history/filled_slots/current node/task info are restored; pattern is left empty for the caller to resolve."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     session = make_session("alive")
@@ -247,7 +247,7 @@ def test_load_active_sessions_restores_fields(tmp_path):
 
 
 def test_load_active_sessions_filters_expired(tmp_path):
-    """超过 ttl 未活跃的会话不恢复。"""
+    """Sessions inactive beyond the ttl are not restored."""
     import time as _time
 
     db = str(tmp_path / "t.db")
@@ -269,7 +269,7 @@ def test_load_active_sessions_filters_expired(tmp_path):
 
 
 def _seed_two_sessions(store):
-    """造两个会话各一轮对话（write-through），返回 (ids)。"""
+    """Seed two sessions with one dialogue turn each (write-through); returns (ids)."""
     for sid in ("sa", "sb"):
         session = make_session(sid, pattern_code="xianyu_agent" if sid == "sa" else "other")
         store.create_session(session)
@@ -279,13 +279,13 @@ def _seed_two_sessions(store):
 
 
 def test_list_sessions_filter_and_order(tmp_path):
-    """按 pattern_code 过滤、按 last_active_at 倒序、含 message_count。"""
+    """Filter by pattern_code, order by last_active_at descending, include message_count."""
     import time as _time
 
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     _seed_two_sessions(store)
-    # 把 sa 回拨为较旧
+    # Roll sa's last_active_at back to make it older
     conn = sqlite3.connect(db)
     with conn:
         conn.execute(
@@ -295,7 +295,7 @@ def test_list_sessions_filter_and_order(tmp_path):
     conn.close()
 
     all_rows = store.list_sessions(pattern_code=None, limit=50, offset=0)
-    assert [r["session_id"] for r in all_rows] == ["sb", "sa"]  # 新的在前
+    assert [r["session_id"] for r in all_rows] == ["sb", "sa"]
 
     filtered = store.list_sessions(pattern_code="other", limit=50, offset=0)
     assert [r["session_id"] for r in filtered] == ["sb"]
@@ -306,7 +306,7 @@ def test_list_sessions_filter_and_order(tmp_path):
 
 
 def test_list_sessions_pagination(tmp_path):
-    """limit/offset 分页。"""
+    """limit/offset pagination."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     _seed_two_sessions(store)
@@ -318,7 +318,7 @@ def test_list_sessions_pagination(tmp_path):
 
 
 def test_get_messages_ordered_and_typed(tmp_path):
-    """消息按 id 升序、metadata 反序列化为 dict。"""
+    """Messages ordered by id ascending; metadata deserialized into a dict."""
     db = str(tmp_path / "t.db")
     store = SessionStore(db)
     _seed_two_sessions(store)
@@ -333,18 +333,18 @@ def test_get_messages_ordered_and_typed(tmp_path):
 
 
 def test_get_messages_missing_session(tmp_path):
-    """会话不存在返回 None（端点转 404 信封）。"""
+    """Missing session returns None (the endpoint turns it into a 404 envelope)."""
     store = SessionStore(str(tmp_path / "t.db"))
     assert store.get_messages("nope") is None
     store.close()
 
 
 # ---------------------------------------------------------------------------
-# 迁移 + 逐条 write-through + 压缩原语
+# Migration + per-message write-through + compression primitive
 # ---------------------------------------------------------------------------
 
 def test_migrate_adds_tool_columns_to_legacy_db(tmp_path):
-    """旧 schema 建库（无 tool 列）→ 打开即补列，旧数据可读。"""
+    """Legacy-schema DB (no tool columns) -> missing columns are added on open; old data stays readable."""
     db = str(tmp_path / "legacy.db")
     conn = sqlite3.connect(db)
     with conn:
@@ -380,14 +380,14 @@ def test_migrate_adds_tool_columns_to_legacy_db(tmp_path):
             " VALUES ('s1', 'user', '旧数据', 'chat', '{}', 1.0)")
     conn.close()
 
-    store = SessionStore(db)  # 打开即用（载荷方案无需迁移）
+    store = SessionStore(db)  # usable on open (the payload scheme needs no migration)
     msgs = store.get_messages("s1")
     assert msgs is not None and msgs[0]["content"] == "旧数据"
     store.close()
 
 
 def test_messages_table_has_no_tool_columns(tmp_path):
-    """载荷方案零表结构变更：messages 只有七列，tool 轨迹走 content/metadata。"""
+    """Payload scheme means zero schema changes: messages has only seven columns; the tool trail goes through content/metadata."""
     store = SessionStore(str(tmp_path / "t.db"))
     store.close()
     probe = sqlite3.connect(str(tmp_path / "t.db"))
@@ -398,7 +398,7 @@ def test_messages_table_has_no_tool_columns(tmp_path):
 
 
 def test_append_message_tool_payload_roundtrip(tmp_path):
-    """append_message：工具轮 JSON 载荷 + tool 行 metadata.tool_call_id 往返。"""
+    """append_message: tool-turn JSON payload + tool row metadata.tool_call_id round-trip."""
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
@@ -425,7 +425,7 @@ def test_append_message_tool_payload_roundtrip(tmp_path):
 
 
 def test_append_message_writes_current_epoch(tmp_path):
-    """重 launch 后 append_message 落当代 epoch，get_history 只取当代。"""
+    """After re-launch, append_message writes to the current epoch and get_history only fetches the current one."""
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
@@ -442,7 +442,7 @@ def test_append_message_writes_current_epoch(tmp_path):
 
 
 def test_replace_history_summary_first_and_retained_kept(tmp_path):
-    """压缩重排：summary 行排最前，retained 消息保序保留（载荷原样往返）。"""
+    """Compression re-layout: the summary row comes first, retained messages keep their order (payloads round-trip unchanged)."""
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
     store.create_session(session)
@@ -459,7 +459,7 @@ def test_replace_history_summary_first_and_retained_kept(tmp_path):
                        metadata={"tool_call_id": "c1"}),
         SessionMessage(role="assistant", content="新回答", stage="chat"),
     ]
-    # DB 与内存对齐（write-through 语义下由 append_message 落）
+    # Align the DB with memory (under write-through semantics this is written by append_message)
     for msg in session.cxt.history:
         store.append_message(session, msg)
 
@@ -477,7 +477,7 @@ def test_replace_history_summary_first_and_retained_kept(tmp_path):
 
 
 def test_replace_history_mismatch_leaves_db_untouched(tmp_path):
-    """DB/内存行数不齐：抛 RuntimeError，事务回滚，DB 原样未动。"""
+    """DB/memory row-count mismatch: raises RuntimeError, the transaction rolls back, and the DB is left untouched."""
     import pytest
     store = SessionStore(str(tmp_path / "t.db"))
     session = make_session()
@@ -485,7 +485,7 @@ def test_replace_history_mismatch_leaves_db_untouched(tmp_path):
     from dialogue.base import SessionMessage
     store.append_message(session, SessionMessage(
         role="user", content="DB 里的消息", stage="chat"))
-    # 内存 history 为空 → 不齐
+    # In-memory history is empty -> mismatch
 
     with pytest.raises(RuntimeError):
         store.replace_history(session, "摘要", keep_idx=0)

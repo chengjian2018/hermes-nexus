@@ -1,12 +1,14 @@
-"""通用 webhook handler —— 所有渠道共用的请求处理线。
+"""Generic webhook handler — the request-processing line shared by all channels.
 
-流程（渠道无法跳过任何一步）：
-    token 校验 → 载荷校验（pydantic 422）→ parse → 过期过滤 →
-    session 前缀拼接 → get-or-create（pattern env）→ 单轮对话 → build_reply
+Flow (a channel cannot skip any step):
+    token validation -> payload validation (pydantic 422) -> parse -> staleness
+    filtering -> session prefixing -> get-or-create (pattern env) -> one chat
+    turn -> build_reply
 
-错误码契约（全渠道固定）：403 token / 422 载荷 / 200 过期吞掉 /
-503 无默认 pattern / 500 launch 或对话异常。过期是正常业务路径，走成功
-契约（空 reply = 渠道侧"不发送"），不走错误码。
+Error-code contract (fixed across channels): 403 token / 422 payload /
+200 stale message swallowed / 503 no default pattern / 500 launch or chat
+error. Staleness is a normal business path and follows the success contract
+(empty reply = channel side "do not send"), not an error code.
 """
 
 import logging
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_channel_router(spec: Any, ops: EngineOps) -> APIRouter:
-    """为单个 ChannelSpec 生成 router：POST /api/v1/channel/{spec.name}。"""
+    """Build a router for a single ChannelSpec: POST /api/v1/channel/{spec.name}."""
     router = APIRouter()
     payload_model = spec.payload_model
 
@@ -32,16 +34,17 @@ def build_channel_router(spec: Any, ops: EngineOps) -> APIRouter:
         payload: payload_model,  # type: ignore[valid-type]
         token: str = Query(default=""),
     ) -> Dict[str, Any]:
-        # 1. 可选共享密钥：env 配置了非空值才启用校验
+        # 1. Optional shared secret: validation is enabled only when the env var is set to a non-empty value
         if spec.token_env:
             expected = os.getenv(spec.token_env)
             if expected and token != expected:
                 raise HTTPException(status_code=403, detail="channel token 校验失败")
 
-        # 2. 渠道差异点①：载荷 → 归一化消息
+        # 2. Channel difference point (1): payload -> normalized message
         msg = spec.parse(payload)
 
-        # 3. 过期过滤（重连重放防护）：正常业务路径，空 reply 吞掉
+        # 3. Staleness filtering (reconnect replay protection): a normal
+        # business path; swallowed with an empty reply
         session_id = f"{spec.name}:{msg.session_key}"
         if msg.timestamp is not None and time.time() - msg.timestamp > spec.stale_seconds:
             logger.info(
@@ -50,7 +53,7 @@ def build_channel_router(spec: Any, ops: EngineOps) -> APIRouter:
             )
             return spec.build_reply("", session_id)
 
-        # 4. get-or-create：无会话时用默认 pattern 自动 launch
+        # 4. get-or-create: auto-launch with the default pattern when no session exists
         session = ops.get_session(session_id)
         if session is None:
             pattern_code = os.getenv(spec.default_pattern_env)
@@ -71,7 +74,7 @@ def build_channel_router(spec: Any, ops: EngineOps) -> APIRouter:
             logger.info("[%s] 自动 launch: session=%s pattern=%s",
                         spec.name, session_id, pattern_code)
 
-        # 5. 单轮对话 + 渠道差异点②：成功响应契约
+        # 5. One chat turn + channel difference point (2): success response contract
         reply, error = ops.run_chat_turn(session, msg.text)
         if error is not None:
             raise HTTPException(status_code=500, detail=f"对话处理异常: {error}")
@@ -84,7 +87,7 @@ def build_channel_router(spec: Any, ops: EngineOps) -> APIRouter:
 
 
 def build_channel_routers(ops: EngineOps) -> List[APIRouter]:
-    """遍历注册表为每个渠道生成 router；单渠道失败 warning 跳过。"""
+    """Build a router for every channel in the registry; a failing channel is skipped with a warning."""
     from channel.register import registry
 
     routers: List[APIRouter] = []

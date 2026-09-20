@@ -1,4 +1,4 @@
-"""config 加载测试（显式传配置路径，不依赖本地 yaml）。"""
+"""config loading tests (explicit config paths; no dependency on the local yaml)."""
 
 import pytest
 
@@ -19,18 +19,18 @@ def _write_config(tmp_path, extra=""):
 
 
 def test_session_db_path_default(tmp_path):
-    """配置未写 session_db_path 时返回缺省路径。"""
+    """Returns the default path when the config has no session_db_path."""
     assert get_session_db_path(_write_config(tmp_path)) == DEFAULT_SESSION_DB_PATH
 
 
 def test_session_db_path_override(tmp_path):
-    """配置显式写 session_db_path 时返回覆盖值。"""
+    """Returns the override value when the config sets session_db_path explicitly."""
     config_path = _write_config(tmp_path, "\nsession_db_path: /tmp/audit.db\n")
     assert get_session_db_path(config_path) == "/tmp/audit.db"
 
 
 # ============================================================================
-# Pattern 级 LLM 配置新结构（spec 2026-09-02）：llm_providers / llm_default / pattern_llm
+# Pattern-level LLM config, new structure (spec 2026-09-02): llm_providers / llm_default / pattern_llm
 # ============================================================================
 
 _NEW_STRUCT = """\
@@ -78,7 +78,7 @@ def test_new_structure_parsed(tmp_path):
 
 def test_legacy_llm_converted(tmp_path):
     cfg = load_config(_write(tmp_path, _LEGACY))
-    # 连接字段进 llm_providers.<code>，编排字段进 llm_default
+    # connection fields go into llm_providers.<code>, orchestration fields into llm_default
     assert cfg["llm_providers"] == {
         "openai": {
             "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -127,11 +127,11 @@ def test_nested_modules_rejected_with_warning(tmp_path, caplog):
 
 
 # ============================================================================
-# get_llm_config 三层合并（spec 2026-09-02 §3.2/§3.3）
+# get_llm_config three-tier merge (spec 2026-09-02 §3.2/§3.3)
 # ============================================================================
 
 def test_layered_merge_priority(tmp_path):
-    """node > module > pattern > 全局，逐层浅合并。"""
+    """node > module > pattern > global, shallow-merged layer by layer."""
     path = _write(tmp_path, _NEW_STRUCT + """\
   xianyu_agent2:
     model: qwen3.8-max
@@ -143,15 +143,15 @@ def test_layered_merge_priority(tmp_path):
 """)
     cfg = get_llm_config(pattern_code="xianyu_agent2",
                          module_code="m2", node_code="n1", config_path=path)
-    # n1 换 code → 连接层切到 deepseek 段（无该段则空）；temperature 继承 m2
+    # n1 switches code -> connection layer switches to the deepseek section (empty if that section is absent); temperature inherited from m2
     assert cfg["code"] == "deepseek"
     assert cfg["model"] == "deepseek-chat"
     assert cfg["temperature"] == 0.2
-    assert cfg.get("api_base", "") == ""  # deepseek 未配 provider 段 → 空
+    assert cfg.get("api_base", "") == ""
 
 
 def test_cross_provider_connection_switch(tmp_path):
-    """node 换 code 时连接字段来自新 code 的 provider 段，不串台。"""
+    """When a node switches code, connection fields come from the new code's provider section, with no cross-wiring."""
     text = """\
 llm_providers:
   openai:
@@ -176,11 +176,11 @@ pattern_llm:
 
 def test_unknown_codes_fallback_to_shallow_layer(tmp_path, caplog):
     cfg = get_llm_config(pattern_code="no_such_pattern", config_path=_write(tmp_path, _NEW_STRUCT))
-    assert cfg["model"] == "qwen3.8-max"  # 回退全局
+    assert cfg["model"] == "qwen3.8-max"
     cfg2 = get_llm_config(pattern_code="xianyu_agent", module_code="no_such_module",
                           config_path=_write(tmp_path, _NEW_STRUCT))
-    assert cfg2["model"] == "qwen-flash"  # 回退 pattern 层
-    # pattern 未配置为常态，降为 debug；module 未命中仍是 warning
+    assert cfg2["model"] == "qwen-flash"
+    # An unconfigured pattern is the normal case, so it drops to debug; a module miss still warns
     with caplog.at_level("DEBUG"):
         get_llm_config(pattern_code="no_such_pattern", config_path=_write(tmp_path, _NEW_STRUCT))
     assert any("no_such_pattern" in r.message for r in caplog.records)
@@ -194,7 +194,7 @@ def test_no_args_returns_global(tmp_path):
     cfg = get_llm_config(config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg["code"] == "openai"
     assert cfg["model"] == "qwen3.8-max"
-    assert cfg["api_key_env"] == "DASHSCOPE_API_KEY"  # 连接层并入
+    assert cfg["api_key_env"] == "DASHSCOPE_API_KEY"
 
 
 def test_override_skips_layers(tmp_path):
@@ -205,18 +205,18 @@ def test_override_skips_layers(tmp_path):
 
 
 # ============================================================================
-# main startup 交叉校验（spec 2026-09-02 §5）：未知 code 仅 warning 不阻断
+# main startup cross-check (spec 2026-09-02 §5): unknown codes only warn, never block
 # ============================================================================
 
 def test_cross_check_warns_unknown_codes(tmp_path, caplog):
-    """pattern_llm 的未知 pattern/module/node code 仅 warning 不抛。"""
+    """Unknown pattern/module/node codes in pattern_llm only warn, never raise."""
     import main
     text = _NEW_STRUCT + """\
   no_such_pattern:
     model: m
 """
-    # 未注册 pattern 的 modules/nodes 分支不可达（continue），故 module/node
-    # 未知分支挂在已注册 pattern 下单独验证
+    # For an unregistered pattern the modules/nodes branch is unreachable (continue), so the
+    # unknown module/node branches are verified separately under a registered pattern
     text = text.replace("xy_route_root: {code: deepseek, model: deepseek-chat}",
                         "no_such_node: {code: deepseek, model: deepseek-chat}")
     text = text.replace("xianyu_root: {model: qwen3.8-max}",
@@ -230,7 +230,7 @@ def test_cross_check_warns_unknown_codes(tmp_path, caplog):
 
 
 def test_cross_check_skips_on_load_failure(tmp_path, caplog):
-    """load_config 失败时仅 exception 日志，不抛。"""
+    """On load_config failure only an exception is logged; nothing raises."""
     import main
     with caplog.at_level("WARNING"):
         main._cross_check_pattern_llm(config_path="/no/such/file.yaml")
@@ -238,17 +238,17 @@ def test_cross_check_skips_on_load_failure(tmp_path, caplog):
 
 
 def test_cross_check_registered_codes_no_warning(tmp_path, caplog):
-    """已注册的 pattern/module/node 不产生 warning。"""
+    """Registered pattern/module/node codes produce no warning."""
     import main
     pattern = main.pattern_registry.list_codes()
-    assert pattern  # discover 在 import main 时已跑
+    assert pattern  # discover already ran at import main
     with caplog.at_level("WARNING"):
         main._cross_check_pattern_llm(config_path=_write(tmp_path, _NEW_STRUCT))
     assert not any("未注册" in r.message for r in caplog.records)
 
 
 def test_override_survives_missing_yaml(tmp_path, caplog):
-    """yaml 不存在时 override 路径静默降级（离线测试封闭性）。"""
+    """With a missing yaml the override path degrades silently (keeps offline tests self-contained)."""
     ov = {"code": "x", "model": "m"}
     with caplog.at_level("WARNING"):
         cfg = get_llm_config(override=ov,
@@ -257,11 +257,11 @@ def test_override_survives_missing_yaml(tmp_path, caplog):
 
 
 # ============================================================================
-# 终审修复回归（Final review I1 / I3）
+# Final-review regression fixes (Final review I1 / I3)
 # ============================================================================
 
 def test_llm_providers_unknown_field_warns_and_stripped(tmp_path, caplog):
-    """llm_providers 段未知字段（如手误 api_key_evn）warning 后剔除。"""
+    """Unknown fields in the llm_providers section (e.g. the typo api_key_evn) are stripped after a warning."""
     text = _NEW_STRUCT.replace(
         "  openai:\n    api_base:",
         "  openai:\n    api_key_evn: WRONG_ENV\n    api_base:")
@@ -273,7 +273,7 @@ def test_llm_providers_unknown_field_warns_and_stripped(tmp_path, caplog):
 
 
 def test_override_without_code_falls_back_to_llm_default(tmp_path):
-    """override 只写 model（无 code）→ 解析结果补 llm_default 的 code。"""
+    """Override with model only (no code) -> the resolved result fills in llm_default's code."""
     ov = {"model": "override-model"}
     cfg = get_llm_config(override=ov, config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg["code"] == "openai"
@@ -281,7 +281,7 @@ def test_override_without_code_falls_back_to_llm_default(tmp_path):
 
 
 def test_override_with_code_but_no_model_falls_back(tmp_path):
-    """override 只给 code 不给 model：model 从 llm_default 兜底，防 run_agent KeyError。"""
+    """Override with code but no model: model falls back from llm_default, preventing a run_agent KeyError."""
     ov = {"code": "openai"}
     cfg = get_llm_config(override=ov, config_path=_write(tmp_path, _NEW_STRUCT))
     assert cfg["code"] == "openai"

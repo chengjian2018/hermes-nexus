@@ -23,26 +23,29 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ModuleJumpEvent:
-    """一次模块跳转意图 —— 由 stage / agent 轮内产生，chat 层统一消费。
+    """A module jump intent — produced inside a stage / agent turn, consumed
+    uniformly by the chat layer.
 
-    产生方（写入 ``cxt.actions``）：
-    - NLU 轮内检测：``nlu_result.jump_module`` 指向其他模块
-    - ROUTE 菜单节点配置：``node.jump_module``（next_node 命中后）
-    - AGENT transfer 工具调用：``transfer_to_{target}``
+    Producers (write to ``cxt.actions``):
+    - NLU in-turn detection: ``nlu_result.jump_module`` points at another module
+    - ROUTE menu node config: ``node.jump_module`` (after next_node hits)
+    - AGENT transfer tool call: ``transfer_to_{target}``
 
-    消费方（chat 层 hop 循环）：校验目标存在于 module_map 即重路由
-    （写 current_module_code、置空 current_node_code），淡化邻接边界。
+    Consumer (chat layer hop loop): reroutes as long as the target exists in
+    module_map (writes current_module_code, clears current_node_code) —
+    adjacency boundaries are deliberately blurred.
 
-    同时保留 dict 形态动作（如 ``{"conversation_end": True}``）的兼容：
-    actions 列表内非本类型元素原样快照进 ChatResult.actions。
+    Also keeps compatibility with dict-form actions (e.g.
+    ``{"conversation_end": True}``): elements of other types in the actions
+    list are snapshotted verbatim into ChatResult.actions.
     """
 
     target_module_code: str
-    reason: str = ""      # 移交上下文：供目标模块承接（注入 prompt）
+    reason: str = ""      # Transfer context: picked up by the target module (injected into its prompt)
     source: str = ""      # nlu_jump / route_menu / handoff_tool
 
     def to_dict(self) -> Dict[str, Any]:
-        """观测形态：快照进 ChatResult.actions / cli 渲染用。"""
+        """Observation form: snapshotted into ChatResult.actions / rendered by the cli."""
         return {
             "module_jump": {
                 "target": self.target_module_code,
@@ -83,12 +86,14 @@ class SessionMessage:
 
     All messages produced by stages use this format to keep session storage consistent.
 
-    tool 轨迹约定（跨轮完整回放给 LLM，见 chat/messages.py 回放守卫）——
-    不新增独立字段/表列，全部骑在现有 JSON 通道上：
-    - assistant 工具轮：content 为 ``{"content": str, "tool_calls": [...]}``
-      JSON 载荷（``encode_tool_call_content`` 编码 / ``decode`` 解析）
-    - tool 行：``metadata["tool_call_id"]`` 关联 LLM tool_call id
-    - role ``summary``：历史压缩产生的 LLM 摘要行（回放时 user 角色 untrusted 包裹）
+    tool-trace conventions (replayed to the LLM in full across turns; see the
+    replay guard in chat/messages.py) — no new fields/table columns added;
+    everything rides on the existing JSON channels:
+    - assistant tool round: content is the ``{"content": str, "tool_calls": [...]}``
+      JSON payload (encoded by ``encode_tool_call_content`` / parsed by ``decode``)
+    - tool row: ``metadata["tool_call_id"]`` links to the LLM tool_call id
+    - role ``summary``: LLM summary row produced by history compression
+      (wrapped as user-role untrusted on replay)
     """
 
     role: Literal["system", "user", "assistant", "tool", "summary"]
@@ -117,7 +122,7 @@ class SessionMessage:
 def encode_tool_call_content(
     content: str, tool_calls: List[Dict[str, Any]]
 ) -> str:
-    """assistant 工具轮 content 的 JSON 载荷编码（Customer-Agent 同款约定）。"""
+    """JSON payload encoding for assistant tool-round content (Customer-Agent's convention)."""
     return json.dumps(
         {"content": content, "tool_calls": tool_calls}, ensure_ascii=False)
 
@@ -125,10 +130,11 @@ def encode_tool_call_content(
 def decode_tool_call_content(
     content: str,
 ) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
-    """解析 assistant 行 JSON 载荷 → ``(文本, tool_calls)``；非工具轮返回 None。
+    """Parse an assistant row's JSON payload into ``(text, tool_calls)``; returns None for non-tool rounds.
 
-    非工具轮判定：非 JSON / 无 ``tool_calls`` 键 / 空列表（loop 只在
-    tool_calls 非空时编码，空列表视为普通文本行）。
+    Non-tool-round criteria: not JSON / no ``tool_calls`` key / empty list
+    (the loop only encodes when tool_calls is non-empty; an empty list is
+    treated as a plain text row).
     """
     if not content or not content.lstrip().startswith("{"):
         return None
@@ -154,9 +160,9 @@ class DialogueContext:
 
     Every PipelineStage receives and returns this object; all intermediate results are stored here.
 
-    # metadata 键约定（stage / chat 层自管理）：
-    #   served_by_projection : Dict{module, source}  A 借投影答轮：借方模块与来源域
-    #   clarify              : Dict                  ClarifyStage 每轮自置自清
+    # metadata key conventions (self-managed by stages / the chat layer):
+    #   served_by_projection : Dict{module, source}  a projection-borrowed answering turn: borrower module and source domain
+    #   clarify              : Dict                  set and cleared each turn by ClarifyStage
     """
 
     session_id: str
@@ -165,12 +171,14 @@ class DialogueContext:
     # Session history (standardized message list)
     history: List[SessionMessage] = field(default_factory=list)
 
-    # 本轮 user 行在 history 中的下标（begin_turn 快照于 add user 之前；
-    # default_build_messages 以此切分跨轮历史 / 显式 query / 本轮 hop 内行）
+    # Index of this turn's user row in history (snapshot taken by begin_turn
+    # before adding the user message; default_build_messages uses it to split
+    # cross-turn history / explicit query / rows appended within this turn's hops)
     turn_history_start: int = 0
 
-    # 逐条 write-through 落库钩子（SessionStore.attach 注入；None = 未启用）。
-    # 异常在 add_message 侧吞掉记日志，绝不阻断对话
+    # Per-message write-through persistence hook (injected by SessionStore.attach;
+    # None = disabled). Exceptions are swallowed and logged on the add_message
+    # side — they must never block the dialogue.
     message_sink: Optional[Any] = None
 
     # Recall results before query rewrite
@@ -212,8 +220,9 @@ class DialogueContext:
     # Actions reserved for this turn (e.g. sends / transitions / external calls the reply should
     # trigger besides the text). Stages/handlers may append; the chat layer snapshots per turn
     # (see TurnLifecycle in chat/context_lifecycle.py — per-turn reset).
-    # 模块跳转动作用 ModuleJumpEvent 实例承载（chat 层 hop 循环消费后重路由），
-    # 其余 dict 形态动作原样快照进 ChatResult.actions。
+    # Module jumps are carried as ModuleJumpEvent instances (consumed by the chat
+    # layer's hop loop, which then reroutes); other dict-form actions are
+    # snapshotted verbatim into ChatResult.actions.
     actions: List[Any] = field(default_factory=list)
 
     # ------------------------------------------------------------------
@@ -229,9 +238,10 @@ class DialogueContext:
     ) -> None:
         """Append a standardized message to history.
 
-        tool 轨迹走 content/metadata 载荷（见 SessionMessage docstring）：
-        assistant 工具轮 content 先经 ``encode_tool_call_content`` 编码；
-        tool 行的 ``tool_call_id`` 放 metadata。
+        Tool traces go through the content/metadata payload (see the
+        SessionMessage docstring): assistant tool-round content is encoded
+        with ``encode_tool_call_content`` first; a tool row's
+        ``tool_call_id`` goes in metadata.
         """
         msg = SessionMessage(
             role=role,
@@ -252,8 +262,9 @@ class DialogueContext:
     def format_history(self, max_turns: int = 10) -> str:
         """Format the last N turns as text for prompt injection."""
         # Keep only user and assistant messages with displayable text, drop
-        # system / tool / summary. assistant 工具轮 content 为 JSON 载荷，
-        # 取内层文本（内层为空则整行跳过——工具轮通常无对用户说话）
+        # system / tool / summary. Assistant tool-round content is a JSON payload;
+        # take the inner text (skip the whole row if the inner text is empty —
+        # tool rounds usually don't speak to the user)
         lines: List[str] = []
         for msg in self.history:
             if msg.role not in ("user", "assistant"):
@@ -380,9 +391,10 @@ class DialogueContext:
     def format_jump_modules(self) -> str:
         """Format the jumpable module list as prompt-ready text (slot: jump_modules).
 
-        列出 module_map 中除当前模块外的全部模块（编码 + 名称 + 描述），
-        供 NLU prompt 输出 jump_module 字段时参照。边界淡化：不问邻接图，
-        只要目标在 module_map 中即合法跳转。
+        Lists all modules in module_map except the current one (code + name +
+        description) for the NLU prompt to reference when emitting the
+        jump_module field. Boundaries are deliberately blurred: no adjacency
+        graph is consulted — any target in module_map is a legal jump.
         """
         parts = []
         for code, module in self.module_map.items():
@@ -424,18 +436,19 @@ class DialogueContext:
 # Prompt slot plumbing — fixed slot vocabulary shared by all stages
 # ============================================================================
 
-# 固定槽位词表：所有环节的 prompt 模板共用同一套 {__key__} 占位符。
-# 拼接逻辑放在数据所属层：
-#   - node 层    : cur_node（按 stage 输出不同 facet）/ next_node / answer_pattern  (node.py)
-#   - module 层  : task_info                              (module.py)
-#   - ctx 层     : query / query_rewrite / recall_info / history / filled_slots
-# stage 层（nlu / nlg / query / recaller）只做「槽位名 → 数据层格式化方法」的映射，
-# 不再各自实现拼接。
+# Fixed slot vocabulary: every stage's prompt template shares the same set of
+# {__key__} placeholders. Concatenation logic lives in the layer that owns the
+# data:
+#   - node layer  : cur_node (stage-specific facet) / next_node / answer_pattern  (node.py)
+#   - module layer: task_info                              (module.py)
+#   - ctx layer   : query / query_rewrite / recall_info / history / filled_slots
+# Stages (nlu / nlg / query / recaller) only map "slot name -> data-layer
+# formatting method"; they no longer implement concatenation themselves.
 #
-# cur_node 的 stage facet 约定：
-#   - nlu : name + todo_description + slots   —— 理解任务：判断意图、按模板抽槽
-#   - nlg : name + description                —— 生成任务：回复所依托的场景描述
-#   - full: 全字段                             —— 检索类 stage（query 改写 / recall）
+# cur_node stage-facet conventions:
+#   - nlu : name + todo_description + slots   — understanding task: judge intent, extract slots per template
+#   - nlg : name + description                — generation task: scenario the reply is grounded in
+#   - full: all fields                        — retrieval stages (query rewrite / recall)
 
 def fill_prompt_template(template: str, slots: Dict[str, str]) -> str:
     """Replace ``{__key__}`` placeholders in the template with their values.

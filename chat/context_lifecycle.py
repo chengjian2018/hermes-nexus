@@ -1,16 +1,17 @@
 """
-DialogueContext 字段生命周期管理 — 每轮必处理 / 跨轮保留 / 增量更新的唯一管理者。
+DialogueContext field lifecycle management — the single owner of per-turn processing / cross-turn retention / incremental updates.
 
-cxt 跨轮存活于 Session 上，字段的生命周期政策此前散落在 chat() 开头
-与各 handler 的转移逻辑里。本模块把政策收敛为声明式集合：改集合即改
-政策，不再散落。
+cxt survives across turns on the Session; field lifecycle policy used to be scattered across
+the start of chat() and the transition logic of individual handlers. This module consolidates
+the policy into declarative sets: change the set and you change the policy — no more scattering.
 
-四类字段（见 TurnLifecycle 类属性）：
-- PERSISTENT     ：跨轮绝不删除（会话状态本体）
-- PER_TURN_RESET ：每轮开头重置（本轮临时产物；hop 之间绝不重置——
-                   actions 里的跳转事件依赖同轮存活至 hop 循环消费）
-- INCREMENTAL    ：增量更新（history 追加、filled_slots 合并），由本模块提供入口
-- STAGE_MANAGED  ：由 stage 机制自管理，生命周期层不触碰
+Four field categories (see the TurnLifecycle class attributes):
+- PERSISTENT     : never deleted across turns (the session state itself)
+- PER_TURN_RESET : reset at the start of every turn (this turn's temporary output; never reset
+                   between hops — jump events in actions rely on surviving within the turn until
+                   the hop loop consumes them)
+- INCREMENTAL    : incremental updates (history appends, filled_slots merges); this module provides the entry points
+- STAGE_MANAGED  : self-managed by the stage mechanism; the lifecycle layer never touches them
 """
 
 import logging
@@ -22,27 +23,27 @@ logger = logging.getLogger(__name__)
 
 
 class TurnLifecycle:
-    """DialogueContext 字段生命周期的唯一管理者。
+    """The single owner of DialogueContext field lifecycle.
 
-    调用时序约定（chat 层编排器负责遵守）：
-    1. ``begin_turn``   — 每轮恰好一次，hop 循环之前（含同轮跳转重入 hop）
-    2. ``merge_slots``  — FSM/ROUTE 转移阶段按需（增量合并 nlu 槽位）
-    3. ``end_turn``     — 每轮恰好一次，回复产出之后
+    Call-order contract (the chat-layer orchestrator is responsible for honoring it):
+    1. ``begin_turn``   — exactly once per turn, before the hop loop (including same-turn jump re-entry hops)
+    2. ``merge_slots``  — on demand during FSM/ROUTE transition (incrementally merges nlu slots)
+    3. ``end_turn``     — exactly once per turn, after the reply is produced
 
-    集合即政策：调整某字段的归属，改下方声明即可，不动流程代码。
+    The set is the policy: to change a field's category, edit the declaration below — no flow code changes.
     """
 
-    # -- 跨轮保留：绝不删除 --------------------------------------------------
-    # 文档作用为主（begin_turn 显式不触碰它们），申明不变式：
-    # 会话状态本体，误删即丢状态。
+    # -- Cross-turn retention: never deleted ---------------------------------
+    # Mostly documentation (begin_turn explicitly never touches these), stating the invariant:
+    # this is the session state itself; deleting it by mistake loses state.
     PERSISTENT_FIELDS = (
-        "history",              # 增量追加（end_turn），绝不整体清空
-        "current_module_code",  # 由跳转消费（chat 层 _apply_jump）维护
-        "current_node_code",    # 由跳转消费 / 节点转移维护
-        "filled_slots",         # 增量合并（merge_slots）
-        "task_basic_info",      # launch 时注入，全程只读
+        "history",              # appended incrementally (end_turn); never cleared wholesale
+        "current_module_code",  # maintained by jump consumption (chat layer _apply_jump)
+        "current_node_code",    # maintained by jump consumption / node transition
+        "filled_slots",         # merged incrementally (merge_slots)
+        "task_basic_info",      # injected at launch; read-only throughout
         "session_id",
-        "node_map",             # launch 注入的拓扑映射
+        "node_map",             # topology map injected at launch
         "module_map",
     )
     PERSISTENT_METADATA_KEYS = (
@@ -52,40 +53,43 @@ class TurnLifecycle:
         "pattern_code",
     )
 
-    # -- 每轮重置：轮首归零 --------------------------------------------------
-    # 本轮临时产物。现状部分字段靠 stage 覆写"恰好不残留"，这里显式归零，
-    # 语义从"残留但通常被覆盖"收紧为"每轮干净"。
+    # -- Per-turn reset: zeroed at turn start --------------------------------
+    # This turn's temporary output. Today some fields only stay clean because stages overwrite
+    # them; here they are zeroed explicitly, tightening the semantics from "leftover but usually
+    # overwritten" to "clean every turn".
     PER_TURN_RESULT_FIELDS = ("nlu_result", "nlg_result", "agent_result")
     PER_TURN_LIST_FIELDS = (
         "pre_recall_results",
         "rewritten_queries",
         "post_recall_results",
-        "actions",              # 跳转事件/动作通道每轮重建（chat 层轮末快照进
-                                # ChatResult；ModuleJumpEvent 由 hop 循环消费后
-                                # 移除，非跳转动作留至轮末）
+        "actions",              # jump event/action channel rebuilt every turn (chat layer snapshots
+                                # it into ChatResult at turn end; ModuleJumpEvent is consumed and
+                                # removed by the hop loop; non-jump actions remain until turn end)
     )
     PER_TURN_METADATA_KEYS = (
         "unified",
     )
 
-    # -- stage 自管理：轮首重置 ----------------------------------------------
-    # served_by_projection 由 agent 工具回执写入（借投影答轮记账）；
-    # clarify 由 ClarifyStage 每轮自置——两者均不应跨轮残留，轮首清空。
+    # -- Stage self-managed: reset at turn start -----------------------------
+    # served_by_projection is written by agent tool receipts (bookkeeping for rounds answered via
+    # a lent projection); clarify is set by ClarifyStage each turn — neither should leak across
+    # turns, so both are cleared at turn start.
     STAGE_MANAGED_METADATA_KEYS = ("clarify", "served_by_projection")
 
     # ------------------------------------------------------------------
-    # 轮次边界
+    # Turn boundary
     # ------------------------------------------------------------------
 
     def begin_turn(self, cxt: DialogueContext, user_query: str) -> None:
-        """轮首：覆写 user_query、重置每轮字段、清 stage 自管理记账。
+        """Turn start: overwrite user_query, reset per-turn fields, clear stage-managed bookkeeping.
 
-        必须每轮恰好调用一次（hop 循环之前）；hop 之间绝不调用——
-        actions 里的跳转事件需同轮存活至 hop 循环消费。
+        Must be called exactly once per turn (before the hop loop); never between hops —
+        jump events in actions must survive within the turn until the hop loop consumes them.
 
-        另快照 ``turn_history_start = len(history)``（add user 之前的长度）：
-        default_build_messages 以此切分跨轮历史 / 显式 query / 本轮 hop 内行。
-        该标记为 begin_turn 的派生轮次标记，不入下方四类集合。
+        Also snapshots ``turn_history_start = len(history)`` (the length before adding the user
+        message): default_build_messages uses it to split cross-turn history / explicit query /
+        this turn's in-hop rows. That marker is a turn marker derived by begin_turn and does not
+        belong to the four categories below.
         """
         cxt.user_query = user_query
         cxt.turn_history_start = len(cxt.history)
@@ -105,17 +109,18 @@ class TurnLifecycle:
         )
 
     def end_turn(self, cxt: DialogueContext, response_text: str) -> None:
-        """轮末：history 追加 assistant 消息（增量更新入口）。"""
+        """Turn end: append the assistant message to history (the incremental-update entry point)."""
         cxt.add_message("assistant", response_text, stage="chat")
 
     # ------------------------------------------------------------------
-    # 增量更新
+    # Incremental updates
     # ------------------------------------------------------------------
 
     def merge_slots(self, cxt: DialogueContext, slots: Dict[str, Any]) -> None:
-        """增量合并：nlu slots 并入 filled_slots（后写覆盖同键）。
+        """Incremental merge: nlu slots merged into filled_slots (later writes override the same key).
 
-        FSM/ROUTE 转移阶段共用，收敛原先 chat 层两份重复拷贝。
+        Shared by the FSM/ROUTE transition stages; consolidates the two duplicate copies
+        previously in the chat layer.
         """
         if slots:
             cxt.filled_slots.update(slots)

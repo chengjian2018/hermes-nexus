@@ -1,9 +1,9 @@
-"""NLG stage 包 — 回复生成。
+"""NLG stage package — reply generation.
 
 Exports:
-    - ``BaseNLG``: NLG stage 抽象基类。
-    - ``FSMNLG``: FSM 模块的回复生成。
-    - ``RouteNLG``: 顶层路由模块的回复生成。
+    - ``BaseNLG``: abstract base class for NLG stages.
+    - ``FSMNLG``: reply generation for FSM modules.
+    - ``RouteNLG``: reply generation for the top-level routing module.
 """
 
 from stages.nlg.nlg import BaseNLG, FSMNLG, RouteNLG

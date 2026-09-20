@@ -1,14 +1,18 @@
-"""知识库存储 —— 商品知识 + 客服知识（scope 隔离，jieba 分词 LIKE 检索）。
+"""Knowledge store — product knowledge + customer-service knowledge (scope
+isolated, jieba-tokenized LIKE search).
 
-移植自 Customer-Agent 的 database/knowledge_service.py，按 hermes-nexus idiom
-重写：原生 sqlite3 单连接 + 锁 + WAL（照 chat/store.py），Shop FK 层级
-拍平为 ``scope`` 列（``{channel}:{account_id}``）。
+Ported from Customer-Agent's database/knowledge_service.py, rewritten in the
+hermes-nexus idiom: native sqlite3 single connection + lock + WAL (mirroring
+chat/store.py); the Shop FK hierarchy flattened into a ``scope`` column
+(``{channel}:{account_id}``).
 
-存储定义统一放 ``database/`` 路径（表 DDL / 未来 ES 等 schema 均归此）；
-工具层（tools/knowledge_tool.py）只消费本模块，不定义存储。
+Storage definitions live under ``database/`` (table DDL / future ES schemas
+all belong here); the tool layer (tools/knowledge_tool.py) only consumes this
+module and defines no storage.
 
-输出消毒（_clean_untrusted + untrusted 包裹）为安全边界：知识库内容是不可信
-数据，检索结果进入 LLM 上下文前必须过本模块的 format_result。
+Output sanitization (_clean_untrusted + untrusted wrapping) is the security
+boundary: knowledge base content is untrusted data, and retrieval results
+must pass through this module's format_result before entering LLM context.
 """
 
 import logging
@@ -51,15 +55,17 @@ CREATE TABLE IF NOT EXISTS customer_service_knowledge (
 CREATE INDEX IF NOT EXISTS idx_csk_scope ON customer_service_knowledge(scope);
 """
 
-_UNPRINTABLE_RE = re.compile(r"[^\S\n\t]")  # 占位：清洗逻辑见 _clean_untrusted
+_UNPRINTABLE_RE = re.compile(r"[^\S\n\t]")  # placeholder: sanitization logic lives in _clean_untrusted
 
 
 def _clean_untrusted(value: Any, limit: int) -> str:
-    """不可信文本消毒：不可打印字符过滤 + 尖括号全角化 + 限长。
+    """Sanitize untrusted text: non-printable character filtering + fullwidth
+    angle brackets + length limit.
 
-    直译 Customer-Agent knowledge_service._clean_untrusted：知识库内容
-    （商品名/提取正文/客服条目）可能含提示注入，<> 全角化防标签化指令，
-    限长防上下文炸裂。
+    Faithful port of Customer-Agent knowledge_service._clean_untrusted: knowledge
+    base content (product names / extracted body / CS entries) may carry prompt
+    injection; fullwidth-ing <> prevents tag-formatted instructions, and the
+    length limit prevents context blowup.
     """
     text = str(value or "")
     text = "".join(ch for ch in text if ch in "\n\t" or ch.isprintable())
@@ -67,20 +73,21 @@ def _clean_untrusted(value: Any, limit: int) -> str:
 
 
 def _cut_query(query: str) -> List[str]:
-    """jieba 搜索模式分词，过滤 <2 字符的碎词。"""
-    import jieba  # 懒加载：首次检索才初始化词典（~1s）
+    """Tokenize with jieba in search mode, filtering fragments shorter than 2 characters."""
+    import jieba  # lazy init: the dictionary is only initialized on the first search (~1s)
 
     words = jieba.cut_for_search(query.strip())
     return [w.strip() for w in words if len(w.strip()) >= 2]
 
 
 class KnowledgeStore:
-    """知识库连接持有者：单连接 + 锁串行化（FastAPI sync 端点跑线程池）。
+    """Knowledge store connection holder: single connection + lock serialization
+    (FastAPI sync endpoints run on a threadpool).
 
-    检索语义（对齐 Customer-Agent）：
-    - goods_id 精确查（单条）
-    - query 分词 → 每词 OR(title/name LIKE, content LIKE) → 词间 AND
-    - 无 query → 最新 limit 条（商品列表语义）
+    Retrieval semantics (aligned with Customer-Agent):
+    - exact lookup by goods_id (single row)
+    - query tokens -> per-word OR(title/name LIKE, content LIKE) -> AND across words
+    - no query -> latest ``limit`` rows (product list semantics)
     """
 
     def __init__(self, db_path: str):
@@ -96,10 +103,6 @@ class KnowledgeStore:
         with self._lock:
             self._conn.close()
 
-    # ------------------------------------------------------------------
-    # 写入
-    # ------------------------------------------------------------------
-
     def upsert_product(
         self,
         scope: str,
@@ -110,7 +113,7 @@ class KnowledgeStore:
         specifications: Optional[str] = None,
         extracted_content: Optional[str] = None,
     ) -> None:
-        """插入或更新商品知识（同 scope + goods_id 视为同一条）。"""
+        """Insert or update product knowledge (same scope + goods_id is treated as the same row)."""
         now = time.time()
         with self._lock, self._conn:
             self._conn.execute(
@@ -139,7 +142,7 @@ class KnowledgeStore:
         tags: Optional[str] = None,
         enabled: bool = True,
     ) -> None:
-        """追加一条客服知识。"""
+        """Append one customer-service knowledge entry."""
         now = time.time()
         with self._lock, self._conn:
             self._conn.execute(
@@ -150,7 +153,7 @@ class KnowledgeStore:
             )
 
     def seed(self, scope: str) -> None:
-        """幂等种子数据：闲鱼二手客服风格演示集。"""
+        """Idempotent seed data: Xianyu second-hand customer-service style demo set."""
         with self._lock, self._conn:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM product_knowledge WHERE scope = ?",
@@ -196,10 +199,6 @@ class KnowledgeStore:
         logger.info("知识库种子完成: scope=%s, products=%d, cs=%d",
                     scope, len(products), len(cs_entries))
 
-    # ------------------------------------------------------------------
-    # 检索
-    # ------------------------------------------------------------------
-
     def search_products(
         self,
         scope: str,
@@ -207,7 +206,7 @@ class KnowledgeStore:
         goods_id: Optional[int] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """商品知识检索：goods_id 精确 / query 分词 / 无 query 最新 N 条。"""
+        """Product knowledge search: exact by goods_id / tokenized query / latest N rows without a query."""
         limit = max(1, min(int(limit), 50))
         with self._lock:
             if goods_id is not None:
@@ -247,7 +246,7 @@ class KnowledgeStore:
         query: Optional[str] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """客服知识检索：query 分词匹配 title/content；无 query 最新 N 条。"""
+        """Customer-service knowledge search: tokenized query matched against title/content; latest N rows without a query."""
         limit = max(1, min(int(limit), 50))
         with self._lock:
             if query and query.strip():
@@ -274,7 +273,7 @@ class KnowledgeStore:
             return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
-    # 输出格式化（安全边界）
+    # Output formatting (security boundary)
     # ------------------------------------------------------------------
 
     def format_result(
@@ -282,10 +281,10 @@ class KnowledgeStore:
         products: List[Dict[str, Any]],
         cs_entries: List[Dict[str, Any]],
     ) -> str:
-        """检索结果 → Agent 可读文本，全程 _clean_untrusted 消毒。
+        """Retrieval results -> Agent-readable text, sanitized with _clean_untrusted throughout.
 
-        直译 Customer-Agent format_search_result：产品/客服两段、
-        untrusted 包裹、前置「仅供事实参考」声明。
+        Faithful port of Customer-Agent format_search_result: product and CS
+        sections, untrusted wrapping, leading facts-only disclaimer.
         """
         parts: List[str] = []
 
@@ -319,10 +318,10 @@ class KnowledgeStore:
         )
 
     def format_catalog(self, products: List[Dict[str, Any]]) -> str:
-        """商品目录（list_products 用）：紧凑列表，不含知识正文。
+        """Product catalog (used by list_products): compact list, no knowledge body.
 
-        照 Customer-Agent get_product_list._format_products_output 的消毒：
-        [untrusted_product_catalog] 包裹 + 括号全角化。
+        Mirrors the sanitization of Customer-Agent get_product_list._format_products_output:
+        [untrusted_product_catalog] wrapping + fullwidth brackets.
         """
         if not products:
             return "未找到商品。"
@@ -346,7 +345,7 @@ class KnowledgeStore:
 
 
 # ---------------------------------------------------------------------------
-# 模块级懒持有 —— 连接持有者，main.py lifespan 负责 close
+# Module-level lazy holder — owns the connection; main.py lifespan closes it
 # ---------------------------------------------------------------------------
 
 _store: Optional[KnowledgeStore] = None
@@ -354,7 +353,8 @@ _store_lock = threading.Lock()
 
 
 def get_knowledge_store() -> KnowledgeStore:
-    """获取进程级 KnowledgeStore（懒初始化，配置不可用回退 data/knowledge.db）。"""
+    """Get the process-level KnowledgeStore (lazily initialized; falls back to
+    data/knowledge.db when the config is unavailable)."""
     global _store
     if _store is not None:
         return _store
@@ -365,7 +365,7 @@ def get_knowledge_store() -> KnowledgeStore:
         try:
             from config.config import load_config
             db_path = load_config().get("knowledge_db_path", db_path)
-        except Exception as exc:  # 配置缺失不阻塞：知识库可用默认路径
+        except Exception as exc:  # missing config does not block: the store falls back to the default path
             logger.warning("读取 knowledge_db_path 失败，回退默认路径: %s", exc)
         _store = KnowledgeStore(db_path)
         return _store

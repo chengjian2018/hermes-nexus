@@ -1,4 +1,4 @@
-"""ClarifyStage 单测 —— 触发判定、检索组装、门控与生成。"""
+"""ClarifyStage unit tests — trigger decision, query assembly, gating and generation."""
 
 import pytest
 
@@ -14,7 +14,7 @@ from stages.recaller import (
 
 
 # ============================================================================
-# 测试脚手架
+# Test scaffolding
 # ============================================================================
 
 KB_DOCS = [
@@ -26,7 +26,7 @@ KB_DOCS = [
 
 
 def make_ctx(next_node="clarify", topic="费用", keywords=None, query="还要收别的钱吗"):
-    """构造带澄清触发的 DialogueContext。"""
+    """Build a DialogueContext with a clarify trigger."""
     ctx = DialogueContext(session_id="t", user_query=query)
     ctx.nlu_result = {
         "next_node": next_node,
@@ -36,7 +36,7 @@ def make_ctx(next_node="clarify", topic="费用", keywords=None, query="还要�
 
 
 def make_stage(kb_docs=None, rule=None):
-    """构造挂内存关键词召回的 ClarifyStage（不依赖 ES）。"""
+    """Build a ClarifyStage backed by in-memory keyword recall (no ES dependency)."""
     recaller = MultiPathRecaller(
         recall_paths=[KeywordRecallPath(name="kb", documents=kb_docs or KB_DOCS)],
         filters=[ScoreThresholdFilter(threshold=0.1)],
@@ -46,7 +46,7 @@ def make_stage(kb_docs=None, rule=None):
 
 
 def make_gen_stage(mode_to_return, captured):
-    """LLM 生成 mock：记录收到的 prompt，返回带模式标记的回复。"""
+    """LLM generation mock: records the received prompt and returns a mode-tagged reply."""
 
     def fake_generate(prompt: str, *args, **kwargs) -> str:
         captured.append(prompt)
@@ -58,22 +58,22 @@ def make_gen_stage(mode_to_return, captured):
 
 
 # ============================================================================
-# 触发判定
+# Trigger decision
 # ============================================================================
 
 class TestTrigger:
 
     def test_not_clarify_intent_passthrough(self):
-        """next_node 非 clarify → 纯透传，不检索不生成。"""
+        """next_node != clarify -> pure passthrough, no recall, no generation."""
         ctx = make_ctx(next_node="buy_ask_budget")
         captured = []
         stage = make_gen_stage("kb", captured)
         ctx2 = stage.execute(ctx)
-        assert captured == []                       # 未调用生成
+        assert captured == []
         assert ctx2.metadata["clarify"]["triggered"] is False
 
     def test_metadata_reset_each_turn(self):
-        """上一轮残留的 clarify 元数据在本轮被重置。"""
+        """Clarify metadata left over from the previous turn is reset this turn."""
         ctx = make_ctx(next_node="buy_ask_budget")
         ctx.metadata["clarify"] = {"triggered": True, "mode": "kb"}
         captured = []
@@ -94,22 +94,22 @@ class TestTrigger:
 
 
 # ============================================================================
-# 检索与门控
+# Recall and gating
 # ============================================================================
 
 class TestRecallAndRoute:
 
     def test_kb_hit_uses_kb_mode(self):
-        """高分命中（关键词重叠加分）→ kb 模式，prompt 含召回内容。"""
+        """High-score hit (keyword-overlap bonus) -> kb mode; the prompt contains recall content."""
         ctx = make_ctx()
         captured = []
         stage = make_gen_stage("kb", captured)
         stage.execute(ctx)
         assert ctx.metadata["clarify"]["mode"] == "kb"
-        assert "上牌费与服务费" in captured[0]      # 召回内容进了 prompt
+        assert "上牌费与服务费" in captured[0]
 
     def test_no_recall_falls_back(self):
-        """空知识库 → fallback（无召回默认轨道二）。"""
+        """Empty knowledge base -> fallback (no recall means track two by default)."""
         ctx = make_ctx()
         captured = []
         stage = make_gen_stage("fallback", captured)
@@ -121,7 +121,7 @@ class TestRecallAndRoute:
         assert ctx.nlg_result["content"].startswith("[clarify:fallback]")
 
     def test_search_error_falls_back(self):
-        """检索异常 → fallback，不抛出。"""
+        """Recall error -> fallback, no exception raised."""
         class BoomPath(KeywordRecallPath):
             def recall(self, query, ctx, **kwargs):
                 raise RuntimeError("es down")
@@ -143,13 +143,13 @@ class TestRecallAndRoute:
 
 
 # ============================================================================
-# 检索 query 组装
+# Recall query assembly
 # ============================================================================
 
 class TestQueryBuild:
 
     def test_query_combines_user_query_topic_keywords(self):
-        """检索 query = user_query + topic + keywords 拼接。"""
+        """Recall query = user_query + topic + keywords concatenated."""
         seen_queries = []
 
         class SpyPath(KeywordRecallPath):

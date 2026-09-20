@@ -1,10 +1,13 @@
-"""TimeAugQueryRewriter —— 时间增强确定性查询改写测试。
+"""TimeAugQueryRewriter — tests for deterministic time-augmentation query rewriting.
 
-契约：
-- 纯规则零 LLM：有时间实体时标注追加进 rewritten_queries[0]
-- 无时间实体时 rewritten_queries = [原 query]（与 LLM 版兜底一致）
-- time_base 取 ctx.metadata["time_base"]（未注入用当前时间）
-- 槽位机制兼容：is_valid_stage 通过、QuerySlot 三层解析可命中
+Contract:
+- pure rules, zero LLM: with a time entity, the annotation is appended into
+  rewritten_queries[0]
+- without a time entity, rewritten_queries = [the original query] (same
+  fallback as the LLM version)
+- time_base comes from ctx.metadata["time_base"] (current time when not injected)
+- slot-mechanism compatible: passes is_valid_stage and is reachable through
+  QuerySlot's three-layer resolution
 """
 
 import time as _time
@@ -18,7 +21,7 @@ from dialogue.module import FSMModule
 from stages.query import TimeAugQueryRewriter
 from dialogue.stage_slots import QuerySlot, is_valid_stage, resolve_stage
 
-# 固定基准：2026-09-03 10:00:00（周四）—— 下周一 = 2026-09-07
+# Fixed base: 2026-09-03 10:00:00 (Thursday) — next Monday = 2026-09-07
 TIME_BASE = _time.mktime(_time.strptime("2026-09-03 10:00:00", "%Y-%m-%d %H:%M:%S"))
 
 
@@ -49,8 +52,9 @@ def test_time_span_augmented():
 
 
 def test_time_base_defaults_to_now(monkeypatch):
-    # 未注入 time_base 时走 augment_time 的默认（当前时间）——
-    # 用 monkeypatch 验证传给 augment_time 的 time_base 为 None
+    # Without an injected time_base, augment_time's default (current time)
+    # applies — use monkeypatch to verify the time_base passed to augment_time
+    # is None
     calls = {}
 
     def _fake_augment(text, time_base=None):
@@ -65,7 +69,7 @@ def test_time_base_defaults_to_now(monkeypatch):
 
 
 def test_query_slot_resolves_to_time_aug_rewriter():
-    """槽位三层解析：module 层配置 TimeAugQueryRewriter 可被 QuerySlot 命中。"""
+    """Three-layer slot resolution: a module-level TimeAugQueryRewriter is hit by QuerySlot."""
     ctx = DialogueContext(session_id="t", user_query="q")
     ctx.current_module_code = "m1"
     ctx.current_node_code = "n1"
@@ -81,7 +85,7 @@ def test_query_slot_resolves_to_time_aug_rewriter():
 
 
 def test_augment_time_consistency():
-    """改写结果与 augment_time 直调一致（透传契约）。"""
+    """The rewrite result matches a direct augment_time call (passthrough contract)."""
     for query in ("我下周一可以去", "这个多少钱"):
         ctx = TimeAugQueryRewriter().execute(_ctx(query=query))
         assert ctx.rewritten_queries == [augment_time(query, time_base=TIME_BASE)]

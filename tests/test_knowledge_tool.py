@@ -1,14 +1,14 @@
-"""knowledge_tool 单测：注册/ACL/dispatch 路径/scope 派生/归属校验。
+"""knowledge_tool unit tests: registration / ACL / dispatch paths / scope derivation / ownership validation.
 
-工具读全局 get_knowledge_store()（默认 data/knowledge.db），测试用
-monkeypatch 换成 tmp_path 实例，避免污染真实数据文件。
+Tools read the global get_knowledge_store() (defaults to data/knowledge.db);
+tests monkeypatch in a tmp_path instance to avoid polluting real data files.
 """
 
 import json
 
 import pytest
 
-from tools import knowledge_tool  # noqa: F401 -- import 即注册
+from tools import knowledge_tool  # noqa: F401 -- registers on import
 from database.knowledge_store import KnowledgeStore
 from tools.register import registry
 
@@ -27,7 +27,7 @@ def _dispatch(name: str, **args) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 注册与 pattern ACL（方向都要对）
+# Registration and pattern ACL (must hold in both directions)
 # ---------------------------------------------------------------------------
 
 def test_tools_registered():
@@ -46,13 +46,13 @@ def test_pattern_acl_grant_and_deny():
                  "list_products", "send_goods_link"):
         assert name in allowed
 
-    # deny-by-default：其他 pattern 拿不到
+    # deny-by-default: other patterns get nothing
     assert registry.get_allowed_tools_for_pattern("xianyu_agent", "xianyu_root") \
         & {"search_product_knowledge", "send_goods_link"} == set()
 
 
 # ---------------------------------------------------------------------------
-# dispatch 正常路径
+# dispatch normal paths
 # ---------------------------------------------------------------------------
 
 def test_search_product_by_goods_id(store):
@@ -79,7 +79,7 @@ def test_list_products_catalog(store):
     out = _dispatch("list_products", account_id="acct_001", limit=2)
     assert "[untrusted_product_catalog]" in out
     assert "商品ID:" in out
-    # 目录不带知识正文
+    # catalog must not include knowledge content
     assert "电池健康" not in out
 
 
@@ -91,7 +91,7 @@ def test_send_goods_link_happy_path(store):
 
 
 # ---------------------------------------------------------------------------
-# dispatch 异常/边界路径
+# dispatch error/edge paths
 # ---------------------------------------------------------------------------
 
 def test_missing_account_id(store):
@@ -107,7 +107,7 @@ def test_search_requires_goods_or_query(store):
 
 
 def test_send_goods_link_rejects_unknown_goods(store):
-    """归属校验：不属于当前 scope 的 goods_id 拒绝（防 LLM 编造）。"""
+    """Ownership validation: a goods_id outside the current scope is rejected (prevents LLM fabrication)."""
     out = _dispatch("send_goods_link", account_id="acct_001", goods_id=999999)
     payload = json.loads(out)
     assert "error" in payload
@@ -115,7 +115,7 @@ def test_send_goods_link_rejects_unknown_goods(store):
 
 
 def test_scope_derived_from_account_id(store):
-    """账号隔离：acct_002 无种子数据，检索为空但不串 acct_001 的数据。"""
+    """Account isolation: acct_002 has no seed data; searches return empty and never leak acct_001's data."""
     out = _dispatch("search_product_knowledge",
                     account_id="acct_002", goods_id=1001)
     assert out == "未找到相关知识。"

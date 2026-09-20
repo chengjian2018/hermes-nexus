@@ -1,9 +1,9 @@
-"""clarify —— 双轨澄清（Dual-Track Clarify）。
+"""clarify — dual-track clarify.
 
-任务型对话中用户回答偏离主线时的判别与应答：
-- 轨道一（kb）      : 业务知识库召回作答 + 轻拉回
-- 轨道二（fallback）: 问题响应 + 强拉回
-- 模糊（mixed）     : 部分业务知识 + 问题响应
+Discrimination and response when a user's answer drifts off the main thread in task-oriented dialogue:
+- Track one (kb)      : answer from business knowledge base recall + light pull-back
+- Track two (fallback): question-responsive reply + strong pull-back
+- Ambiguous (mixed)   : partial business knowledge + question-responsive reply
 """
 
 from stages.clarify.rule import ClarifyRouteRule

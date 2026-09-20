@@ -29,10 +29,11 @@ class ModuleType(Enum):
 
 @dataclass
 class ModuleLink:
-    """邻接声明：A 的 sub_modules 里的一条边。
+    """Adjacency declaration: one edge in A's sub_modules.
 
-    一字段两职责：既是对 transfer 合法目标的声明（转移图边集），
-    又定义 A 上下文中 B 的投影厚度（知识/工具借出配置）。
+    One field, two responsibilities: it declares the legal transfer targets
+    (the transfer-graph edge set) and defines the projection thickness of B
+    within A's context (knowledge/tool lending configuration).
     """
 
     target: str
@@ -44,9 +45,10 @@ class ModuleLink:
 
 
 def _normalize_links(sub_modules: Optional[List[Any]]) -> List[ModuleLink]:
-    """把 str / ModuleLink 混合列表归一化为 List[ModuleLink]。
+    """Normalize a mixed list of str / ModuleLink into List[ModuleLink].
 
-    str 写法（旧兼容）自动包装为 lend_knowledge=True、lend_tools=[]。
+    The str form (legacy compat) is auto-wrapped with lend_knowledge=True
+    and lend_tools=[].
     """
     links: List[ModuleLink] = []
     for item in sub_modules or []:
@@ -75,13 +77,16 @@ class BaseModule:
         use_tools: list of tools available to the module.
         base_prompt: module base prompt (used by AGENT type).
         agent_stage: module-level Agent stage instance (optional, default when unset).
-        messages_builder: AGENT 模块自定义 LLM messages 构建器，签名
-            ``(system_prompt, cxt) -> messages`` 列表；未设置走默认构建
-            （system + user/assistant 历史），不可调用时告警降级默认
-            （消费方见 chat/messages.py）。
-        agent_hooks: agent loop hooks 声明（``{点位: [hook,...]}``），
-            非空时整体替换 pattern 级声明（消费方见 chat/agent_hooks.py）。
-        generate/pre_recall/query/post_recall: 管线槽位配置（node 级最高优先级）。
+        messages_builder: custom LLM messages builder for AGENT modules, signature
+            ``(system_prompt, cxt) -> messages`` list; when unset the default
+            build applies (system + user/assistant history); falls back to the
+            default with a warning when not callable
+            (consumer: chat/messages.py).
+        agent_hooks: agent loop hooks declaration (``{point: [hook,...]}``);
+            when non-empty it wholesale-replaces the pattern-level declaration
+            (consumer: chat/agent_hooks.py).
+        generate/pre_recall/query/post_recall: pipeline slot config (node level
+            has highest priority).
         enable_clarify: dual-track clarify switch; when True the FSM module
             integrates ClarifyStage (see stages/clarify/).
     """
@@ -122,9 +127,9 @@ class BaseModule:
         self.base_nlu_prompt = base_nlu_prompt
         self.base_nlg_prompt = base_nlg_prompt
 
-        # 管线槽位配置（三层优先级 node > module > pattern，执行期由
-        # stage_slots.resolve_stage 延迟解析；generate 支持单 stage 或
-        # {"nlu":…, "nlg":…} dict）
+        # Pipeline slot config (three-layer priority node > module > pattern,
+        # resolved lazily at execution time by stage_slots.resolve_stage;
+        # generate accepts a single stage or a {"nlu":…, "nlg":…} dict)
         self.generate = generate
         self.pre_recall = pre_recall
         self.query = query
@@ -135,15 +140,15 @@ class BaseModule:
 
         self.agent_stage = agent_stage
 
-        # AGENT 模块 messages 构建器槽位（消费方在 chat/messages.py，
-        # 与 agent_stage 同为 module 级可插拔组件声明）
+        # AGENT module messages-builder slot (consumer lives in chat/messages.py;
+        # like agent_stage, a module-level pluggable component declaration)
         self.messages_builder = messages_builder
 
-        # agent loop hooks 槽位：非空时整体替换 pattern 级声明（不 merge，
-        # 同 stage 槽位语义；形态与消费方见 chat/agent_hooks.py）
+        # Agent loop hooks slot: when non-empty, wholesale-replaces the
+        # pattern-level declaration (no merge, same semantics as the stage
+        # slots; form and consumer: chat/agent_hooks.py)
         self.agent_hooks = agent_hooks
 
-        # 双轨澄清开关：FSM 模块开启后接入 ClarifyStage（详见 stages/clarify/）
         self.enable_clarify = enable_clarify
 
         self.is_end = is_end
@@ -175,10 +180,12 @@ class BaseModule:
         self.node_todo_description = self.module_todo_description
 
     def to_projection_text(self) -> str:
-        """模块头部投影：供邻接 module 的 agent prompt 注入（inject 原语）。
+        """Module header projection: injected into the agent prompt of adjacent
+        modules (inject primitive).
 
-        只含头部四字段（name/description/todo/answer_examples），不含内部
-        流程 prompt —— 流程深度不投影，深入需 transfer（spec §1.2）。
+        Contains only the four header fields (name/description/todo/
+        answer_examples), not internal flow prompts — flow depth is never
+        projected; going deeper requires transfer (spec §1.2).
         """
         parts = []
         if self.module_name:

@@ -1,7 +1,7 @@
-"""agent_hooks：声明解析 / dispatcher 链式与守卫 / 防御性降级单测。
+"""agent_hooks unit tests: declaration resolution / dispatcher chaining and guards / defensive degradation.
 
-loop 挂载侧（P1 注入、P4/P5 改写、主流程工具名校验）的集成测试随
-test_agent_hooks_loop.py（commit 2/3 增补）。
+Integration tests for the loop mount side (P1 injection, P4/P5 rewrites,
+main-flow tool-name validation) live in test_agent_hooks_loop.py (added in commit 2/3).
 """
 
 import logging
@@ -42,11 +42,11 @@ def _tr_event(result="r"):
 
 
 # ---------------------------------------------------------------------------
-# resolve_agent_hooks：module 整体替换 / 回落 / 防御性降级
+# resolve_agent_hooks: module wholesale replacement / fallback / defensive degradation
 # ---------------------------------------------------------------------------
 
 def test_resolve_module_replaces_pattern_wholesale():
-    """module.agent_hooks 非空整体替换——pattern 级同点位 hook 不生效（不 merge）。"""
+    """A non-empty module.agent_hooks replaces wholesale — pattern-level hooks at the same point do not take effect (no merge)."""
     pat_hook = lambda e: None
     mod_hook = lambda e: None
     hooks = resolve_agent_hooks(_Mod({"on_tool_call": [mod_hook]}),
@@ -69,7 +69,7 @@ def test_resolve_non_dict_degrades():
 
 
 def test_resolve_unknown_point_and_non_callable_degrade(caplog):
-    """未知点位 / 非 callable 条目：warning 跳过，不抛错。"""
+    """Unknown hook points / non-callable entries: skipped with a warning, no raise."""
     good = lambda e: None
     with caplog.at_level(logging.WARNING):
         hooks = resolve_agent_hooks(
@@ -86,11 +86,11 @@ def test_resolve_single_callable_normalized_to_list():
 
 
 # ---------------------------------------------------------------------------
-# dispatcher：fire / collect_fragments / rewrite_tool_call / rewrite_tool_result
+# dispatcher: fire / collect_fragments / rewrite_tool_call / rewrite_tool_result
 # ---------------------------------------------------------------------------
 
 def test_fire_swallows_hook_exception():
-    """观察点 hook 抛异常：吞掉继续下一个，不向调用方传播。"""
+    """An observation-point hook raising: swallowed and the next hook runs, nothing propagates to the caller."""
     seen = []
 
     def boom(e):
@@ -104,7 +104,7 @@ def test_fire_swallows_hook_exception():
 
 
 def test_collect_fragments_declaration_order_and_failure_drop():
-    """片段按声明序收集；异常 hook 的片段丢弃、不影响其余。"""
+    """Fragments are collected in declaration order; a failing hook's fragment is dropped without affecting the rest."""
     def one(e):
         return "A"
 
@@ -125,7 +125,7 @@ def test_collect_fragments_declaration_order_and_failure_drop():
 
 
 def test_rewrite_tool_call_chain_and_audit():
-    """链式：hook₁ 改 args 后 hook₂ 看到改写后的值；original 审计完整。"""
+    """Chained: after hook₁ rewrites args, hook₂ sees the rewritten value; the original audit is complete."""
     seen_args = []
 
     def h1(e):
@@ -144,7 +144,7 @@ def test_rewrite_tool_call_chain_and_audit():
 
 
 def test_rewrite_tool_call_rejects_unknown_name_keeps_args():
-    """改名目标不在 allowed_names：拒绝改名，args 照常应用（部分改写）。"""
+    """Rename target not in allowed_names: rename rejected, args still applied (partial rewrite)."""
     def h(e):
         return RewriteToolCall(name="ghost_tool", args={"a": 1})
 
@@ -157,7 +157,7 @@ def test_rewrite_tool_call_rejects_unknown_name_keeps_args():
 
 
 def test_rewrite_tool_call_rejects_reserved_prefix():
-    """改名带 transfer_to_ 前缀：拒绝（防走私控制权）。"""
+    """Rename to a transfer_to_ prefixed name: rejected (prevents smuggled control flow)."""
     def h(e):
         return RewriteToolCall(name="transfer_to_x")
 
@@ -185,7 +185,7 @@ def test_rewrite_tool_call_hook_failure_keeps_current(caplog):
 
 
 def test_rewrite_tool_call_accepts_dict_return_shape():
-    """容忍 dict 形态返回（{"name":…,"args":…}），两者皆空视作未改写。"""
+    """Tolerates a dict return shape ({"name":…, "args":…}); both empty is treated as no rewrite."""
     def h(e):
         return {"args": {"x": 1}}
 
@@ -208,7 +208,7 @@ def test_rewrite_tool_result_chain_and_audit():
 
     ev = _tr_event(result="raw")
     final, original = rewrite_tool_result({"on_tool_result": [h1, h2]}, ev)
-    assert orig_seen == ["v1"]      # 链式：h2 看到 h1 的产物
+    assert orig_seen == ["v1"]      # chained: h2 sees h1's output
     assert final == "v2"
     assert original == "raw"
 

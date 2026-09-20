@@ -1,8 +1,10 @@
 """
-轮次产出封装 — 回复不只是文本：text + actions。
+Turn output wrapper — a reply is more than text: text + actions.
 
-chat() 兼容入口继续返回 str（.text）；chat_turn() 返回本模块的 ChatResult，
-为 API 层后续消费 actions（发送卡片 / 转人工 / 外呼等回复之外的动作）预留通道。
+The chat() compat entry keeps returning str (.text); chat_turn() returns
+this module's ChatResult, reserving a channel for the API layer to consume
+actions later (send card / human handoff / outbound call — actions beyond
+the reply itself).
 """
 
 from dataclasses import dataclass, field
@@ -13,12 +15,15 @@ from dialogue.base import DialogueContext, ModuleJumpEvent
 
 @dataclass
 class ChatResult:
-    """一轮对话的完整产出。
+    """The complete output of one dialogue turn.
 
-    - text    ：出口回复文本（兼容 chat() 的 str 返回）
-    - actions ：动作通道（轮末从 cxt.actions 快照；ModuleJumpEvent 已被
-                hop 循环消费，此处仅剩 dict 形态动作如 conversation_end，
-                以及因超跳数未消费的残留跳转事件——均转 dict 观测形态）
+    - text    : final reply text (compatible with chat()'s str return)
+    - actions : action channel (snapshotted from cxt.actions at end of
+                turn; ModuleJumpEvents were already consumed by the hop
+                loop, so what remains are dict-shaped actions such as
+                conversation_end plus jump events left unconsumed by
+                max_hops exhaustion — all converted to dict observation
+                form)
     """
 
     text: str
@@ -26,14 +31,14 @@ class ChatResult:
 
 
 def _snapshot_action(item: Any) -> Dict[str, Any]:
-    """动作条目转观测 dict：ModuleJumpEvent 走 to_dict，dict 原样。"""
+    """Convert an action entry to its observation dict: ModuleJumpEvent via to_dict, dict as-is."""
     if isinstance(item, ModuleJumpEvent):
         return item.to_dict()
     return item
 
 
 def build_chat_result(text: str, cxt: DialogueContext) -> ChatResult:
-    """轮末从 cxt 构建 ChatResult：快照 actions。"""
+    """Build a ChatResult from cxt at end of turn: snapshot the actions."""
     return ChatResult(
         text=text,
         actions=[_snapshot_action(item) for item in (cxt.actions or [])],

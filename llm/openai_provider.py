@@ -77,7 +77,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": stream,
-            # Qwen3 思考模式开关（DashScope 兼容模式扩展参数），默认关闭
+            # Qwen3 thinking mode switch (DashScope compatible-mode extension parameter), disabled by default
             "enable_thinking": self.enable_thinking,
             **kwargs,
         }
@@ -158,7 +158,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             "max_tokens": max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
-            # Qwen3 思考模式开关（DashScope 兼容模式扩展参数），默认关闭
+            # Qwen3 thinking mode switch (DashScope compatible-mode extension parameter), disabled by default
             "enable_thinking": self.enable_thinking,
             **kwargs,
         }

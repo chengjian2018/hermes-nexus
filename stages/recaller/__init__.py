@@ -1,13 +1,13 @@
-"""Recaller stage 包 — 多路召回 + 过滤 + 融合 + 重排。
+"""Recaller stage package — multi-path recall + filtering + fusion + reranking.
 
 Exports:
-    - ``MultiPathRecaller``: 多路召回主 stage（含 ``PreRecaller``/``PostRecaller`` 预设）。
-    - 召回路径: ``KeywordRecallPath`` ``EmbeddingRecallPath`` ``ESRecallPath``
-      ``LLMRecallPath`` ``CustomRecallPath``。
-    - 过滤器: ``DedupFilter`` ``ScoreThresholdFilter`` ``MaxResultsFilter``
-      ``FieldFilter`` ``FilterChain``。
-    - 融合器: ``ReciprocalRankFusion`` ``WeightedScoreFusion`` ``RoundRobinFusion``。
-    - 重排器: ``ScoreBasedReranker`` ``DiversityReranker`` ``LLMReranker``。
+    - ``MultiPathRecaller``: main multi-path recall stage (with ``PreRecaller``/``PostRecaller`` presets).
+    - Recall paths: ``KeywordRecallPath`` ``EmbeddingRecallPath`` ``ESRecallPath``
+      ``LLMRecallPath`` ``CustomRecallPath``.
+    - Filters: ``DedupFilter`` ``ScoreThresholdFilter`` ``MaxResultsFilter``
+      ``FieldFilter`` ``FilterChain``.
+    - Fusion: ``ReciprocalRankFusion`` ``WeightedScoreFusion`` ``RoundRobinFusion``.
+    - Rerankers: ``ScoreBasedReranker`` ``DiversityReranker`` ``LLMReranker``.
 """
 
 from stages.recaller.recaller import (

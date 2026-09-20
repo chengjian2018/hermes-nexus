@@ -1,4 +1,4 @@
-"""channel 框架层测试 —— 协议对象、通用 handler、注册表（fake spec，离线）。"""
+"""Channel framework tests -- protocol objects, generic handler, registry (fake specs, offline)."""
 
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -9,7 +9,7 @@ from channel.base import ChannelSpec, EngineOps, InboundMessage
 
 
 class _FakePayload(BaseModel):
-    """fake 渠道载荷：user_id + text 必填，ts 可选。"""
+    """Fake channel payload: user_id + text required, ts optional."""
 
     user_id: str
     text: str
@@ -17,7 +17,7 @@ class _FakePayload(BaseModel):
 
 
 class FakeChannel:
-    """最小 ChannelSpec 实现，供 handler/注册表测试复用。"""
+    """Minimal ChannelSpec implementation, reused by handler/registry tests."""
 
     name = "fake"
     payload_model = _FakePayload
@@ -39,14 +39,14 @@ class FakeChannel:
 
 
 def test_inbound_message_defaults():
-    """InboundMessage 可直接构造；task_info 默认空 dict。"""
+    """InboundMessage can be constructed directly; task_info defaults to an empty dict."""
     msg = InboundMessage(channel="x", text="hi", session_key="k")
     assert msg.timestamp is None
     assert msg.task_info == {}
 
 
 def test_engine_ops_holds_callables():
-    """EngineOps 为纯数据束：三个操作字段原样存取。"""
+    """EngineOps is a pure data bundle: the three operation fields are stored and read back verbatim."""
     ops = EngineOps(get_session=lambda _sid: None,
                     launch_session=lambda *a, **k: (None, "0", ""),
                     run_chat_turn=lambda s, q: ("ok", None))
@@ -55,7 +55,7 @@ def test_engine_ops_holds_callables():
 
 
 def test_fake_spec_satisfies_protocol():
-    """FakeChannel 结构上满足 ChannelSpec 协议（runtime_checkable）。"""
+    """FakeChannel structurally satisfies the ChannelSpec protocol (runtime_checkable)."""
     spec = FakeChannel()
     assert isinstance(spec, ChannelSpec)
     assert spec.name == "fake"
@@ -65,7 +65,7 @@ def test_fake_spec_satisfies_protocol():
 
 
 # ============================================================================
-# 注册表
+# Registry
 # ============================================================================
 
 import pytest
@@ -79,7 +79,7 @@ class _BadSpecNoName:
     token_env = None
     stale_seconds = 1.0
 
-    def parse(self, payload):  # pragma: no cover -- 不会被调用
+    def parse(self, payload):  # pragma: no cover -- never called
         raise AssertionError
 
     def build_reply(self, reply, session_id):  # pragma: no cover
@@ -97,10 +97,10 @@ def test_register_and_get():
 
 
 def test_register_rejects_bad_names():
-    """name 缺失 / 带路径分隔符 / 大写 —— URL 路径不合法，import 期拦住。"""
+    """Missing name / path separators / uppercase -- invalid for a URL path, rejected at import time."""
     reg = ChannelRegistry()
     with pytest.raises(ValueError):
-        reg.register(_BadSpecNoName())  # 无 name 属性
+        reg.register(_BadSpecNoName())  # no name attribute
     bad = FakeChannel()
     bad.name = "a/b"
     with pytest.raises(ValueError):
@@ -111,7 +111,7 @@ def test_register_rejects_duplicate_name():
     reg = ChannelRegistry()
     reg.register(FakeChannel())
     with pytest.raises(ValueError):
-        reg.register(FakeChannel())  # 重名拒绝，防两个文件抢同名
+        reg.register(FakeChannel())  # duplicate rejected: prevents two files racing for the same name
 
 
 def test_register_rejects_non_callable_hooks():
@@ -123,29 +123,29 @@ def test_register_rejects_non_callable_hooks():
 
 
 def test_discover_builtin_channels_skips_framework_files(tmp_path):
-    """AST 发现：只 import 含模块级 registry.register() 的渠道文件；
-    框架文件（base/register/webhooks）即使含 register 字样也不 import。"""
+    """AST discovery: only imports channel files containing a module-level registry.register();
+    framework files (base/register/webhooks) are never imported even if they mention register."""
     (tmp_path / "base.py").write_text("registry.register(FakeChannel())\n", encoding="utf-8")
     (tmp_path / "register.py").write_text("registry = 1\n", encoding="utf-8")
     (tmp_path / "webhooks.py").write_text("registry.register(FakeChannel())\n", encoding="utf-8")
     (tmp_path / "__init__.py").write_text("", encoding="utf-8")
-    # 真渠道：模块级 registry.register(...) 调用
+    # Real channel: module-level registry.register(...) call
     (tmp_path / "good.py").write_text(
         "registry.register(FakeChannel())\n", encoding="utf-8"
     )
-    # 非渠道：无 register 调用
+    # Not a channel: no register call
     (tmp_path / "helper.py").write_text("x = 1\n", encoding="utf-8")
-    # 函数体内 register 不算（AST 只看模块顶层）
+    # register inside a function body does not count (AST only looks at module top level)
     (tmp_path / "nested.py").write_text(
         "def f():\n    registry.register(FakeChannel())\n", encoding="utf-8"
     )
 
     imported = discover_builtin_channels(tmp_path)
-    assert imported == []  # good.py import 会失败（FakeChannel 未定义），warning 跳过
+    assert imported == []  # good.py's import fails (FakeChannel undefined), skipped with a warning
 
 
 def test_discover_imports_real_channel_file(tmp_path):
-    """自包含渠道文件（不依赖外部名字）被成功 import 并注册到指定注册表。"""
+    """A self-contained channel file (no dependency on external names) is imported successfully and registered into the given registry."""
     (tmp_path / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "good.py").write_text(
         "from channel.register import registry\n"
@@ -167,15 +167,15 @@ def test_discover_imports_real_channel_file(tmp_path):
         encoding="utf-8",
     )
     imported = discover_builtin_channels(tmp_path)
-    # 包外文件走 spec_from_file_location，模块名固定为 _channel_ext_<stem>
+    # Files outside a package go through spec_from_file_location; the module name is fixed to _channel_ext_<stem>
     assert imported == ["_channel_ext_good"]
     from channel.register import registry as global_reg
     assert global_reg.is_registered("discovered") is True
-    global_reg._channels.pop("discovered", None)  # 清理全局态
+    global_reg._channels.pop("discovered", None)  # clean up global state
 
 
 # ============================================================================
-# 通用 handler（fake 引擎操作 + FakeChannel / 定制 fake spec）
+# Generic handler (fake engine ops + FakeChannel / custom fake spec)
 # ============================================================================
 
 import time
@@ -188,7 +188,7 @@ from channel.webhooks import build_channel_router
 
 
 class HandlerHarness:
-    """fake 引擎操作 + 单渠道 app，记录调用供断言（对齐闲鱼测试形态）。"""
+    """Fake engine ops + a single-channel app, recording calls for assertions (mirrors the Xianyu test harness shape)."""
 
     def __init__(self, spec=None, pattern_code="demo_pattern", token=None,
                  stale_seconds=300.0):
@@ -234,7 +234,7 @@ class HandlerHarness:
 
 
 def _post(h, json=None, params=None, env=None):
-    """带环境变量隔离的 POST（pattern/token env 用完还原）。"""
+    """POST with env isolation (pattern/token env vars restored afterwards)."""
     import os
     saved = {k: os.environ.get(k) for k in (env or {})}
     os.environ.pop("FAKE_CHANNEL_PATTERN", None)
@@ -258,7 +258,7 @@ def _post(h, json=None, params=None, env=None):
 
 
 def test_handler_success_and_session_prefix():
-    """成功路径：session_id 拼渠道前缀，task_info 透传，reply 契约。"""
+    """Success path: session_id gets the channel prefix, task_info passed through, reply contract."""
     h = HandlerHarness()
     resp = _post(h, env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
     assert resp.status_code == 200, resp.text
@@ -272,7 +272,7 @@ def test_handler_success_and_session_prefix():
 
 
 def test_handler_existing_session_skips_launch():
-    """会话已存在：复用，不 launch。"""
+    """Session exists: reused, no launch."""
     h = HandlerHarness()
     _post(h, env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
     _post(h, json={"user_id": "u1", "text": "第二条"}, env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
@@ -281,7 +281,7 @@ def test_handler_existing_session_skips_launch():
 
 
 def test_handler_no_pattern_503():
-    """会话不存在且 pattern env 未配置：503，提示设置哪个 env。"""
+    """Session missing and pattern env unset: 503, telling which env to set."""
     h = HandlerHarness(pattern_code=None)
     resp = _post(h, env={})
     assert resp.status_code == 503
@@ -306,7 +306,7 @@ def test_handler_run_error_500():
 
 
 def test_handler_stale_message_swallowed():
-    """过期消息：200 + 空 reply，不 launch 不对话（重连重放防护）。"""
+    """Stale message: 200 + empty reply, no launch and no dialogue (reconnect replay protection)."""
     h = HandlerHarness()
     resp = _post(h, json={"user_id": "u1", "text": "hi", "ts": time.time() - 600},
                  env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
@@ -316,7 +316,7 @@ def test_handler_stale_message_swallowed():
 
 
 def test_handler_none_timestamp_bypasses_stale():
-    """timestamp=None：不做过期过滤。"""
+    """timestamp=None: no staleness filtering."""
     h = HandlerHarness()
     resp = _post(h, json={"user_id": "u1", "text": "hi", "ts": None},
                  env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
@@ -325,7 +325,7 @@ def test_handler_none_timestamp_bypasses_stale():
 
 
 def test_handler_fresh_message_passes():
-    """新鲜消息正常处理。"""
+    """Fresh messages are processed normally."""
     h = HandlerHarness()
     resp = _post(h, json={"user_id": "u1", "text": "hi", "ts": time.time()},
                  env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
@@ -334,7 +334,7 @@ def test_handler_fresh_message_passes():
 
 
 def test_handler_token_wrong_403_right_200(monkeypatch):
-    """token_env 配置了非空 env 才启用校验：错 403，对放行。"""
+    """Token check is enabled only when token_env names a non-empty env: wrong token 403, right token passes."""
     monkeypatch.setenv("FAKE_CHANNEL_TOKEN", "s3cret")
     h = HandlerHarness(token="s3cret")
     resp = _post(h, env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
@@ -347,15 +347,15 @@ def test_handler_token_wrong_403_right_200(monkeypatch):
 
 
 def test_handler_token_env_unset_no_check(monkeypatch):
-    """token_env 指了 env 名但 env 未配置：不校验（可选密钥语义）。"""
+    """token_env names an env but the env is unset: no check (optional token semantics)."""
     monkeypatch.delenv("FAKE_CHANNEL_TOKEN", raising=False)
-    h = HandlerHarness(token="s3cret")  # token_env 已指向 FAKE_CHANNEL_TOKEN
+    h = HandlerHarness(token="s3cret")  # token_env already points to FAKE_CHANNEL_TOKEN
     resp = _post(h, env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
     assert resp.status_code == 200
 
 
 def test_handler_payload_invalid_422():
-    """载荷缺必填字段：422（pydantic 自动）。"""
+    """Payload missing required fields: 422 (pydantic automatic)."""
     h = HandlerHarness()
     resp = _post(h, json={"user_id": "u1"}, env={"FAKE_CHANNEL_PATTERN": "demo_pattern"})
     assert resp.status_code == 422

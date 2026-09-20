@@ -146,7 +146,8 @@ class FSMNLG(BaseNLG):
         return self._fill_template(prompt_template, kwargs)
 
     def execute(self, ctx: DialogueContext) -> DialogueContext:
-        # 澄清轮：nlg_result 已由 ClarifyStage 写入，跳过避免重复生成
+        # Clarify turn: nlg_result was already written by ClarifyStage; skip to
+        # avoid generating twice
         if (ctx.metadata.get("clarify") or {}).get("triggered"):
             logger.info("FSMNLG 跳过（澄清轮已生成）: session=%s", ctx.session_id)
             return ctx

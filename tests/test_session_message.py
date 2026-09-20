@@ -1,4 +1,4 @@
-"""SessionMessage —— tool 轨迹 JSON 载荷 + summary role + sink 透传。"""
+"""SessionMessage -- tool-trail JSON payload + summary role + sink pass-through."""
 
 from dialogue.base import (
     DialogueContext,
@@ -9,7 +9,7 @@ from dialogue.base import (
 
 
 # ---------------------------------------------------------------------------
-# 载荷编码/解码
+# Payload encoding/decoding
 # ---------------------------------------------------------------------------
 
 TOOL_CALLS = [{
@@ -28,13 +28,13 @@ def test_encode_decode_roundtrip():
 def test_decode_plain_content_returns_none():
     assert decode_tool_call_content("你好") is None
     assert decode_tool_call_content("") is None
-    assert decode_tool_call_content("[已移交至模块 X]") is None  # 非工具轮文本
+    assert decode_tool_call_content("[已移交至模块 X]") is None  # non-tool-turn text
 
 
 def test_decode_json_without_tool_calls_returns_none():
-    # JSON 但无 tool_calls 键（普通 JSON 回复不误判）
+    # JSON without a tool_calls key (a plain JSON reply is not misdetected)
     assert decode_tool_call_content('{"content": "你好"}') is None
-    # 空列表视为普通文本（loop 只在 tool_calls 非空时编码）
+    # an empty list counts as plain text (the loop only encodes when tool_calls is non-empty)
     assert decode_tool_call_content('{"content": "你好", "tool_calls": []}') is None
 
 
@@ -49,7 +49,7 @@ def test_summary_role_is_valid():
 
 
 def test_to_from_dict_shape_unchanged():
-    """载荷方案下 SessionMessage 序列化保持四字段（轨迹在 content 内）。"""
+    """Under the payload scheme, SessionMessage serialization keeps its four fields (the trail lives inside content)."""
     msg = SessionMessage(role="assistant",
                          content=encode_tool_call_content("", TOOL_CALLS),
                          stage="agent")
@@ -77,13 +77,13 @@ def test_message_sink_failure_does_not_break_dialogue():
         raise RuntimeError("db down")
 
     cxt = DialogueContext(session_id="s1", user_query="q", message_sink=bad_sink)
-    cxt.add_message("user", "你好", stage="chat")  # 不应外抛
+    cxt.add_message("user", "你好", stage="chat")
     assert len(cxt.history) == 1
     assert cxt.history[0].content == "你好"
 
 
 # ---------------------------------------------------------------------------
-# format_history：工具轮 JSON 载荷取内层文本
+# format_history: tool-turn JSON payloads render the inner text
 # ---------------------------------------------------------------------------
 
 def test_format_history_decodes_tool_payload():
@@ -102,8 +102,8 @@ def test_format_history_decodes_tool_payload():
     formatted = cxt.format_history()
     assert "你好" in formatted
     assert "北京晴 22 度" in formatted
-    assert "先查一下天气" in formatted      # 工具轮内层文本可见
-    assert "tool_calls" not in formatted     # 载荷原文不泄漏
+    assert "先查一下天气" in formatted      # tool-turn inner text is visible
+    assert "tool_calls" not in formatted     # the raw payload does not leak
     lines = formatted.split("\n")
-    assert "tool: 晴 22 度" not in lines     # tool 行不进业务模板
-    assert formatted.count("assistant:") == 2  # 内层为空的工具轮不占行
+    assert "tool: 晴 22 度" not in lines     # tool rows stay out of the business template
+    assert formatted.count("assistant:") == 2  # a tool turn with empty inner text takes no line

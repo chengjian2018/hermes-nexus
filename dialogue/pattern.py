@@ -23,16 +23,18 @@ class Pattern:
         self.stages = stages
         self.entry_module_code = entry_module_code
 
-        # agent loop hooks（pattern 级声明，module 层 agent_hooks 可整体替换；
-        # 形态 {点位: [hook,...]}，消费方见 chat/agent_hooks.py）
+        # Agent loop hooks (pattern-level declaration; the module-level
+        # agent_hooks can wholesale-replace it; form {point: [hook,...]},
+        # consumer: chat/agent_hooks.py)
         self.agent_hooks = agent_hooks
 
-        # AGENT messages 一体化构建器（pattern 级声明，module 层
-        # messages_builder 可覆写；签名 (module, cxt, extra_blocks) -> messages，
-        # 含 system 行组装，消费方见 chat/messages.py）
+        # AGENT all-in-one messages builder (pattern-level declaration; the
+        # module-level messages_builder can override it; signature
+        # (module, cxt, extra_blocks) -> messages, including system-row
+        # assembly; consumer: chat/messages.py)
         self.messages_builder = messages_builder
 
-        # 管线槽位三层默认（node > module > pattern 中的 pattern 层）
+        # Pipeline slot three-layer defaults (the pattern layer of node > module > pattern)
         self.generate = generate
         self.pre_recall = pre_recall
         self.query = query
@@ -42,7 +44,8 @@ class Pattern:
         self.module_map = dict()
 
         # ------------------------------------------------------------------
-        # 模块拓扑注册 + 注册期 fail fast（悬空/自环/越权配置，spec §2.4）
+        # Module topology registration + registration-time fail fast
+        # (dangling / self-loop / unauthorized config, spec §2.4)
         # ------------------------------------------------------------------
         self.max_hops = int(kwargs.pop("max_hops", 2))
 
@@ -57,7 +60,7 @@ class Pattern:
                     self.node_map[node.node_code] = node
 
             for module in self.modules:
-                # 1) sub_modules 邻接边校验（transfer 工具 / 借出工具配置）
+                # 1) sub_modules adjacency-edge validation (transfer tools / lent-tool config)
                 for link in module.sub_modules:
                     if link.target not in self.module_map:
                         raise ValueError(
@@ -75,8 +78,9 @@ class Pattern:
                             f"越权借出: {module.module_code} 借出配置无效: "
                             f"{sorted(unauthorized)} 不在 {link.target}.use_tools 中"
                         )
-                # 2) 节点 jump_module 配置校验（跳转目标 fail fast；
-                #    运行期由 chat 层 _detect_jump_after_stage 消费，无邻接图）
+                # 2) Node jump_module config validation (fail fast on jump targets;
+                #    consumed at runtime by the chat layer's _detect_jump_after_stage,
+                #    which consults no adjacency graph)
                 for node in module.module_nodes:
                     jump_target = getattr(node, "jump_module", None)
                     if jump_target:

@@ -1,7 +1,8 @@
-"""会话持久化 API 集成测试 —— launch/chat 落盘、审计端点、重启恢复。
+"""Session persistence API integration tests -- launch/chat persist, audit endpoints, restart restore.
 
-TestClient 不用 with（不触发 startup），store 由 fixture 显式注入
-tmp DB；registry_guard 清空/还原全局会话表防污染。
+TestClient is used without ``with`` (startup not triggered); the store is injected
+into a tmp DB explicitly by fixture; registry_guard clears/restores the global
+session table to prevent pollution.
 """
 
 import pytest
@@ -13,13 +14,13 @@ from chat.store import SessionStore
 
 @pytest.fixture(scope="module")
 def client():
-    import main  # noqa: F401 -- 导入即完成 discover_builtin_tools/patterns
+    import main  # noqa: F401 -- importing it completes discover_builtin_tools/patterns
     return TestClient(main.app)
 
 
 @pytest.fixture()
 def store(tmp_path):
-    """给 main 注入 tmp DB 的 store，用完还原并关闭。"""
+    """Inject a store backed by a tmp DB into main; restore and close afterwards."""
     import main
 
     s = SessionStore(str(tmp_path / "audit.db"))
@@ -32,7 +33,7 @@ def store(tmp_path):
 
 @pytest.fixture()
 def registry_guard():
-    """清空全局会话注册表，用例结束后还原快照（同治理测试）。"""
+    """Clear the global session registry and restore the snapshot after the test (same as the governance tests)."""
     import main
 
     with main._sessions_lock:
@@ -82,7 +83,7 @@ def _use_fake_llm(session_id):
 
 
 def test_launch_chat_persisted(client, store, registry_guard):
-    """launch → chat：sessions 行 + 增量消息落盘（首条 user、末条 assistant）。"""
+    """launch -> chat: sessions row + incremental messages persisted (first row user, last row assistant)."""
     register_fake_provider()
     assert launch(client, "audit-1")["status"] is True
     _use_fake_llm("audit-1")
@@ -101,7 +102,7 @@ def test_launch_chat_persisted(client, store, registry_guard):
 
 
 def test_chat_turn_incremental_append(client, store, registry_guard):
-    """第二轮只追加第二轮消息，history 在 DB 侧连续。"""
+    """The second turn only appends second-turn messages; history stays continuous on the DB side."""
     register_fake_provider()
     launch(client, "audit-2")
     _use_fake_llm("audit-2")
@@ -112,14 +113,14 @@ def test_chat_turn_incremental_append(client, store, registry_guard):
     second_count = len(store.get_messages("audit-2"))
     assert second_count > first_count
     msgs = store.get_messages("audit-2")
-    assert msgs[first_count]["role"] == "user"  # 新一轮从 user 开始
+    assert msgs[first_count]["role"] == "user"  # a new round starts with a user message
 
 
 def test_store_failure_does_not_block(client, store, registry_guard, monkeypatch):
-    """DB 写失败：仅记日志，chat 响应不受影响。
+    """DB write failure: only logged; the chat response is unaffected.
 
-    逐条 write-through 语义下单条 append_message 失败即被 sink 吞掉；
-    轮末 save_snapshot 失败同样不阻断。
+    Under per-message write-through semantics, a failed append_message is swallowed
+    by the sink; a failed end-of-turn save_snapshot likewise does not block.
     """
     register_fake_provider()
     launch(client, "audit-degraded")
@@ -135,7 +136,7 @@ def test_store_failure_does_not_block(client, store, registry_guard, monkeypatch
 
 
 def test_list_sessions_endpoint(client, store, registry_guard):
-    """GET /sessions：默认列表 + pattern_code 过滤 + 分页参数。"""
+    """GET /sessions: default list + pattern_code filter + pagination params."""
     register_fake_provider()
     launch(client, "api-a")
     launch(client, "api-a2")
@@ -146,7 +147,7 @@ def test_list_sessions_endpoint(client, store, registry_guard):
     assert resp.status_code == 200
     assert body["code"] == "0"
     ids = [s["session_id"] for s in body["data"]["sessions"]]
-    assert "api-a" in ids and "api-b" not in ids  # 未注册 pattern 的 launch 被拒
+    assert "api-a" in ids and "api-b" not in ids  # launch with an unregistered pattern was rejected
 
     resp = client.get("/api/v1/sessions", params={"pattern_code": "xianyu_agent", "limit": 1})
     sessions = resp.json()["data"]["sessions"]
@@ -155,7 +156,7 @@ def test_list_sessions_endpoint(client, store, registry_guard):
 
 
 def test_messages_endpoint_and_404(client, store, registry_guard):
-    """GET /sessions/{id}/messages：全程消息；不存在返回 404 信封。"""
+    """GET /sessions/{id}/messages: full-trail messages; a missing session returns a 404 envelope."""
     register_fake_provider()
     launch(client, "api-msg")
     _use_fake_llm("api-msg")
@@ -172,13 +173,13 @@ def test_messages_endpoint_and_404(client, store, registry_guard):
 
     resp = client.get("/api/v1/sessions/no-such/messages")
     body = resp.json()
-    assert resp.status_code == 200  # 业务码在信封里
+    assert resp.status_code == 200  # the business code travels inside the envelope
     assert body["code"] == "404"
     assert body["status"] is False
 
 
 def test_audit_endpoints_degraded_when_no_store(client, registry_guard):
-    """store 未启用时审计端点返回 500 信封（降级可见）。"""
+    """With the store disabled, audit endpoints return a 500 envelope (degradation stays visible)."""
     import main
 
     prev = main.store
@@ -191,7 +192,7 @@ def test_audit_endpoints_degraded_when_no_store(client, registry_guard):
 
 
 def test_launch_persist_failure_degrades(client, store, registry_guard, monkeypatch):
-    """launch 落盘失败：launch 响应不受影响，会话仍在内存可用。"""
+    """launch persist failure: the launch response is unaffected and the session stays usable in memory."""
     import main
 
     def boom(*args, **kwargs):
@@ -204,7 +205,7 @@ def test_launch_persist_failure_degrades(client, store, registry_guard, monkeypa
 
 
 def test_restart_recovery_restores_and_continues(client, store, registry_guard):
-    """模拟重启：清空内存 → _restore_sessions → 会话还原且能继续对话、DB 流水连续。"""
+    """Simulate restart: clear memory -> _restore_sessions -> sessions restored and able to continue the dialogue, DB trail continuous."""
     import main
 
     register_fake_provider()
@@ -213,7 +214,7 @@ def test_restart_recovery_restores_and_continues(client, store, registry_guard):
     chat(client, "rs-1", "你好")
     count_before = len(store.get_messages("rs-1"))
 
-    # 模拟重启：内存清空
+    # Simulate restart: wipe in-memory state
     with main._sessions_lock:
         main.all_sessions.clear()
         main._session_last_active.clear()
@@ -221,12 +222,12 @@ def test_restart_recovery_restores_and_continues(client, store, registry_guard):
     restored = main._restore_sessions()
     assert restored >= 1
     session = main.all_sessions["rs-1"]
-    assert session.pattern is not None  # pattern 从注册中心重新解析
-    assert session.cxt.node_map and session.cxt.module_map  # 管线地图重新注入
-    assert len(session.cxt.history) >= 2  # history 从 DB 还原
-    assert "rs-1" in main._session_last_active  # 活跃时间已换算登记
+    assert session.pattern is not None  # pattern re-resolved from the registry
+    assert session.cxt.node_map and session.cxt.module_map  # pipeline maps re-injected
+    assert len(session.cxt.history) >= 2  # history restored from the DB
+    assert "rs-1" in main._session_last_active  # last-active time converted and registered
 
-    # 恢复后继续对话：新消息接在还原 history 之后，DB 侧流水连续
+    # Continue the dialogue after restore: new messages append after the restored history, keeping the DB trail continuous
     session.cxt.metadata["llm_override"] = fake_llm_config()
     body = chat(client, "rs-1", "我想买车")
     assert body["status"] is True, body["message"]
@@ -238,7 +239,7 @@ def test_restart_recovery_restores_and_continues(client, store, registry_guard):
 
 def test_mid_turn_failure_user_row_already_persisted(
         client, store, registry_guard, monkeypatch):
-    """write-through 时序：轮中 LLM 崩溃，user 行已即时落库（不依赖轮末）。"""
+    """Write-through timing: the LLM crashes mid-turn, yet the user row is already persisted (not dependent on end of turn)."""
     register_fake_provider()
     launch(client, "crash-mid")
     _use_fake_llm("crash-mid")
@@ -250,17 +251,17 @@ def test_mid_turn_failure_user_row_already_persisted(
 
     monkeypatch.setattr(FakeProvider, "_chat_completion_impl", llm_boom)
     body = chat(client, "crash-mid", "你好")
-    # chat 层吞异常转错误文本（HTTP 200 + status True），异常路径同样落库
+    # The chat layer swallows the exception and turns it into error text (HTTP 200 + status True); the failure path is persisted too
     assert body["status"] is True
     assert "对话处理异常" in body["data"]["response"]
 
     msgs = store.get_messages("crash-mid")
     roles = [m["role"] for m in msgs]
-    assert roles == ["user", "assistant"]  # user 经 sink 即时落；错误回复由 end_turn 落
+    assert roles == ["user", "assistant"]  # user persisted immediately via the sink; the error reply is written by end_turn
 
 
 def test_restore_skips_unregistered_pattern(client, store, registry_guard):
-    """pattern_code 未注册的会话跳过恢复（不抛、不进内存）。"""
+    """Sessions with an unregistered pattern_code are skipped during restore (no raise, never loaded into memory)."""
     import main
     from chat.session import Session
 
@@ -271,7 +272,7 @@ def test_restore_skips_unregistered_pattern(client, store, registry_guard):
 
 
 def test_init_store_degrades_on_failure(monkeypatch):
-    """配置/DB 初始化失败 → store=None 降级，不抛异常。"""
+    """Config/DB init failure -> store=None degradation, no exception raised."""
     import main
 
     prev = main.store
@@ -286,18 +287,18 @@ def test_init_store_degrades_on_failure(monkeypatch):
 
 
 def test_restore_failure_does_not_block(client, store, registry_guard, monkeypatch):
-    """恢复过程异常不阻断：store 级抛错返回 0，单会话抛错跳过，均不向外传播。"""
+    """Restore exceptions do not block: a store-level error returns 0 and a per-session error skips that session; neither propagates outward."""
     import main
     from chat.session import Session
 
-    # 1) store 级失败（如 DB 读异常）：不抛，返回 0
+    # 1) store-level failure (e.g. a DB read error): no raise, returns 0
     def store_boom(ttl):
         raise RuntimeError("db read down")
 
     monkeypatch.setattr(store, "load_active_sessions", store_boom)
     assert main._restore_sessions() == 0
 
-    # 2) 单会话失败（如行数据损坏触发的任意异常）：跳过该会话，不阻断整体
+    # 2) single-session failure (e.g. any exception triggered by a corrupted row): skip that session, do not block the rest
     good = Session(session_id="rs-good", pattern_code="xianyu_agent")
     bad = Session(session_id="rs-bad", pattern_code="xianyu_agent")
 

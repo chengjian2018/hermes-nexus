@@ -1,0 +1,80 @@
+{
+  "code": "restaurant_booking",
+  "name": "餐厅订位代聊",
+  "description": "与餐厅对端协商订位：人数/时间/包间偏好收集与确认，满座时弹性协商，达成后收尾",
+  "version": "2026.9.20.1",
+  "recommended_form": "mixed",
+  "form_rationale": "订位主流程字段化强（人数/时间/座位偏好可穷举），用 FSM 收集与确认；满座改时间、降级大厅等开放性协商交给 Agent 收尾模块",
+  "counterpart_hint": {
+    "role_prompt": "你是一家热门餐厅的值班经理。店里生意很好，周五周六晚市基本满座。你可以提供：改时间段、大厅卡座、等位。你礼貌但坚持店内规定：包间有最低消费、卡位只保留15分钟、不接受口头砍价。回复口语化、简短。",
+    "scripted_replies": [
+      "您好，请问几位、打算哪天来用餐？",
+      "周五晚上包间已经满了，大厅卡座可以吗？",
+      "卡座可以帮您留到18:45，过时就会释放哦。",
+      "好的，帮您登记：周五18:45，大厅卡座4位，到店报手机尾号就可以。"
+    ]
+  },
+  "entry_module_code": "collect",
+  "max_hops": 2,
+  "modules": [
+    {
+      "module_code": "collect",
+      "type": "fsm",
+      "module_name": "订位信息收集",
+      "module_description": "按节点收集用餐人数、时间、座位偏好，并向对端复述确认",
+      "module_todo_description": "收集 party_size/datetime/room_pref，全部就绪后复述确认",
+      "sub_modules": ["close"],
+      "nodes": [
+        {
+          "node_code": "ask_basic",
+          "node_name": "基本信息",
+          "node_description": "询问用餐人数与时间",
+          "node_todo_description": "收集 party_size、datetime 两个槽位",
+          "node_slots": {
+            "party_size": "用餐人数，整数",
+            "datetime": "用餐时间，如 周五晚上7点"
+          },
+          "sub_nodes": ["ask_pref", "confirm"],
+          "answer_examples": ["您好，想订本周五晚上7点，4个人用餐。"]
+        },
+        {
+          "node_code": "ask_pref",
+          "node_name": "座位偏好",
+          "node_description": "确认包间或大厅偏好",
+          "node_todo_description": "收集 room_pref 槽位",
+          "node_slots": {
+            "room_pref": "包间|大厅卡座|不限"
+          },
+          "sub_nodes": ["confirm"],
+          "answer_examples": ["有包间的话优先包间，没有大厅也可以。"]
+        },
+        {
+          "node_code": "confirm",
+          "node_name": "订位确认",
+          "node_description": "向对端完整复述订位信息并等待确认",
+          "node_todo_description": "复述日期/时间/人数/座位，等待对端确认",
+          "sub_nodes": ["ask_basic", "confirm_done"],
+          "answer_examples": ["跟您确认一下：周五18:45，4位，大厅卡座，对吗？"]
+        },
+        {
+          "node_code": "confirm_done",
+          "node_name": "确认完成",
+          "node_description": "对端已确认订位，收尾",
+          "node_todo_description": "记录确认结论",
+          "sub_nodes": [],
+          "is_end": true
+        }
+      ]
+    },
+    {
+      "module_code": "close",
+      "type": "agent",
+      "module_name": "弹性谈判收尾",
+      "module_description": "满座/改时间/降级座位等开放性协商，达成一致后复述确认",
+      "module_todo_description": "围绕用户底线灵活协商，达成即复述确认",
+      "base_prompt": "你是替用户向餐厅订位的代聊助手，本次任务信息见会话信息块。协商原则：优先保住用餐时间；其次可接受大厅/卡座替代包间；不接受超过用户预算的最低消费。与对端达成一致后，必须在回复中完整复述：日期、时间、人数、座位类型、到店要求，作为确认性结论。无法达成时明确说明缺口（时间/座位/预算哪一项不可让）。",
+      "answer_examples": ["那帮我们改到周五18:45的大厅卡座吧，4位，麻烦您了。"],
+      "is_end": true
+    }
+  ]
+}

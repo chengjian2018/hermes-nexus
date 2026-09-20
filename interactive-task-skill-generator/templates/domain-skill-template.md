@@ -38,8 +38,9 @@ metadata:
   Phase 5 后置判断 → 汇报（成功确认项 / 未满足项 / 替代方案 / 用户决定）
 ```
 
-服务端约定：`http://127.0.0.1:8000`（hermes-nexus 默认后台运行；
-未运行时脚本自动拉起，路径 `{{HERMES_NEXUS_PATH}}`）。
+服务端约定：hermes-nexus 对话引擎（承载话术模版执行与任务会话）**默认已在
+后台运行**（`http://127.0.0.1:8000`）；脚本每次调用前自动探活，环境异常时
+自行处理——本 skill 不涉及、也不需要知道服务的部署位置。
 
 ## When to Use
 
@@ -82,8 +83,7 @@ metadata:
 一次完成）：
 
 ```bash
-python scripts/trigger_task.py ensure --template references/template.json \
-    --hermes-path {{HERMES_NEXUS_PATH}}
+python scripts/trigger_task.py ensure --template references/template.json
 ```
 
 行为（无需干预，失败才介入）：
@@ -114,8 +114,7 @@ python scripts/trigger_task.py run \
     --template references/template.json \
     --kickoff "<Phase 1 组织的首条消息>" \
     --task-info-json '<Phase 1 的 task_info JSON>' \
-    --counterpart-mode llm \
-    --hermes-path {{HERMES_NEXUS_PATH}}
+    --counterpart-mode llm
 ```
 
 参数速查：
@@ -209,4 +208,3 @@ python scripts/trigger_task.py run \
 | `{{KICKOFF_TEMPLATE}}` | G1/G3 | kickoff 首条消息的组织模板 |
 | `{{POST_JUDGMENT_RULES}}` | G1 用途(3) | 成败判定规则 |
 | `{{DOMAIN_KNOWLEDGE}}` / `{{DEFAULTS}}` / `{{PITFALLS}}` | G1 | 领域知识/默认值/陷阱 |
-| `{{HERMES_NEXUS_PATH}}` | 环境 | hermes-nexus 路径，默认 `~/py_projects/hermes-nexus` |

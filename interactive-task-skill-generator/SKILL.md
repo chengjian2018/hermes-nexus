@@ -56,7 +56,8 @@ hermes-nexus 服务默认跑在 `http://127.0.0.1:8000`；`trigger_task.py` 会�
 
 ## Prerequisites
 
-- hermes-nexus 服务（`~/py_projects/hermes-nexus`，可被 trigger_task.py 自动拉起）
+- hermes-nexus 对话引擎服务（承载话术模版执行与任务会话，默认已在后台运行；
+  `trigger_task.py` 每次调用前自动探活，调用方无需关心部署位置）
 - `chinese-poi-search`（仅当领域需要 POI/商家检索做对象解析时）
 - `hermes-agent-skill-authoring` 规范（skill 文件格式）
 - 本 skill 目录内的资产：
@@ -207,8 +208,8 @@ hermes-nexus 服务默认跑在 `http://127.0.0.1:8000`；`trigger_task.py` 会�
 1. **填充骨架**：读取 `templates/domain-skill-template.md`，替换全部
    `{{变量}}`（变量对照表见骨架文末）。
 2. **复制客户端脚本**：`templates/trigger_task.py` **原样复制**到子 skill
-   的 `scripts/trigger_task.py`（不改内容；路径差异用脚本的
-   `--hermes-path`/`--base-url` 参数解决，不进脚本内容）。
+   的 `scripts/trigger_task.py`（不改内容；环境差异用脚本自带参数解决，
+   不进脚本内容）。
 3. **落模版副本**：G3 的模版 JSON 写入子 skill
    `references/template.json`——这是 hash 对齐的**本地基准**（本地为准：
    与服务端不一致时覆盖重注册）。

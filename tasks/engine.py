@@ -221,9 +221,10 @@ class TaskEngine:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            snapshot = (record.status, record.finish_reason, record.turn_count,
-                        record.result, record.error, record.session_id,
-                        record.pattern_code)
+            if record is not None:
+                snapshot = (record.status, record.finish_reason, record.turn_count,
+                            record.result, record.error, record.session_id,
+                            record.pattern_code)
         if record is None:
             task_store = self._deps.get_task_store()
             if task_store is None:

@@ -15,6 +15,9 @@ from chat.session import Session
 from chat.store import SessionStore
 from dialogue.register import registry as pattern_registry
 from dialogue.register import discover_builtin_patterns
+from tasks.api import build_tasks_router
+from tasks.engine import EngineDeps, TaskEngine
+from tasks.store import TaskStore
 from templates.api import build_templates_router
 from templates.store import TemplateStore, replay_templates
 from tools.register import registry as tool_registry
@@ -53,6 +56,10 @@ store: Optional[SessionStore] = None
 # Dialogue-template store (data/templates/*.json + startup replay into the
 # pattern registry); initialized at startup, replaceable in tests.
 template_store: Optional[TemplateStore] = None
+
+# Autonomous-task persistence (tasks table in the same SQLite file, separate
+# connection); initialized at startup, replaceable in tests.
+task_store: Optional[TaskStore] = None
 
 
 def _touch_session(session_id: str) -> None:
@@ -155,6 +162,23 @@ def _init_template_store() -> None:
         template_store = None
 
 
+def _init_task_store() -> None:
+    """Initialize the task store (same SQLite file as sessions, separate
+    WAL connection) and fail interrupted tasks from the previous process."""
+    global task_store
+    try:
+        db_path = get_session_db_path()
+    except Exception:
+        logger.exception("读取 session_db_path 配置失败，任务持久化禁用")
+        return
+    try:
+        task_store = TaskStore(db_path)
+        task_engine.recover_interrupted()
+    except Exception:
+        logger.exception("初始化任务存储失败，任务持久化降级")
+        task_store = None
+
+
 def _restore_sessions() -> int:
     """Restore non-expired sessions from the store back into memory (restart
     restore).
@@ -230,9 +254,10 @@ def _cross_check_pattern_llm(config_path: str = "") -> None:
 
 @app.on_event("startup")
 def _startup_persistence() -> None:
-    """Service startup: session store + template replay + session restore + knowledge store + pattern_llm cross-check."""
+    """Service startup: session store + template replay + task store (recovery) + session restore + knowledge store + pattern_llm cross-check."""
     _init_store()
     _init_template_store()  # 模版重放须先于会话恢复（恢复时按 code 从 registry 重解析 pattern）
+    _init_task_store()      # 遗留任务改判 failed（后台线程随进程消亡）
     try:
         _restore_sessions()
     except Exception:
@@ -243,7 +268,7 @@ def _startup_persistence() -> None:
 
 @app.on_event("shutdown")
 def _shutdown_stores() -> None:
-    """Service shutdown: release the knowledge-base / session-store connections."""
+    """Service shutdown: release the knowledge-base / session-store / task-store connections."""
     global store
     try:
         from database.knowledge_store import close_knowledge_store
@@ -256,6 +281,12 @@ def _shutdown_stores() -> None:
         except Exception:
             logger.exception("关闭会话存储失败")
         store = None
+    if task_store is not None:
+        try:
+            task_store.close()
+        except Exception:
+            logger.exception("关闭任务存储失败")
+        task_store = None
 
 
 # # check aleady registried patterns and tools
@@ -538,6 +569,17 @@ for _router in build_channel_routers(EngineOps(
 
 # ----Template registry wiring (dialogue-template register/validate/query)----
 app.include_router(build_templates_router(lambda: template_store))
+
+# ----Task engine wiring (autonomous pattern×counterpart runs)----
+# deps 里的 getter 在请求期解析（测试可直接替换 main.store / main.task_store）
+task_engine = TaskEngine(EngineDeps(
+    launch_session=_launch_session_core,
+    touch_session=_touch_session_threadsafe,
+    all_sessions=all_sessions,
+    get_session_store=lambda: store,
+    get_task_store=lambda: task_store,
+))
+app.include_router(build_tasks_router(lambda: task_engine))
 
 
 # func3 (read-only audit)

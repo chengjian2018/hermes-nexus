@@ -26,9 +26,16 @@
 |---|---|
 | `xianyu_agent` | 闲鱼卖家客服（复刻 xianyu-auto-reply：本地关键词意图检测，议价轮数控制） |
 | `customer_agent` | 店铺客服（Customer-Agent 迁移：知识检索工具组 + 会话信息块 + 人工交接） |
+| `install_booking` | 安装预约外呼（手绘 FSM 转写：可约时间守卫 + 档期推荐改写 + 关键词卡控澄清） |
+| `repair_booking` | 维修预约外呼（安装场景变体：确认后继续采集故障信息；守卫机制复用 `dialogue/booking_stages.py`） |
 
 另有**话术模版**形态的 pattern（如 `food_booking` 餐厅订位代聊）：不在内置代码里，由领域子 skill
 （`interactive-task-food/`）首次使用时经 `POST /api/v1/templates` 懒注册，落盘 `data/templates/`。
+
+两个外呼预约 pattern（`install_booking` / `repair_booking`，自 nexus-kit 迁移）经
+`POST /api/v1/launch` 注入 task_info 驱动：订单事实（`product_name` / `address` /
+`user_name` / `order_id`）+ 师傅档期表 `available_slots`（`"YYYY-MM-DD HH:MM-HH:MM"` 列表）。
+档期表可省略——可约守卫随其有无自动启停（无表时模型选择直通）。
 
 ## 快速开始
 
@@ -113,6 +120,8 @@ dialogue/                对话引擎内核
   pattern.py module.py node.py   Pattern→Module→Node 三级结构
   stage_slots.py         管线槽位：四槽位 + 三层解析
   xianyu_agent_route.py customer_agent_route.py    业务 pattern（应用层）
+  install_booking_route.py repair_booking_route.py  外呼预约 pattern（安装/维修）
+  booking_stages.py booking_slots.py  外呼预约共享机制（守卫统一阶段 + 关键词澄清 + 槽位算术）
 stages/                  管线 stage 实现（框架扩展层）
   nlu/ nlg/              两阶段形态 stage（意图识别 / 回复生成）
   unified.py             统一阶段（单次调用 NLU+NLG）
@@ -139,6 +148,9 @@ tests/                   全离线测试（fake_provider 打桩 LLM）
 一切新能力走注册机制，框架代码零改动：
 
 - **新对话流程** → `dialogue/<name>_route.py`，模块级 `registry.register()`
+- **外呼预约类新场景**（安装/维修之外的变体）→ 继承 `dialogue/booking_stages.py` 的守卫基类
+  （`BookingGuardUnifiedNLU` / `ScheduleRecommendNLG` / `KeywordClarifyStage`），route 文件只绑
+  节点码、FAQ 表与话术，机制不在场景间复制
 - **新领域话术模版**（数据形态，不写代码）→ `POST /api/v1/templates` 注册声明式 pattern JSON（蓝本见 `interactive-task-skill-generator/references/pattern-template-example.json`，完整参考实现见 `interactive-task-food/`）
 - **新工具** → `tools/<name>_tool.py`，AST 自动发现
 - **新 LLM Provider** → `llm/<name>_provider.py`

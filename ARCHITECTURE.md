@@ -41,6 +41,7 @@ flowchart TB
     subgraph 应用层
         xianyuagent["dialogue/xianyu_agent_route.py<br/>(闲鱼客服 pattern<br/>复刻 xianyu-auto-reply)"]
         caagent["dialogue/customer_agent_route.py<br/>(Customer-Agent 整装迁移 pattern<br/>迁移版 MessageBuilder:<br/>会话信息块+目录预取 untrusted 行)"]
+        booking["dialogue/install_booking_route.py<br/>repair_booking_route.py<br/>(外呼预约 pattern：安装/维修<br/>守卫机制复用 booking_stages.py)"]
         tools["tools/calculator_tool.py<br/>weather_tool.py<br/>knowledge_tool.py"]
         clarify["stages/clarify/<br/>偏题澄清"]
     end
@@ -69,6 +70,7 @@ flowchart TB
     kbs -.-> tools
     caagent -.-> preg
     xianyuagent -.-> preg
+    booking -.-> preg
     tools -.-> treg
 ```
 
@@ -159,6 +161,18 @@ flowchart TB
   metadata 回标 intent 计数，达上限切拒绝节点走 FixedNLG 固定话术，零 LLM）。
   ROUTE 轮末回 root 与原实现"每条消息独立检测"同构；议价设置经
   `ctx.metadata["bargain_settings"]` 注入（账号级配置入口）
+- **外呼预约 pattern（install_booking / repair_booking）**：安装/维修预约外呼 FSM
+  （`dialogue/install_booking_route.py` `dialogue/repair_booking_route.py`，自
+  nexus-kit 迁移）。单 FSMModule + `generate=守卫统一阶段`（`dialogue/booking_stages.py`
+  的 `BookingGuardUnifiedNLU`，FSMUnifiedNLU 子类）+ `enable_clarify` + 模块级
+  `base_nlu_prompt` 外呼模板 + pattern 级 `query=TimeAugQueryRewriter`。守卫三点
+  确定性后处理（零额外 LLM）：可约守卫（task_info.available_slots 内包含才放行，
+  否则改道档期推荐）、推荐改写（每次进推荐节点按真实排班重写回复——必须住在
+  统一阶段里，节点级 nlg 因轮末转移时序晚一轮）、联系时间分流（两周内有效时间
+  直接收尾，否则改道默认三天）。两个场景 route 只重绑节点码与话术（子类），机制
+  不复制；澄清为关键词卡控 FAQ 表（`KeywordClarifyStage`，ClarifyStage 子类的
+  召回层替换）。时间增强的**两周标注窗口**（`augmentation/time_augment.py`，
+  过去时间与超两周未来不标注）是联系时间分流的裁定契约——"有无标注"即分支决策
 - **话术模版（declarative dialogue template，`templates/`）**：声明式
   pattern JSON 的动态注册链路——validator（collect-all 三层：schema/结构/引用，
   全量 errors+warnings 带 JSON 路径；镜像 Pattern 构造 fail-fast 检查并前移
@@ -212,6 +226,9 @@ flowchart TB
 ## 什么代码放哪
 
 - 新业务对话流程 → `dialogue/<name>_route.py`，模块级 `registry.register()`
+- 外呼预约类新场景（安装/维修之外的第三个变体）→ 继承 `dialogue/booking_stages.py`
+  的守卫基类（`BookingGuardUnifiedNLU` / `ScheduleRecommendNLG` /
+  `KeywordClarifyStage`），route 文件只绑节点码、FAQ 表与话术——机制不在场景间复制
 - 新领域话术模版（数据形态 pattern，无需写代码）→ `POST /api/v1/templates`
   注册（或子 skill 的 `trigger_task.py ensure` 懒注册），落
   `data/templates/{code}.json` 启动重放；只有需要 messages_builder /

@@ -1,0 +1,112 @@
+{
+  "code": "food_booking",
+  "name": "餐厅订位代聊",
+  "description": "与餐厅对端确认订位：时段可用性/排队、包间与低消、特殊需求（儿童/宠物/停车/生日），复述确认收尾；无法满足时弹性协商",
+  "version": "2026.9.20.1",
+  "recommended_form": "mixed",
+  "form_rationale": "订位确认项结构化强（时段/座位/低消/设施可逐项核对），用 FSM 逐节点收集并复述确认；满座改时间、降级座位、等位权衡等开放性协商交给 Agent 收尾模块",
+  "counterpart_hint": {
+    "role_prompt": "你是一家热门餐厅接订位电话的服务员。周五周六晚市基本满座；可以提供改时间段、大厅卡座、等位。礼貌但坚持店内规定：包间有最低消费、卡位只保留15分钟、宠物仅户外座位、不接受口头砍价。回复口语化、简短，像真实接电话。",
+    "scripted_replies": [
+      "您好，请问几位、哪天什么时间用餐？",
+      "周五晚上包间已经满了，大厅卡座可以吗？没有低消。",
+      "卡座可以帮您留到18:45，过时就会释放哦。带小朋友的话我们有儿童座椅。",
+      "宠物的话只能坐户外座位，您看可以吗？",
+      "好的，跟您确认：周五18:45，4位，大厅卡座带儿童座椅，户外位给宠物，到店报手机尾号。"
+    ]
+  },
+  "entry_module_code": "booking",
+  "max_hops": 2,
+  "modules": [
+    {
+      "module_code": "booking",
+      "type": "fsm",
+      "module_name": "订位逐项确认",
+      "module_description": "按节点与餐厅对端确认时段可用性、座位方案与低消、特殊需求，最后完整复述并确认",
+      "module_todo_description": "逐项核对：时段/排队 → 座位/低消 → 特殊需求 → 复述确认",
+      "sub_modules": ["negotiate"],
+      "nodes": [
+        {
+          "node_code": "ask_availability",
+          "node_name": "时段可用性",
+          "node_description": "告知用餐人数与时间，确认该时段是否有位、当前排队情况",
+          "node_todo_description": "收集 queue_minutes、seat_available 槽位；对端说满座则考虑转移 negotiate 或改时间",
+          "node_slots": {
+            "queue_minutes": "对端告知的排队/等位时长，整数分钟",
+            "seat_available": "目标时段是否有位，yes|no|wait"
+          },
+          "sub_nodes": ["ask_room", "ask_special", "confirm"],
+          "answer_examples": [
+            "您好，想订本周五晚上7点，4位用餐，请问还有位子吗？",
+            "现在过去的话大概要等多久？"
+          ]
+        },
+        {
+          "node_code": "ask_room",
+          "node_name": "座位与低消",
+          "node_description": "确认座位方案（包间/大厅/卡座/户外）及包间最低消费",
+          "node_todo_description": "收集 room_type、minimum_spend 槽位；用户要包间时必须问清低消金额",
+          "node_slots": {
+            "room_type": "对端给出的座位方案：包间|大厅|大厅卡座|户外",
+            "minimum_spend": "包间最低消费金额，元；无则记0"
+          },
+          "sub_nodes": ["ask_special", "confirm", "ask_availability"],
+          "answer_examples": [
+            "如果有包间的话优先包间，请问包间有最低消费吗？",
+            "大厅卡座也可以，卡座有低消或时间限制吗？"
+          ]
+        },
+        {
+          "node_code": "ask_special",
+          "node_name": "特殊需求确认",
+          "node_description": "按用户需求清单逐项确认：儿童设施、宠物政策、停车登记、生日服务",
+          "node_todo_description": "只问用户在任务信息里声明过的需求项；用户没提的不问",
+          "node_slots": {
+            "children_facilities": "儿童设施：儿童座椅|儿童餐|无",
+            "pet_policy": "宠物政策：可入内|仅户外|不可",
+            "parking_info": "停车信息：可登记车牌|有车位|无车位|无停车场",
+            "birthday_service": "生日服务：蛋糕|布置|无"
+          },
+          "sub_nodes": ["confirm"],
+          "answer_examples": [
+            "我们带一个3岁的小朋友，有儿童座椅吗？",
+            "需要帮您登记车牌吗？京A12345。"
+          ]
+        },
+        {
+          "node_code": "confirm",
+          "node_name": "复述确认",
+          "node_description": "完整复述日期/时间/人数/座位/特殊安排，等待对端确认",
+          "node_todo_description": "收集 final_confirmation 槽位；对端修正任何一项则回到对应节点重问",
+          "node_slots": {
+            "final_confirmation": "对端对复述内容的确认：confirmed|modified"
+          },
+          "sub_nodes": ["confirm_done", "ask_availability"],
+          "answer_examples": [
+            "跟您确认一下：周五18:45，4位，大厅卡座带儿童座椅，到店报手机尾号，对吗？"
+          ]
+        },
+        {
+          "node_code": "confirm_done",
+          "node_name": "确认完成",
+          "node_description": "对端已确认订位，收尾致谢",
+          "node_todo_description": "记录确认结论",
+          "sub_nodes": [],
+          "is_end": true
+        }
+      ]
+    },
+    {
+      "module_code": "negotiate",
+      "type": "agent",
+      "module_name": "弹性协商",
+      "module_description": "满座、无包间、低消超预算、排队超容忍等无法直接满足时的开放性协商",
+      "module_todo_description": "围绕用户底线协商替代方案，达成即复述确认，无法达成就明确缺口",
+      "base_prompt": "你是替用户向餐厅订位的代聊助手，本次任务的全部需求见会话信息块。协商原则按优先级：保住用餐时间 > 保住人数同行（含宠物/儿童需求）> 座位形式可让 > 预算底线不可破（用户给的 max_cost/低消上限）。可用手段：改时间段、接受大厅/卡座替代包间、接受排队等待（不超过 max_queue_minutes）、询问其他门店。与对端达成一致后，必须在回复中完整复述：日期、时间、人数、座位类型、特殊安排、到店要求，作为确认性结论。无法达成时明确说明缺口（时间/座位/低消/宠物政策哪一项不可让）并礼貌结束，不要虚构承诺。",
+      "answer_examples": [
+        "那帮我们改到周五18:45的大厅卡座吧，4位带儿童座椅，麻烦您了。"
+      ],
+      "is_end": true
+    }
+  ]
+}

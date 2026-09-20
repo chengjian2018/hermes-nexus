@@ -317,9 +317,10 @@ ensure`（探活+自动拉起+hash 对齐懒注册）→ `run`（触发+轮询�
 
 - **模版蓝本**：`references/pattern-template-example.json`（餐厅订位，
   mixed 形态，validate 0 error 0 warning）
-- `interactive-task-food` / `interactive-task-car-sales`：**旧架构参考**
-  （话术在 skill 侧、Phase 4 直连同步 chat），仅作历史对照，不要模仿其
-  API 调用方式
+- **新架构参考实现**：`interactive-task-food`（v3.0.0，薄客户端五段流程 +
+  `food_booking` 模版 + trigger_task.py，G4 生成的子 skill 长这样就对了）
+- `interactive-task-car-sales`：**旧架构产物**（话术在 skill 侧、Phase 4
+  直连同步 chat），仅作历史对照，不要模仿其 API 调用方式
 
 ## Common Pitfalls
 

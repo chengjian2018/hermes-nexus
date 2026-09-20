@@ -436,6 +436,17 @@ def _run_chat_turn_core(
     return response_text, None
 
 
+# func0 (liveness probe: for clients/skills to detect the service before use)
+@app.get("/api/v1/health")
+def health() -> Dict[str, Any]:
+    return {
+        "code": "0",
+        "message": "ok",
+        "status": True,
+        "data": {"status": "ok", "patterns": pattern_registry.list_codes()},
+    }
+
+
 # func1
 @app.post("/api/v1/launch")
 def launch_dialogue(dialogue_request: DialogueRequest) -> DialogueResponse:
@@ -536,3 +547,10 @@ def get_session_messages(session_id: str) -> SessionMessagesResponse:
     return SessionMessagesResponse(
         code="0", status=True, message="success", data={"messages": messages}
     )
+
+
+# ----Entrypoint (binds 127.0.0.1 only: local mock service, no auth by design)----
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)

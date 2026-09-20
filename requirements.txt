@@ -3,6 +3,7 @@
 #
 # --- 运行时 ---
 fastapi==0.141.1
+uvicorn==0.53.0
 pyyaml==6.0.3
 requests==2.34.2
 jieba==0.42.1

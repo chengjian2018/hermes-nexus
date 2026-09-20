@@ -264,9 +264,17 @@ class _UnifiedBaseNLU(BaseNLU):
             reply = str(parsed.get("reply", "") or "").strip() or self.fallback_reply
             if unified_meta.get("invalid_next_node") == "clarify":
                 reply = self.fallback_reply
+            # slots must land as a dict: a hallucinated string/array would break
+            # the downstream filled_slots merge and clarify's slots.get — degrade
+            # to empty slots and keep the turn alive (observed via unified_meta)
+            slots = parsed.get("slots") or {}
+            if not isinstance(slots, dict):
+                logger.warning("统一阶段 slots 非 dict（按空槽处理）: %r", slots)
+                unified_meta["invalid_slots_type"] = type(slots).__name__
+                slots = {}
             ctx.nlu_result = {
                 "next_node": next_node,
-                "slots": parsed.get("slots", {}) or {},
+                "slots": slots,
             }
             ctx.nlg_result = {"content": reply}
 

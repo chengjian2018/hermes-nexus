@@ -239,3 +239,35 @@ def test_engine_recover_interrupted(engine, task_store):
     task_store.create_task("legacy", "s-legacy", "tmp_old")
     assert engine.recover_interrupted() == ["legacy"]
     assert task_store.get_task("legacy")["status"] == "failed"
+
+
+def test_counterpart_crash_lands_failed_terminal(engine, task_store, monkeypatch):
+    """对端 next_reply 抛异常（如 llm 对端 provider 重试耗尽）：兜底转 failed 终态，
+    不再让守护线程带着 running 状态死掉（回归守卫）。"""
+    register_fake_provider()
+    register_agent_pattern("tmp_task_crash", entry_is_end=False)
+
+    from tasks.engine import ScriptedCounterpart
+
+    def _boom(self, agent_reply):
+        raise RuntimeError("对端 LLM 故障: provider failed after 3 attempts")
+
+    monkeypatch.setattr(ScriptedCounterpart, "next_reply", _boom)
+
+    task_id, _, err = engine.start(
+        pattern_code="tmp_task_crash",
+        counterpart={"mode": "scripted", "script": ["好的"]},
+        max_turns=5,
+        kickoff="开始",
+        llm_override=fake_llm_config(),
+    )
+    assert err is None
+
+    view = wait_terminal(engine, task_id)
+    assert view["status"] == "failed"
+    assert view["finish_reason"] == "error"
+    assert "对端 LLM 故障" in view["error"]
+    # 内存终态与落库终态一致（轮询方能感知）
+    row = task_store.get_task(task_id)
+    assert row["status"] == "failed"
+    assert row["finish_reason"] == "error"

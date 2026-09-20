@@ -194,6 +194,24 @@ def run_agent(
             target = transfer_call["function"]["name"][len(TRANSFER_TOOL_PREFIX):]
             transfer_reason = _transfer_reason(transfer_call)
 
+            # force_close close-out must not hand off again (transfer tools are
+            # not injected, but the model can still hallucinate the name from
+            # history/prompt): backfill an error and keep looping for a direct
+            # answer — otherwise the turn would end with an empty reply
+            if force_close:
+                logger.warning(
+                    "[transfer] force_close 收尾轮拒绝转移 %s，要求直接回应用户",
+                    target,
+                )
+                err = json.dumps(
+                    {"error": "当前为收尾轮，不允许再移交，请直接回应用户"},
+                    ensure_ascii=False)
+                _dispatch_tool_calls(
+                    cxt, module, messages, content, tool_calls,
+                    hooks, allowed_names, lent_by, round_idx,
+                    transfer_error=err)
+                continue
+
             # Target missing (no sub_modules edge / hallucinated call): backfill
             # an error and keep looping so the LLM can pick another path (a real
             # OpenAI-compatible API requires an answer for every tool_call_id)

@@ -94,9 +94,18 @@ class BaseNLU(PipelineStage, ABC):
             lines = [l for l in lines if not l.strip().startswith("```")]
             raw = "\n".join(lines).strip()
 
+        # A bare JSON scalar/array ("123", "null", "[1,2]") parses fine but is
+        # not the expected object shape — treated as a parse failure so the
+        # retry/fallback path still applies (instead of a TypeError at the
+        # caller's `"raw" not in result` / `.get()`).
+        def _as_dict(value: Any) -> Optional[Dict[str, Any]]:
+            return value if isinstance(value, dict) else None
+
         # Try direct parse
         try:
-            return json.loads(raw)
+            parsed = _as_dict(json.loads(raw))
+            if parsed is not None:
+                return parsed
         except json.JSONDecodeError:
             pass
 
@@ -105,7 +114,9 @@ class BaseNLU(PipelineStage, ABC):
         end = raw.rfind("}")
         if start != -1 and end != -1 and end > start:
             try:
-                return json.loads(raw[start:end + 1])
+                parsed = _as_dict(json.loads(raw[start:end + 1]))
+                if parsed is not None:
+                    return parsed
             except json.JSONDecodeError:
                 pass
 

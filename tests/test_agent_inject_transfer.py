@@ -274,6 +274,32 @@ def test_force_close_no_transfer_tools_and_prompt():
     assert "勿再移交" in first["messages"][0]["content"]
 
 
+def test_force_close_hallucinated_transfer_backfills_and_answers():
+    """force_close 收尾轮幻觉出 transfer 调用（目标合法存在也一样）：错误回填继续
+    loop 直到直接回答——不再产生空回复/跳转事件。"""
+    from chat.loop import run_agent
+    s = _mk_session()
+    s.cxt.add_message("user", "帮我处理售后", stage="chat")
+    provider = ScriptedProvider([
+        # 模型不理会收尾提示，幻觉出转移调用（after_sales 是合法目标）
+        {"content": "正在转接", "tool_calls": [{"id": "c1", "function": {
+            "name": "transfer_to_after_sales", "arguments": "{}"}}]},
+        # 错误回填后第二轮直接回答
+        {"content": "好的，我直接为您处理。", "tool_calls": []},
+    ])
+    with patch("chat.loop.build_provider", return_value=provider):
+        result = run_agent(s, s.cxt.module_map["reception"],
+                           s.cxt.metadata["llm_override"], force_close=True)
+    assert result.reply == "好的，我直接为您处理。"
+    # 不写跳转事件、不改变模块位置
+    assert not [a for a in s.cxt.actions if isinstance(a, ModuleJumpEvent)]
+    assert s.cxt.current_module_code == "reception"
+    # 转移调用拿到错误回填的 tool 行
+    tool_msgs = [m for m in s.cxt.history if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert "不允许再移交" in tool_msgs[0].content
+
+
 def test_chat_hop_consumes_transfer_event_same_turn():
     """The transfer event is consumed by the chat layer's hop loop: the target module answers in the same turn."""
     from chat.chat import chat as chat_fn

@@ -299,52 +299,65 @@ class TaskEngine:
         query = kickoff
         status, finish_reason, error = "done", None, None
 
-        while True:
-            if self._deps.all_sessions.get(session.session_id) is None:
-                status, finish_reason, error = "failed", "error", \
-                    "会话已从内存逐出（TTL/上限），任务中止"
-                break
-            try:
-                result = chat_turn(
-                    query=query,
-                    session_id=session.session_id,
-                    all_sessions=self._deps.all_sessions,
-                    store=session_store,
-                )
-            except Exception as e:
-                logger.exception("任务轮次异常: task=%s", record.task_id)
-                status, finish_reason, error = "failed", "error", str(e)
-                break
-
-            record.turn_count += 1
-            try:
-                self._deps.touch_session(session.session_id)  # 防 TTL 误逐出
-            except Exception:
-                pass
-            if session_store is not None:
+        # 整个循环体兜底：对端 LLM 失败 / 终态检测等任何未预期异常都不允许
+        # 让守护线程带着 running 状态死掉——必须落到一个终态，轮询方才能感知
+        try:
+            while True:
+                if self._deps.all_sessions.get(session.session_id) is None:
+                    status, finish_reason, error = "failed", "error", \
+                        "会话已从内存逐出（TTL/上限），任务中止"
+                    break
                 try:
-                    session_store.save_snapshot(session)
+                    result = chat_turn(
+                        query=query,
+                        session_id=session.session_id,
+                        all_sessions=self._deps.all_sessions,
+                        store=session_store,
+                    )
+                except Exception as e:
+                    logger.exception("任务轮次异常: task=%s", record.task_id)
+                    status, finish_reason, error = "failed", "error", str(e)
+                    break
+
+                record.turn_count += 1
+                try:
+                    self._deps.touch_session(session.session_id)  # 防 TTL 误逐出
                 except Exception:
-                    logger.exception("轮末快照失败: session=%s", session.session_id)
+                    pass
+                if session_store is not None:
+                    try:
+                        session_store.save_snapshot(session)
+                    except Exception:
+                        logger.exception("轮末快照失败: session=%s", session.session_id)
 
-            end_reason = self._detect_end(session, result)
-            if end_reason:
-                finish_reason = end_reason
-                break
-            if record.turn_count >= max_turns:
-                finish_reason = "max_turns"
-                break
-            if time.monotonic() >= deadline:
-                finish_reason = "timeout"
-                break
-            next_query = counterpart.next_reply(result.text)
-            if next_query is None:
-                finish_reason = "counterpart_exhausted"
-                break
-            query = next_query
+                end_reason = self._detect_end(session, result)
+                if end_reason:
+                    finish_reason = end_reason
+                    break
+                if record.turn_count >= max_turns:
+                    finish_reason = "max_turns"
+                    break
+                if time.monotonic() >= deadline:
+                    finish_reason = "timeout"
+                    break
+                next_query = counterpart.next_reply(result.text)
+                if next_query is None:
+                    finish_reason = "counterpart_exhausted"
+                    break
+                query = next_query
+        except Exception as e:
+            logger.exception("任务执行异常（兜底终态）: task=%s", record.task_id)
+            status, finish_reason, error = "failed", "error", str(e)
 
-        result_snapshot = self._build_result(
-            session, finish_reason, record.turn_count, error)
+        try:
+            result_snapshot = self._build_result(
+                session, finish_reason, record.turn_count, error)
+        except Exception:
+            logger.exception("结果快照构建失败: task=%s", record.task_id)
+            result_snapshot = {
+                "finish_reason": finish_reason, "turn_count": record.turn_count,
+                "error": error, "messages": [],
+            }
         self._update(record, status=status, finish_reason=finish_reason,
                      result=result_snapshot, error=error)
         if task_store is not None:

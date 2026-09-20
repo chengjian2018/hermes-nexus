@@ -335,6 +335,41 @@ def test_parse_failure_exhausted_falls_back(pattern, sessions):
     assert session.cxt.current_node_code == "u_route_root"
 
 
+def test_parse_bare_json_scalar_falls_back():
+    """裸 JSON 标量/数组（合法 JSON 但非对象）→ 走 raw 兜底，不再抛
+    TypeError 打穿降级路径。"""
+    from stages.nlu.nlu import BaseNLU
+
+    for raw in ("123", "null", "true", "[1, 2]", '"hello"'):
+        result = BaseNLU._parse_nlu_result(raw)
+        assert "raw" in result, f"{raw!r} 应走解析失败兜底"
+        assert result["next_node"] == "" and result["slots"] == {}
+
+    # 正常对象照旧解析
+    assert BaseNLU._parse_nlu_result(
+        '{"next_node": "a", "slots": {"x": 1}}') == {"next_node": "a", "slots": {"x": 1}}
+
+
+def test_unified_non_dict_slots_degrades_to_empty(monkeypatch):
+    """统一阶段 slots 幻觉为字符串：降级为空槽 + 观测标记，轮次存活不抛异常。"""
+    from dialogue.base import DialogueContext
+    from stages.unified import FSMUnifiedNLU
+
+    stage = FSMUnifiedNLU()
+    monkeypatch.setattr(stage, "prompt_build", lambda cxt: "prompt")
+    monkeypatch.setattr(
+        stage, "_call_llm",
+        lambda prompt, cfg=None:
+            '{"reply": "好的", "next_node": "", "slots": "周一,7点"}')
+
+    ctx = DialogueContext(session_id="s-slots", user_query="周一7点")
+    stage._execute_unified(ctx)
+
+    assert ctx.nlu_result == {"next_node": "", "slots": {}}
+    assert ctx.nlg_result == {"content": "好的"}
+    assert ctx.metadata["unified"]["invalid_slots_type"] == "str"
+
+
 def test_pass_through_nlg_keeps_existing_result():
     """PassThroughNLG: keeps an existing generated reply as-is; when missing, sets it empty, warns, and does not crash."""
     from dialogue.base import DialogueContext

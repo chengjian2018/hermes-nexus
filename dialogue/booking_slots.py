@@ -88,12 +88,17 @@ def parse_available_slots(task_info: dict) -> List[Slot]:
     return slots
 
 
-def _build(d1, c1, d2, c2, today: str) -> Slot:
+def _build(d1, c1, d2, c2, today: str) -> Optional[Slot]:
     """Assemble an annotation's groups into a (start, end, display) window.
 
     Missing pieces follow the render grammar's semantics: no clock on a
     date-only annotation means the whole day; a lone clock anchors to
     ``today``; no end means point time (start == end) or whole day.
+
+    Returns None when the shape is valid but the date/clock does not exist
+    (e.g. a hallucinated "(2026-09-31 15:00)" — regex checks shape only);
+    callers skip such annotations, matching parse_available_slots' tolerance
+    for a bad schedule.
     """
     start_day = d1 or today
     start_clock = c1 or "00:00"
@@ -106,8 +111,14 @@ def _build(d1, c1, d2, c2, today: str) -> Slot:
     else:
         end_day, end_clock = start_day, "23:59"  # whole day
 
-    start = datetime.strptime(f"{start_day} {start_clock}", "%Y-%m-%d %H:%M")
-    end = datetime.strptime(f"{end_day} {end_clock}", "%Y-%m-%d %H:%M")
+    try:
+        start = datetime.strptime(f"{start_day} {start_clock}", "%Y-%m-%d %H:%M")
+        end = datetime.strptime(f"{end_day} {end_clock}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        logger.warning(
+            "[booking] 标注日期/时刻不存在（跳过该标注）: %s %s ~ %s %s",
+            start_day, start_clock, end_day, end_clock)
+        return None
 
     if c1 and start == end:  # point time
         display = f"{start_day} {start_clock}"
@@ -141,17 +152,29 @@ def extract_requested_time(rewritten_query: str,
 
     for d1, c1, d2, c2 in found:
         if d1 and c1:
-            return _build(d1, c1, d2, c2, today)
+            slot = _build(d1, c1, d2, c2, today)
+            if slot is not None:
+                return slot
     for i, (d1, c1, _d2, _c2) in enumerate(found):
         if d1 and not c1:
             for dd1, cc1, _dd2, _cc2 in found[i + 1:]:
                 if cc1 and not dd1:
-                    return _build(d1, cc1, None, None, today)
+                    slot = _build(d1, cc1, None, None, today)
+                    if slot is not None:
+                        return slot
     for d1, c1, d2, c2 in found:
         if d1:
-            return _build(d1, None, d2, c2, today)
-    d1, c1, d2, c2 = found[0]
-    return _build(None, c1, d2, c2, today)
+            slot = _build(d1, None, d2, c2, today)
+            if slot is not None:
+                return slot
+    # Clock-only annotations anchor to today; a broken date+clock annotation
+    # must NOT degrade into "today at that clock" (the date was hallucinated)
+    for d1, c1, d2, c2 in found:
+        if not d1 and c1:
+            slot = _build(None, c1, d2, c2, today)
+            if slot is not None:
+                return slot
+    return None
 
 
 def match_slot(requested: Slot, slots: List[Slot]) -> Optional[str]:

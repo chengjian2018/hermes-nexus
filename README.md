@@ -14,7 +14,7 @@
 - **偏题澄清（clarify）**：可按模块开关，检测用户偏题时主动澄清而非硬答
 - **统一阶段（unified）**：单次 LLM 调用 + structured output 一次产出回复/转移/槽位，每轮 2 次调用降为 1 次
 - **四级注册中心**：pattern / tool / llm provider / channel，模块级 `registry.register()` + AST 自动发现，无需改框架代码即可接入
-- **话术模版动态注册**：声明式 pattern JSON（FSM/Agent/混排）经 collect-all 三层校验（全量错误带 JSON 路径）编译注册进现有 registry，同 code 覆盖、落盘重放、无需重启；配 SIG 元 skill（`interactive-task-skill-generator/`）实现"调研领域→生成模版→生成子 skill"链路
+- **话术模版动态注册**：声明式 pattern JSON（FSM/Agent/混排）经 collect-all 三层校验（全量错误带 JSON 路径）编译注册进现有 registry，同 code 覆盖、落盘重放、无需重启；配套元 skill（`interactive-task-skill-generator/`）实现"调研领域→生成模版→生成子 skill"链路，`interactive-task-food/` 为新架构参考实现
 - **自主任务引擎**：`POST /api/v1/tasks` 触发 pattern 与 mock 对端（scripted 脚本 / llm 角色扮演）多轮交互直到终态，fire-and-forget + 轮询取结果快照
 - **多渠道接入（Channel）**：声明式 `ChannelSpec` + 通用 webhook handler，内置闲鱼（xianyu）适配
 - **会话治理与持久化**：内存治理（TTL 过期 + LRU 逐出）+ SQLite 审计流水（write-through，支持重启恢复）
@@ -25,6 +25,10 @@
 | Pattern | 说明 |
 |---|---|
 | `xianyu_agent` | 闲鱼卖家客服（复刻 xianyu-auto-reply：本地关键词意图检测，议价轮数控制） |
+| `customer_agent` | 店铺客服（Customer-Agent 迁移：知识检索工具组 + 会话信息块 + 人工交接） |
+
+另有**话术模版**形态的 pattern（如 `food_booking` 餐厅订位代聊）：不在内置代码里，由领域子 skill
+（`interactive-task-food/`）首次使用时经 `POST /api/v1/templates` 懒注册，落盘 `data/templates/`。
 
 ## 快速开始
 
@@ -123,6 +127,8 @@ augmentation/            输入增强（时间增强等）
 config/                  配置加载 + local_config.yaml（gitignored）
 database/                存储定义（SQLite 知识库 knowledge_store，scope 隔离）
 interactive-task-skill-generator/   元 skill：调研领域→生成话术模版→生成子 skill（skill 侧资料，不参与服务运行）
+interactive-task-food/              领域子 skill v3（新架构参考实现）：需求收集→POI 筛选→懒注册 food_booking 模版→触发轮询→后置判断
+chinese-poi-search/                 高德 POI 检索工具 skill（food 的对象解析 resolver，非 Python 服务代码）
 tests/                   全离线测试（fake_provider 打桩 LLM）
 ```
 
@@ -133,7 +139,7 @@ tests/                   全离线测试（fake_provider 打桩 LLM）
 一切新能力走注册机制，框架代码零改动：
 
 - **新对话流程** → `dialogue/<name>_route.py`，模块级 `registry.register()`
-- **新领域话术模版**（数据形态，不写代码）→ `POST /api/v1/templates` 注册声明式 pattern JSON（蓝本见 `interactive-task-skill-generator/references/pattern-template-example.json`）
+- **新领域话术模版**（数据形态，不写代码）→ `POST /api/v1/templates` 注册声明式 pattern JSON（蓝本见 `interactive-task-skill-generator/references/pattern-template-example.json`，完整参考实现见 `interactive-task-food/`）
 - **新工具** → `tools/<name>_tool.py`，AST 自动发现
 - **新 LLM Provider** → `llm/<name>_provider.py`
 - **新消息渠道** → `channel/<name>.py`，实现 `ChannelSpec` 并注册

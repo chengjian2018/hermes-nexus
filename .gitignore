@@ -133,6 +133,7 @@ models-dev-upstream/
 .cursor/
 .gemini/
 .zed/
+.zcode/
 .mcp.json
 opencode.json
 config/mcporter.json

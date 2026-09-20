@@ -1,19 +1,20 @@
-"""管线槽位（pre_recall/query/post_recall/generate）与三层延迟解析测试。
+"""Pipeline slots (pre_recall/query/post_recall/generate) and three-layer lazy-resolution tests.
 
-核心契约（stage_slots.py 设计单一事实源的直接对应）：
-- 三层优先级 node > module > pattern；generate 双形态（single / dict 恰含 nlu+nlg）
-- 校验失败整层降级（全部槽位统一）；三层全空 → 召回/改写 no-op、generate builtin
-- generate 展开为惰性子部件：nlu/nlg 在各自执行时刻独立三层解析
-  （ROUTE 下 nlg 在菜单节点命中——时机修复的核心断言）
-- 槽位直接 execute 必须 fail fast
+Core contracts (direct counterpart of the stage_slots.py design as the single source of truth):
+- Three-layer priority node > module > pattern; generate dual form (single / dict with exactly nlu+nlg)
+- Validation failure degrades the whole layer (uniform across slots); all three layers empty →
+  recall/rewrite no-op, generate builtin
+- generate expands into lazy sub-parts: nlu/nlg each independently resolve three layers at their
+  execution moment (under ROUTE, nlg resolves at the menu node — the core timing-fix assertion)
+- Calling execute on a slot directly must fail fast
 """
 
 import pytest
 
-from src.dialogue.base import DialogueContext
-from src.dialogue.module import FSMModule, ModuleType, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.stage_slots import (
+from dialogue.base import DialogueContext
+from dialogue.module import FSMModule, ModuleType, RouteModule
+from dialogue.node import BaseNode
+from dialogue.stage_slots import (
     GenerateSlot,
     PostRecallSlot,
     PreRecallSlot,
@@ -25,7 +26,7 @@ from src.dialogue.stage_slots import (
 
 
 class _Marker:
-    """鸭子类型标记 stage：记录执行时的 (节点, 名字)。"""
+    """Duck-typed marker stage: records the (node, name) at execution time."""
 
     def __init__(self, name):
         self.stage_name = name
@@ -35,7 +36,7 @@ class _Marker:
         return ctx
 
 
-ran = []  # _Marker 全类共享执行记录（每个用例先清空）
+ran = []  # Execution log shared by the whole _Marker class (cleared around each case)
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +78,7 @@ def _ctx(node_code="n1", node=None, module_code="m1"):
 
 
 def _pattern(generate=None, query=None):
-    from src.dialogue.pattern import Pattern
+    from dialogue.pattern import Pattern
     return Pattern(code="p1", name="t", description="t",
                    entry_module_code="m1",
                    modules=[_fsm_module()],
@@ -101,7 +102,7 @@ def test_normalize_generate_forms():
     nlu, nlg, single = _Marker("nlu"), _Marker("nlg"), _Marker("single")
     assert normalize_generate({"nlu": nlu, "nlg": nlg}) == ("dict", nlu, nlg)
     assert normalize_generate(single) == ("single", single, None)
-    # 非法：缺键 / 多键 / 值非法 / 类型错误
+    # Invalid: missing key / extra key / invalid value / wrong type
     assert normalize_generate({"nlu": nlu}) is None
     assert normalize_generate({"nlg": nlg}) is None
     assert normalize_generate({"nlu": nlu, "nlg": nlg, "extra": 1}) is None
@@ -111,14 +112,12 @@ def test_normalize_generate_forms():
 
 
 # ============================================================================
-# 召回/改写槽位：三层解析 + 降级 + no-op
+# Recall/rewrite slots: three-layer resolution + degrade + no-op
 # ============================================================================
 
 def test_query_slot_three_layers_and_noop():
     ctx = _ctx()
-    # 三层全空 → no-op
     assert resolve_stage(QuerySlot(), ctx, _fsm_module(), None) == []
-    # module 层命中
     out = resolve_stage(QuerySlot(), ctx,
                         _fsm_module(query=_Marker("mod_query")), None)
     assert [s.stage_name for s in out] == ["mod_query"]
@@ -130,17 +129,17 @@ def test_query_slot_node_over_module_and_lazy_resolution():
     ctx = _ctx(node_code="n1", node=n2)
 
     out = resolve_stage(QuerySlot(), ctx, module, None)
-    out[0].execute(ctx)  # n1 无配置 → module 层
+    out[0].execute(ctx)
     assert ran == [("n1", "mod_query")]
 
-    ctx.current_node_code = "n2"  # 换节点后重新解析 → node 层命中
+    ctx.current_node_code = "n2"  # after switching nodes, resolution re-runs → node layer hits
     out = resolve_stage(QuerySlot(), ctx, module, None)
     out[0].execute(ctx)
     assert ran[-1] == ("n2", "n2_query")
 
 
 def test_query_slot_invalid_layers_degrade_to_noop():
-    """node/module 层全非法 → 警告 + no-op（不抛异常）。"""
+    """node/module layers all invalid → warning + no-op (no exception raised)."""
     ctx = _ctx()
     ctx.node_map["n1"] = BaseNode(node_code="n1", node_name="节点一",
                                   query="bad")
@@ -157,11 +156,11 @@ def test_recall_slots_share_same_semantics():
 
 
 # ============================================================================
-# GenerateSlot：结构展开 + 子部件三层解析 + 降级 + builtin
+# GenerateSlot: structural expansion + per-part three-layer resolution + degrade + builtin
 # ============================================================================
 
 def test_generate_expansion_shapes_by_stage_name():
-    """展开结构：FSM 默认 / FSM+clarify / ROUTE。"""
+    """Expansion shapes: FSM default / FSM+clarify / ROUTE."""
     class _Clarify:
         stage_name = "my_clarify"
         def execute(self, ctx):
@@ -178,11 +177,13 @@ def test_generate_expansion_shapes_by_stage_name():
     route = _route_module()
     ctx = _ctx(module_code="r1")
     names = [s.stage_name for s in resolve_stage(GenerateSlot(), ctx, route, None)]
-    assert names == ["generate_nlu_part", "route_advance", "generate_nlg_part"]
+    # ROUTE and FSM default to the same shape: menu-node advance/jump detection is done by the
+    # chat layer after the nlu part
+    assert names == ["generate_nlu_part", "generate_nlg_part"]
 
 
 def test_generate_parts_execute_dict_from_node_layer():
-    """dict 形态：nlu/nlg 部件各自执行节点层配置。"""
+    """dict form: the nlu/nlg parts each execute the node-layer config."""
     gen = {"nlu": _Marker("node_nlu"), "nlg": _Marker("node_nlg")}
     ctx = _ctx()
     ctx.node_map["n1"] = BaseNode(node_code="n1", node_name="节点一",
@@ -196,7 +197,7 @@ def test_generate_parts_execute_dict_from_node_layer():
 
 
 def test_generate_parts_single_stage_runs_once():
-    """single 形态：nlu 部件执行该 stage，nlg 部件 no-op。"""
+    """single form: the nlu part executes the stage, the nlg part is a no-op."""
     ctx = _ctx()
     module = _fsm_module(generate=_Marker("unified"))
 
@@ -207,7 +208,7 @@ def test_generate_parts_single_stage_runs_once():
 
 
 def test_generate_invalid_node_layer_degrades_to_module():
-    """node 层 dict 缺 nlg（非法）→ 整层降级 module 层。"""
+    """node-layer dict missing nlg (invalid) → the whole layer degrades to the module layer."""
     ctx = _ctx()
     ctx.node_map["n1"] = BaseNode(node_code="n1", node_name="节点一",
                                   generate={"nlu": _Marker("broken")})
@@ -220,14 +221,14 @@ def test_generate_invalid_node_layer_degrades_to_module():
 
 
 def test_generate_all_layers_empty_falls_to_builtin():
-    from src.dialogue.nlu import FSMNLU
-    from src.dialogue.nlg import FSMNLG
-    # builtin 真实 stage 会走 LLM——这里只验证类装配，不打桩执行：
+    from stages.nlu import FSMNLU
+    from stages.nlg import FSMNLG
+    # builtin real stages would call the LLM — here we only verify class assembly, no stubbed execution:
     names = [type(p).__name__ for p in
              resolve_stage(GenerateSlot(), _ctx(module_code="r1"),
                            _route_module(), None)]
-    assert names == ["_GenerateNLUPart", "_RouteNodeAdvance", "_GenerateNLGPart"]
-    # FSM builtin 冒烟：nlu part 解析出 FSMNLU（monkeypatch 其 execute 免 LLM）
+    assert names == ["_GenerateNLUPart", "_GenerateNLGPart"]
+    # FSM builtin smoke: the nlu part resolves FSMNLU (monkeypatch its execute to avoid the LLM)
     orig = FSMNLU.execute
     FSMNLU.execute = lambda self, ctx: ran.append(("builtin", "fsm_nlu")) or ctx
     orig_nlg = FSMNLG.execute
@@ -243,9 +244,9 @@ def test_generate_all_layers_empty_falls_to_builtin():
 
 
 def test_generate_builtin_route_executes_route_stages():
-    """ROUTE builtin 冒烟：三层全空时执行 RouteNLU/RouteNLG（打桩免 LLM）。"""
-    from src.dialogue.nlu import RouteNLU
-    from src.dialogue.nlg import RouteNLG
+    """ROUTE builtin smoke: with all three layers empty, RouteNLU/RouteNLG execute (stubbed, without LLM)."""
+    from stages.nlu import RouteNLU
+    from stages.nlg import RouteNLG
     orig_nlu = RouteNLU.execute
     orig_nlg = RouteNLG.execute
     RouteNLU.execute = lambda self, ctx: ran.append(("builtin", "route_nlu")) or ctx
@@ -265,7 +266,7 @@ def test_generate_builtin_route_executes_route_stages():
 
 
 def test_generate_single_same_stage_at_root_and_menu_runs_once():
-    """single 守卫（同对象）：root 与菜单层解析到同一 single stage → 只执行一次。"""
+    """single-form guard (same object): root and menu layers resolve to the same single stage → executes only once."""
     unified = _Marker("shared_unified")
     ctx = _ctx(node_code="root")
     ctx.node_map["root"] = BaseNode(node_code="root", node_name="根",
@@ -282,8 +283,9 @@ def test_generate_single_same_stage_at_root_and_menu_runs_once():
 
 
 def test_generate_single_menu_stage_skipped_until_next_turn():
-    """single 恒由 nlu 部件执行一次：root 层 dict 的 nlu 在 nlu 部件执行后
-    advance 切菜单，菜单层是 single → nlg 部件 no-op（菜单版下轮生效）。"""
+    """single is always executed once by the nlu part: after the root-layer dict's nlu runs in
+    the nlu part, the chat layer detects the menu switch (manually simulated here); the menu
+    layer is a single → the nlg part is a no-op (the menu version takes effect next turn)."""
     ctx = _ctx(node_code="root", module_code="r1")
     ctx.node_map["root"] = BaseNode(
         node_code="root", node_name="根",
@@ -295,14 +297,16 @@ def test_generate_single_menu_stage_skipped_until_next_turn():
     ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
     module.module_nodes = [ctx.node_map["root"], ctx.node_map["menu_a"]]
 
-    for part in resolve_stage(GenerateSlot(), ctx, module, None):
-        part.execute(ctx)
+    parts = resolve_stage(GenerateSlot(), ctx, module, None)
+    parts[0].execute(ctx)
+    ctx.current_node_code = "menu_a"  # simulate the chat layer's jump detection advancing to the menu node
+    parts[1].execute(ctx)
 
-    # root dict nlu 在 nlu 部件执行；菜单 single 当轮不执行（root_nlg 也不执行，
-    # nlg 部件重新解析到的是菜单层 single → no-op）
+    # the root dict nlu runs in the nlu part; the menu single does not run this turn (root_nlg
+    # does not either — the nlg part re-resolves to the menu-layer single → no-op)
     assert ran == [("root", "root_nlu")]
     assert ctx.current_node_code == "menu_a"
-    # 下轮：nlu 部件在菜单节点解析 → 菜单 single 生效
+    # Next turn: the nlu part resolves at the menu node → the menu single takes effect
     ctx.nlu_result = {}
     for part in resolve_stage(GenerateSlot(), ctx, module, None):
         part.execute(ctx)
@@ -318,11 +322,12 @@ def test_generate_pattern_layer_used_when_node_module_unset():
 
 
 # ============================================================================
-# ROUTE 时机修复（核心）：nlg 部件在节点切换后解析
+# ROUTE timing fix (core): the nlg part resolves after the node switch
 # ============================================================================
 
 def test_route_menu_node_nlg_resolves_after_advance():
-    """ROUTE：root 执行 nlu，advance 切菜单后 nlg 部件按菜单节点层解析。"""
+    """ROUTE: root executes the nlu part; after the chat layer detects the menu switch (manually
+    simulated here), the nlg part resolves at the menu-node layer (core timing-fix assertion)."""
     ctx = _ctx(node_code="root", module_code="r1")
     ctx.node_map["root"] = BaseNode(
         node_code="root", node_name="根",
@@ -331,21 +336,23 @@ def test_route_menu_node_nlg_resolves_after_advance():
         node_code="menu_a", node_name="菜单A",
         generate={"nlu": _Marker("menu_nlu"), "nlg": _Marker("menu_nlg")})
     ctx.module_map = {"r1": _route_module()}
-    # advance 需要 nlu_result 指向合法菜单节点
+    # Detection requires nlu_result to point at a valid menu node
     ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
     ctx.module_map["r1"].module_nodes = [
         ctx.node_map["root"], ctx.node_map["menu_a"]]
 
-    for stage in resolve_stage(GenerateSlot(), ctx, ctx.module_map["r1"], None):
-        stage.execute(ctx)
+    parts = resolve_stage(GenerateSlot(), ctx, ctx.module_map["r1"], None)
+    parts[0].execute(ctx)
+    ctx.current_node_code = "menu_a"  # simulate the chat layer's jump detection advancing to the menu node
+    parts[1].execute(ctx)
 
-    # nlu 来自 root 层；advance 已切节点；nlg 来自 menu_a 层（时机修复）
+    # nlu came from the root layer; the node has switched; nlg comes from the menu_a layer (timing fix)
     assert ran == [("root", "root_nlu"), ("menu_a", "menu_nlg")]
     assert ctx.current_node_code == "menu_a"
 
 
 # ============================================================================
-# 非槽位原样放行 + 槽位 fail fast
+# Non-slot passthrough + slot fail fast
 # ============================================================================
 
 def test_non_slot_stage_passthrough():
@@ -360,11 +367,11 @@ def test_slot_direct_execute_raises():
 
 
 # ============================================================================
-# 数据层属性：node / module / pattern 三层四槽位
+# Data-layer attributes: node / module / pattern, three layers, four slots
 # ============================================================================
 
 def test_data_layer_slot_attributes():
-    from src.dialogue.pattern import Pattern
+    from dialogue.pattern import Pattern
 
     gen = {"nlu": _Marker("nlu"), "nlg": _Marker("nlg")}
     node = BaseNode(node_code="n1", generate=gen, query=_Marker("q"))
@@ -383,13 +390,13 @@ def test_data_layer_slot_attributes():
 
 
 # ============================================================================
-# e2e：经 chat() 的默认骨架与 pattern.stages 骨架
+# e2e: default skeleton and pattern.stages skeleton via chat()
 # ============================================================================
 
 from unittest.mock import patch
 
-from src.chat.session import Session
-from src.dialogue.pattern import Pattern
+from chat.session import Session
+from dialogue.pattern import Pattern
 
 
 def _launch(pattern, sessions, sid="s1"):
@@ -397,19 +404,18 @@ def _launch(pattern, sessions, sid="s1"):
     session.pattern = pattern
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
-    session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
     session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions[sid] = session
     return session
 
 
 def _chat(sessions, sid, query):
-    from src.chat.chat import chat as chat_fn
+    from chat.chat import chat as chat_fn
     return chat_fn(query=query, session_id=sid, all_sessions=sessions)
 
 
 def test_fsm_node_level_generate_via_default_skeleton():
-    """默认骨架下 node 级 generate dict 生效（FSM）。"""
+    """Node-level generate dict takes effect under the default skeleton (FSM)."""
     n1 = BaseNode(node_code="f1", node_name="节点一",
                   generate={"nlu": _Marker("f1_nlu"), "nlg": _Marker("f1_nlg")})
     m = FSMModule(module_code="m1", module_name="m1", module_description="d",
@@ -418,21 +424,57 @@ def test_fsm_node_level_generate_via_default_skeleton():
                       entry_module_code="m1", modules=[m])
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         _chat(sessions, "s1", "你好")
 
     assert ran == [("f1", "f1_nlu"), ("f1", "f1_nlg")]
 
 
 def test_route_menu_node_generate_nlg_same_turn_e2e():
-    """ROUTE e2e：菜单节点级 nlg 在 advance 切换后当轮生效（时机修复）。
+    """ROUTE e2e: the menu-node-level nlg takes effect in the same turn after jump detection
+    switches the node (timing fix).
 
-    旧实现 stages 在 root 时刻构建，菜单节点 nlg 永不生效（ran 为空）。
+    The menu has no jump_module → detection only advances the node without jumping modules;
+    the nlg part resolves at the menu layer.
     """
     class _SelectingNLU(_Marker):
-        """root 层 nlu：记录执行并写出指向菜单节点的 nlu_result
-        （advance 按 next_node 切节点，与 test_llm_refresh._StubNLU 同构）。"""
+        """Root-layer nlu: records execution and writes an nlu_result pointing at the menu node
+        (the chat layer advances nodes by next_node; isomorphic to test_llm_refresh._StubNLU)."""
 
+        def execute(self, ctx):
+            super().execute(ctx)
+            ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
+            return ctx
+
+    menu = BaseNode(node_code="menu_a", node_name="菜单A",
+                    generate={"nlu": _Marker("menu_nlu"),
+                              "nlg": _Marker("menu_nlg")})
+    root = BaseNode(node_code="root", node_name="根",
+                    generate={"nlu": _SelectingNLU("root_nlu"),
+                              "nlg": _Marker("root_nlg")},
+                    sub_nodes=["menu_a"])
+    route = RouteModule(module_code="r1", module_name="r",
+                        module_description="d", module_todo_description="t",
+                        sub_modules=[], module_nodes=[root, menu])
+    pattern = Pattern(code="pr", name="t", description="t",
+                      entry_module_code="r1", modules=[route])
+    sessions = {}
+    _launch(pattern, sessions)
+    with patch("chat.loop.build_provider"):
+        _chat(sessions, "s1", "选A")
+
+    # root turn: nlu uses the root layer; after detection switches to menu_a, nlg uses the menu
+    # layer (the timing-fix point)
+    assert ran == [("root", "root_nlu"), ("menu_a", "menu_nlg")]
+    # No jump_module → no module jump; reset back to root at end of turn
+    assert sessions["s1"].cxt.current_module_code == "r1"
+
+
+def test_route_menu_jump_module_silent_dispatch_e2e():
+    """ROUTE e2e: the menu node configures jump_module → detection interrupts the remaining
+    stages (source module goes silent, nlg does not execute); the chat-layer hop consumes the
+    jump and the target module continues in the same turn."""
+    class _SelectingNLU(_Marker):
         def execute(self, ctx):
             super().execute(ctx)
             ctx.nlu_result = {"next_node": "menu_a", "slots": {}}
@@ -457,17 +499,17 @@ def test_route_menu_node_generate_nlg_same_turn_e2e():
                       entry_module_code="r1", modules=[route, fsm])
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
-        _chat(sessions, "s1", "选A")
+    with patch("chat.loop.build_provider"):
+        reply = _chat(sessions, "s1", "选A")
 
-    # root 轮：nlu 用 root 层、advance 切 menu_a 后 nlg 用 menu 层（本轮修复点）
-    # 随后静默分发 → m1 同轮重入：f1 的 nlu/nlg
-    assert ran == [("root", "root_nlu"), ("menu_a", "menu_nlg"),
-                   ("f1", "f1_nlu"), ("f1", "f1_nlg")]
+    # After root nlu, menu_a.jump_module=m1 is detected → interrupt (root_nlg/menu_nlg do not run)
+    # m1 continues in the same turn: f1's nlu/nlg
+    assert ran == [("root", "root_nlu"), ("f1", "f1_nlu"), ("f1", "f1_nlg")]
+    assert sessions["s1"].cxt.current_module_code == "m1"
 
 
 def test_pattern_stages_verbatim_and_mixed_slots():
-    """pattern.stages 具体 stage 原样执行；GenerateSlot 仍三层解析（node 级命中）。"""
+    """Concrete pattern.stages stages run verbatim; GenerateSlot still resolves three layers (node-level hit)."""
     class _Fixed:
         def __init__(self, name):
             self.stage_name = name
@@ -487,7 +529,7 @@ def test_pattern_stages_verbatim_and_mixed_slots():
     pattern.stages = [_Fixed("pre"), GenerateSlot()]
     sessions = {}
     _launch(pattern, sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         reply = _chat(sessions, "s1", "你好")
 
     assert ran == [("f1", "pre"), ("f1", "node_gen")]

@@ -1,11 +1,11 @@
-"""R1-R4 注入刷新：逐轮按当前位置解析 + override 优先（spec §4）。"""
+"""R1-R4 injection refresh: per-turn resolution by current position + override priority (spec §4)."""
 
 from unittest.mock import patch
 
-from src.chat.session import Session
-from src.dialogue.module import FSMModule, RouteModule
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
+from chat.session import Session
+from dialogue.module import FSMModule, RouteModule
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
 
 
 def _fsm_pattern():
@@ -23,19 +23,18 @@ def _launch(pattern, sessions, sid="s1"):
     session.pattern = pattern
     session.cxt.module_map = pattern.module_map
     session.cxt.node_map = pattern.node_map
-    session.cxt.metadata["dispatch_graph"] = pattern.dispatch_graph
     session.cxt.metadata["llm_override"] = {"code": "x", "model": "m"}
     sessions[sid] = session
     return session
 
 
 def _chat(sessions, sid, query):
-    from src.chat.chat import chat as chat_fn
+    from chat.chat import chat as chat_fn
     return chat_fn(query=query, session_id=sid, all_sessions=sessions)
 
 
 def _record_calls(calls):
-    import src.chat.chat as chat_mod
+    import chat.chat as chat_mod
     real = chat_mod.get_llm_config
 
     def spy(pattern_code="", module_code="", node_code="", override=None, config_path=""):
@@ -48,26 +47,26 @@ def _record_calls(calls):
 
 
 def test_r1_passes_position_and_override():
-    """R1：pattern/module/node + override 全部透传，且写 metadata pattern_code。"""
+    """R1: pattern/module/node + override all passed through, and metadata pattern_code written."""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     calls = []
-    with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)):
+    with patch("chat.loop.build_provider"), \
+         patch("chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s1", "你好")
     assert calls, "R1 应调用 get_llm_config"
     first = calls[0]
     assert first["pattern_code"] == "pf"
     assert first["override"] == {"code": "x", "model": "m"}
     assert sessions["s1"].cxt.metadata["pattern_code"] == "pf"
-    # 会话内已定位 module/node 时 R1 就带上（首轮为空）
+    # once module/node are located within the session, R1 carries them (empty on the first turn)
     assert first["module_code"] in ("", "m1")
 
 
 def test_r2_agent_module_chat_path_uses_module_code():
-    """R2：AGENT 模块经 chat() 路径触发 _handle_agent_module，
-    get_llm_config 以 module_code=<agent模块code>、node_code="" 调用。"""
-    from src.dialogue.module import AgentModule
+    """R2: an AGENT module going through the chat() path triggers AgentHandler,
+    with get_llm_config called as module_code=<agent module code>, node_code=\"\"."""
+    from dialogue.module import AgentModule
     agent_m = AgentModule(module_code="reception", module_name=" reception",
                           module_description="d", module_todo_description="t",
                           sub_modules=[])
@@ -82,8 +81,8 @@ def test_r2_agent_module_chat_path_uses_module_code():
                             tools=None, tool_choice=None, **kw):
             return {"content": "ok", "tool_calls": []}
 
-    with patch("src.chat.loop.build_provider", return_value=_Scripted()), \
-         patch("src.chat.chat.get_llm_config",
+    with patch("chat.loop.build_provider", return_value=_Scripted()), \
+         patch("chat.chat.get_llm_config",
                side_effect=_record_calls(calls)):
         _chat(sessions, "s3", "你好")
     r2 = [c for c in calls if c["module_code"] == "reception"
@@ -93,32 +92,38 @@ def test_r2_agent_module_chat_path_uses_module_code():
 
 
 def test_r3_refresh_after_node_resolution():
-    """R3：_run_pipeline 节点解析后按 module+node 刷新。"""
+    """R3: the pipeline handler refreshes by module+node after node resolution."""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
     calls = []
-    with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)):
+    with patch("chat.loop.build_provider"), \
+         patch("chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s1", "你好")
     r3 = [c for c in calls if c["module_code"] == "m1" and c["node_code"] == "f1"]
     assert r3, f"R3 应按 module=m1 node=f1 解析，实际调用: {calls}"
 
 
 def test_r4_route_menu_node_takes_effect_same_turn():
-    """R4：ROUTE 菜单命中切节点后当轮刷新（菜单节点配置驱动当轮 NLG）。"""
+    """R4: after a ROUTE menu hit switches the node, the refresh takes effect that same turn
+    (menu-node config drives that turn's NLG).
+
+    The refresh point lives in chat._detect_jump_after_stage (the former _RouteNodeAdvance
+    duty was merged in). After NLU updates nlu_result: advance the menu node + R4 node-level
+    refresh first, then judge jumps.
+    """
     menu = BaseNode(node_code="menu_a", node_name="菜单A",
-                    jump_module="m1", base_nlg_prompt="回答A")
+                    base_nlg_prompt="回答A")
     root = BaseNode(node_code="root", node_name="根")
     route = RouteModule(module_code="r1", module_name="r", module_description="d",
                         module_todo_description="t", sub_modules=[],
                         module_nodes=[root, menu])
-    agent_m = _fsm_pattern().module_map["m1"]
+    fsm_m = _fsm_pattern().module_map["m1"]
     pattern = Pattern(code="pr", name="t", description="t",
-                      entry_module_code="r1", modules=[route, agent_m])
+                      entry_module_code="r1", modules=[route, fsm_m])
     sessions = {}
     _launch(pattern, sessions, sid="s2")
     calls = []
-    # RouteNLU/FSMNLU 打桩返回意图命中菜单（绕开真实 LLM 协议）
+    # RouteNLU/FSMNLU stubbed to return a menu-hit intent (bypassing the real LLM protocol)
     class _StubNLU:
         stage_name = "nlu"
         def execute(self, ctx):
@@ -129,25 +134,23 @@ def test_r4_route_menu_node_takes_effect_same_turn():
         def execute(self, ctx):
             ctx.nlg_result = {"content": "ok"}
             return ctx
-    import src.chat.chat as chat_mod
-    import src.dialogue.stage_slots as stage_slots_mod
-    pattern.stages = [_StubNLU(), stage_slots_mod._RouteNodeAdvance(), _StubNLG()]
-    # _RouteNodeAdvance 已迁入 stage_slots（R4 刷新直连 config.config），
-    # 双命名空间打 spy：chat（R1-R3）+ stage_slots（R4）
-    with patch("src.chat.loop.build_provider"), \
-         patch("src.chat.chat.get_llm_config", side_effect=_record_calls(calls)), \
-         patch.object(stage_slots_mod, "get_llm_config",
-                      side_effect=_record_calls(calls)):
+    pattern.stages = [_StubNLU(), _StubNLG()]
+    # R1-R3 and the R4 refresh all go through the chat namespace (R4 inside _detect_jump_after_stage)
+    with patch("chat.loop.build_provider"), \
+         patch("chat.chat.get_llm_config", side_effect=_record_calls(calls)):
         _chat(sessions, "s2", "选A")
     r4 = [c for c in calls if c["node_code"] == "menu_a"]
     assert r4, f"R4 应在菜单命中后按 node=menu_a 刷新，实际调用: {calls}"
+    # menu has no jump_module config -> no module jump, stays in the routing module
+    assert sessions["s2"].cxt.current_node_code == "root"  # turn-end reset back to root
+    assert sessions["s2"].cxt.current_module_code == "r1"
 
 
 def test_override_wins_and_survives_turns():
-    """override 写入 cxt.llm_config 且逐轮不被冲掉。"""
+    """The override lands in cxt.llm_config and is not washed away across turns."""
     sessions = {}
     _launch(_fsm_pattern(), sessions)
-    with patch("src.chat.loop.build_provider"):
+    with patch("chat.loop.build_provider"):
         _chat(sessions, "s1", "你好")
         _chat(sessions, "s1", "继续")
     assert sessions["s1"].cxt.llm_config["model"] == "m"

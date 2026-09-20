@@ -1,10 +1,10 @@
-"""Pattern 转移图构建与注册期 fail fast 测试。"""
+"""Tests for pattern module-topology registration and registration-time fail fast."""
 
 import pytest
 
-from src.dialogue.module import AgentModule, FSMModule, ModuleLink
-from src.dialogue.node import BaseNode
-from src.dialogue.pattern import Pattern
+from dialogue.module import AgentModule, FSMModule, ModuleLink
+from dialogue.node import BaseNode
+from dialogue.pattern import Pattern
 
 
 def _mk_pattern(modules, **kw):
@@ -14,22 +14,15 @@ def _mk_pattern(modules, **kw):
     )
 
 
-def test_dispatch_graph_from_links():
+def test_module_map_and_node_map_registered():
     a = AgentModule(module_code="a", sub_modules=["b", ModuleLink(target="c")])
     b = AgentModule(module_code="b")
     c = FSMModule(module_code="c")
     p = _mk_pattern([a, b, c])
-    assert p.dispatch_graph == {"a": {"b", "c"}}
-
-
-def test_route_jump_module_derived_into_graph():
-    menu = BaseNode(node_code="menu_x", node_name="x", jump_module="b")
-    root = BaseNode(node_code="root", node_name="r", sub_nodes=["menu_x"])
-    route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
-    route_mod.type = type(route_mod).type  # 保持默认；推导只看 jump_module 属性
-    b = AgentModule(module_code="b")
-    p = _mk_pattern([route_mod, b])
-    assert "b" in p.dispatch_graph["rt"]
+    assert set(p.module_map) == {"a", "b", "c"}
+    # Adjacency declared via links produces no runtime graph (jump detection
+    # only checks module_map membership); it is validated at registration only
+    assert not hasattr(p, "dispatch_graph")
 
 
 def test_dangling_link_raises():
@@ -37,6 +30,15 @@ def test_dangling_link_raises():
     b = AgentModule(module_code="b")
     with pytest.raises(ValueError, match="悬空"):
         _mk_pattern([a, b])
+
+
+def test_dangling_jump_module_raises():
+    """A node's jump_module pointing at a nonexistent module -> dangling-reference fail fast at registration."""
+    menu = BaseNode(node_code="menu_x", node_name="x", jump_module="ghost")
+    root = BaseNode(node_code="root", node_name="r", sub_nodes=["menu_x"])
+    route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
+    with pytest.raises(ValueError, match="悬空"):
+        _mk_pattern([route_mod])
 
 
 def test_unauthorized_lend_raises():
@@ -56,13 +58,13 @@ def test_self_loop_raises():
 
 
 def test_agent_to_fsm_link_allowed():
-    """混合 pattern：AGENT → FSM 边合法（不拦）。"""
+    """Mixed pattern: an AGENT -> FSM edge is legal (not blocked)."""
     a = AgentModule(module_code="a", sub_modules=["f"])
     f = FSMModule(module_code="f", module_nodes=[
         BaseNode(node_code="f1", node_name="n1", is_end=True)
     ])
     p = _mk_pattern([a, f])
-    assert p.dispatch_graph["a"] == {"f"}
+    assert p.module_map["f"].type.value == "fsm"
 
 
 def test_max_hops_default_and_override():
@@ -72,9 +74,40 @@ def test_max_hops_default_and_override():
 
 
 def test_route_jump_module_self_loop_raises():
-    """M-1：jump_module 指向自身模块 → 注册期自环 fail fast。"""
+    """M-1: jump_module pointing at its own module -> self-loop fail fast at registration."""
     menu = BaseNode(node_code="menu_self", node_name="m", jump_module="rt")
     root = BaseNode(node_code="root2", node_name="r", sub_nodes=["menu_self"])
     route_mod = AgentModule(module_code="rt", module_nodes=[root, menu])
     with pytest.raises(ValueError, match="自环"):
         _mk_pattern([route_mod])
+
+
+def test_kwargs_attach_without_modules():
+    """modules=None 骨架 pattern 的自定义 kwargs 属性不再被静默丢弃。"""
+    p = Pattern(code="p_skeleton", name="t", description="t",
+                entry_module_code="a", modules=None,
+                counterpart_hint={"role_prompt": "x"}, custom_flag=7)
+    assert p.counterpart_hint == {"role_prompt": "x"}
+    assert p.custom_flag == 7
+
+    # 带模块时照常生效（原有行为不回归）
+    a = AgentModule(module_code="a")
+    p2 = _mk_pattern([a], custom_flag=9)
+    assert p2.custom_flag == 9
+
+
+def test_register_string_args_forward_declared_params():
+    """字符串兼容注册路径：nodes / llm_provider_code 不再被吞掉，透传为
+    pattern 属性（kwargs 附加机制）。"""
+    from dialogue.register import registry
+
+    p = registry.register(
+        "tmp_str_style", name="t", description="t",
+        nodes={"n1": {"node_name": "x"}},
+        llm_provider_code="openai",
+    )
+    try:
+        assert p.nodes == {"n1": {"node_name": "x"}}
+        assert p.llm_provider_code == "openai"
+    finally:
+        registry.deregister("tmp_str_style")

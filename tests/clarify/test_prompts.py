@@ -1,6 +1,6 @@
-"""三套澄清 prompt 模板结构测试。"""
+"""Structural tests for the three clarify prompt templates."""
 
-from src.clarify.prompts import (
+from stages.clarify.prompts import (
     CLARIFY_FALLBACK_PROMPT,
     CLARIFY_KB_PROMPT,
     CLARIFY_MIXED_PROMPT,
@@ -20,7 +20,8 @@ def test_kb_prompt_has_all_slots_and_kb_style():
 def test_fallback_prompt_has_all_slots_and_no_recall_dependency():
     for slot in SLOTS:
         assert slot in CLARIFY_FALLBACK_PROMPT, f"FALLBACK 模板缺槽位 {slot}"
-    # 轨道二不得依赖召回内容作答（召回为空也必须能生成）
+    # The fallback track must not depend on recall content to answer
+    # (it must still generate when recall is empty)
     assert "知识库召回内容" in CLARIFY_FALLBACK_PROMPT
 
 

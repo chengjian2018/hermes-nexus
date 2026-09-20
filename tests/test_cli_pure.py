@@ -1,6 +1,6 @@
-"""cli.py 纯函数单测：斜杠解析 / verbose 渲染 / 菜单渲染 / 短 flag 展开。
+"""cli.py pure-function unit tests: slash parsing / verbose rendering / menu rendering / short flag expansion.
 
-不触网络、不触 LLM；REPL 交互与 fire 分发另行手动验收。
+No network, no LLM; REPL interaction and fire dispatch are accepted manually elsewhere.
 """
 
 import unittest.mock
@@ -27,8 +27,8 @@ class TestParseSlashCommand:
         assert cli.parse_slash_command("/slots") == {"name": "slots", "arg": ""}
 
     def test_known_command_with_arg(self):
-        assert cli.parse_slash_command("/new car_sales_route") == {
-            "name": "new", "arg": "car_sales_route"}
+        assert cli.parse_slash_command("/new xianyu_agent") == {
+            "name": "new", "arg": "xianyu_agent"}
         assert cli.parse_slash_command("/llm openai") == {
             "name": "llm", "arg": "openai"}
 
@@ -129,7 +129,7 @@ class TestRenderPatternMenu:
         out = cli.render_pattern_menu(
             "t", [_FakePattern("a", "A", "")])
         lines = [l for l in out.split("\n") if l.strip()]
-        assert len(lines) == 2  # 标题 + 一行条目
+        assert len(lines) == 2  # header + one entry line
 
 
 # ============================================================================
@@ -156,15 +156,15 @@ class TestExpandShortVerbose:
 
 
 # ============================================================================
-# render_verbose_full（用桩 context 对象，不依赖引擎）
+# render_verbose_full (stubbed context object; engine not required)
 # ============================================================================
 
 class _FakeCxt:
     def __init__(self, nlu=None, nlg=None, agent=None, recall=None,
-                 dispatch_log=None):
+                 actions=None):
         self.nlu_result, self.nlg_result, self.agent_result = nlu, nlg, agent
         self._recall = recall
-        self.metadata = {"dispatch_log": dispatch_log} if dispatch_log else {}
+        self.actions = actions or []
 
     def format_recall_info(self):
         return self._recall
@@ -181,16 +181,16 @@ class TestRenderVerboseFull:
         assert '"next_node": "n2"' in out
         assert '"content": "hi"' in out
 
-    def test_dispatch_log_rendered(self):
-        cxt = _FakeCxt(dispatch_log=[{"to": "m2"}])
+    def test_actions_rendered(self):
+        cxt = _FakeCxt(actions=[{"conversation_end": True}])
         out = cli.render_verbose_full(cxt)
-        assert "dispatch_log" in out and "m2" in out
+        assert "actions" in out and "conversation_end" in out
 
     def test_non_serializable_falls_back_to_repr(self):
         class Weird:
             pass
         out = cli.render_verbose_full(_FakeCxt(agent=Weird()))
-        assert "agent_result" in out  # 不抛异常即通过
+        assert "agent_result" in out
 
 
 # ============================================================================
@@ -234,6 +234,51 @@ class TestPromptTaskInfo:
         with unittest.mock.patch("builtins.input", return_value=""):
             assert cli.prompt_task_info("p1") is None
 
+    def test_preset_wins_over_mock(self):
+        """An explicit --task-info wins over the pattern's mock preset."""
+        with unittest.mock.patch("builtins.input") as inp:
+            out = cli.prompt_task_info("customer_agent", '{"k": "v"}')
+        assert out == {"k": "v"}
+        inp.assert_not_called()
+
+
+class TestMockTaskInfo:
+    def test_customer_agent_preset_present(self):
+        mock = cli.mock_task_info_for("customer_agent")
+        assert mock == {"channel": "xianyu", "account_id": "demo"}
+
+    def test_unknown_pattern_returns_none(self):
+        assert cli.mock_task_info_for("xianyu_agent") is None
+        assert cli.mock_task_info_for("no_such") is None
+
+    def test_returns_copy_not_table_entry(self):
+        mock = cli.mock_task_info_for("customer_agent")
+        mock["account_id"] = "mutated"
+        assert cli.mock_task_info_for("customer_agent")["account_id"] == "demo"
+
+    def test_enter_applies_mock_for_preset_pattern(self):
+        with unittest.mock.patch("builtins.input", return_value=""):
+            assert cli.prompt_task_info("customer_agent") == {
+                "channel": "xianyu", "account_id": "demo"}
+
+    def test_eof_applies_mock(self):
+        """Non-interactive (piped) scenario: EOF also falls back to the mock, keeping demos scriptable."""
+        with unittest.mock.patch("builtins.input", side_effect=EOFError):
+            assert cli.prompt_task_info("customer_agent") == {
+                "channel": "xianyu", "account_id": "demo"}
+
+    def test_typed_json_wins_over_mock(self):
+        with unittest.mock.patch("builtins.input",
+                                 return_value='{"account_id": "acct_9"}'):
+            assert cli.prompt_task_info("customer_agent") == {
+                "account_id": "acct_9"}
+
+    def test_preset_account_matches_seed_scope(self):
+        """The mock's account_id must match the knowledge-seed default scope,
+        so catalog prefetch / knowledge tools can reach the seeded data."""
+        assert f"xianyu:{cli.mock_task_info_for('customer_agent')['account_id']}" \
+            == cli.knowledge_seed.__defaults__[0]
+
     def test_typed_json_parsed(self):
         with unittest.mock.patch("builtins.input",
                                  return_value='{"item_id": "9"}'):
@@ -246,13 +291,13 @@ class TestPromptTaskInfo:
 
 class TestBuildSessionTaskInfo:
     def test_build_session_writes_task_info_both_places(self, monkeypatch):
-        """task_info 双写对齐 main._launch_session_core：
-        session.task_info（落盘）+ metadata（prompt 槽位）。"""
-        from src.dialogue.register import discover_builtin_patterns
+        """task_info is written to two places, matching main._launch_session_core:
+        session.task_info (persisted) + metadata (prompt slot)."""
+        from dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
         session = cli.build_session(
-            "t-task", "car_sales_route",
+            "t-task", "xianyu_agent",
             task_info={"channel": "xianyu", "item_id": "1"},
         )
         assert session.task_info == {"channel": "xianyu", "item_id": "1"}
@@ -261,21 +306,21 @@ class TestBuildSessionTaskInfo:
         assert "item_id: 1" in session.cxt.format_task_info()
 
     def test_build_session_without_task_info_no_metadata_key(self, monkeypatch):
-        from src.dialogue.register import discover_builtin_patterns
+        from dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
-        session = cli.build_session("t-no-task", "car_sales_route")
+        session = cli.build_session("t-no-task", "xianyu_agent")
         assert session.task_info == {}
         assert "task_info" not in session.cxt.metadata
 
 
 # ============================================================================
-# KEEP_CONFIG 菜单 + llm_override 接线
+# KEEP_CONFIG menu + llm_override wiring
 # ============================================================================
 
 class TestKeepConfigMenu:
     def test_provider_menu_includes_keep_config(self):
-        """provider 菜单含「维持 config 配置」固定项，置首。"""
+        """The provider menu carries the fixed "维持 config 配置" entry, listed first."""
         entries = cli._provider_menu_entries()
         assert entries[0]["value"] == cli.KEEP_CONFIG
         assert "维持" in entries[0]["label"]
@@ -285,11 +330,11 @@ class TestKeepConfigMenu:
             assert cli.resolve_llm_choice("", "") == {"code": "", "model": ""}
 
     def test_pick_keep_config_in_model_menu_keeps_code(self):
-        """model 菜单选「维持」：保留已选 code，model 留空（回落全局默认）。"""
+        """Selecting "维持 config 配置" in the model menu: keep the chosen code, leave model empty (fall back to the global default)."""
         from fake_provider import FAKE_PROVIDER_CODE, register_fake_provider
 
         register_fake_provider()
-        # fake provider 未声明 models 列表 → 走 input() 手输分支，键入「维持」
+        # the fake provider declares no models list -> the input() manual-entry branch runs; the "维持 config 配置" option is typed in
         with unittest.mock.patch("builtins.input", return_value=cli.KEEP_CONFIG):
             result = cli.resolve_llm_choice(FAKE_PROVIDER_CODE, "")
         assert result == {"code": FAKE_PROVIDER_CODE, "model": ""}
@@ -297,17 +342,17 @@ class TestKeepConfigMenu:
 
 class TestBuildSessionOverride:
     def test_build_session_writes_override_not_llm_config(self, monkeypatch):
-        """--llm/--model 预置写 metadata.llm_override，不再直接写 llm_config。"""
+        """--llm/--model presets write metadata.llm_override instead of writing llm_config directly."""
         from fake_provider import fake_llm_config, register_fake_provider
 
         register_fake_provider()
         monkeypatch.setattr(cli, "get_llm_config", lambda *a, **k: fake_llm_config())
-        from src.dialogue.register import discover_builtin_patterns
+        from dialogue.register import discover_builtin_patterns
 
         discover_builtin_patterns()
 
         session = cli.build_session(
-            "t1", "car_sales_route",
+            "t1", "xianyu_agent",
             llm_overrides={"code": "fake_test_provider", "model": "fake-model"},
         )
         assert session.cxt.metadata["llm_override"]["model"] == "fake-model"
@@ -315,7 +360,7 @@ class TestBuildSessionOverride:
 
 
 # ============================================================================
-# 终审修复回归（Final review C1 / C2）
+# Final-review regression fixes (Final review C1 / C2)
 # ============================================================================
 
 _YAML = """\
@@ -336,9 +381,9 @@ pattern_llm:
 
 
 def _minimal_pattern(code):
-    from src.dialogue.module import FSMModule
-    from src.dialogue.node import BaseNode
-    from src.dialogue.pattern import Pattern
+    from dialogue.module import FSMModule
+    from dialogue.node import BaseNode
+    from dialogue.pattern import Pattern
 
     n1 = BaseNode(node_code="f1", node_name="节点一")
     m = FSMModule(module_code="m1", module_name="m1", module_description="d",
@@ -349,11 +394,11 @@ def _minimal_pattern(code):
 
 
 def _run_chat_turn(tmp_path, session):
-    """经 chat() 跑一轮：get_llm_config 打桩到 tmp yaml 的真实三层解析。"""
+    """Run one turn via chat(): get_llm_config stubbed onto a tmp yaml for real three-tier resolution."""
     from unittest.mock import patch as _patch
     import config.config as cfg_mod
-    import src.chat.chat as chat_mod
-    from src.chat.chat import chat as chat_fn
+    import chat.chat as chat_mod
+    from chat.chat import chat as chat_fn
 
     config_path = str(tmp_path / "local_config.yaml")
     Path(config_path).write_text(_YAML, encoding="utf-8")
@@ -364,7 +409,7 @@ def _run_chat_turn(tmp_path, session):
         return real(**kw)
 
     sessions = {session.session_id: session}
-    with _patch("src.chat.loop.build_provider"), \
+    with _patch("chat.loop.build_provider"), \
          _patch.object(chat_mod, "get_llm_config", side_effect=spy):
         chat_fn(query="你好", session_id=session.session_id,
                 all_sessions=sessions)
@@ -373,9 +418,9 @@ def _run_chat_turn(tmp_path, session):
 class TestEmptyOverrideNotPinned:
     def test_empty_override_skips_metadata_and_layered_resolution(
             self, tmp_path, monkeypatch):
-        """空 override 经 build_session 不写 llm_override；
-        后续轮次走三层解析，model 取 pattern 层值（C1 回归）。"""
-        from src.chat.session import Session
+        """An empty override writes no llm_override via build_session;
+        later turns use three-tier resolution and model comes from the pattern layer (C1 regression)."""
+        from chat.session import Session
 
         pattern = _minimal_pattern("p_cli_test")
         monkeypatch.setattr(cli, "pattern_registry",
@@ -387,22 +432,22 @@ class TestEmptyOverrideNotPinned:
                               llm_overrides={"code": "", "model": ""})
         assert "llm_override" not in s.cxt.metadata
 
-        # 端到端：无 override → 解析走三层，pattern 层 model 生效
+        # End-to-end: no override -> resolution goes through the three tiers, pattern-layer model wins
         _run_chat_turn(tmp_path, s)
         assert s.cxt.llm_config["model"] == "pattern-layer-model"
 
     def test_cross_provider_override_connection_from_providers_section(
             self, tmp_path):
-        """/llm 切 provider：override 只含显式字段；连接字段来自
-        llm_providers.deepseek 段，不串台 openai 连接（C2 回归）。"""
-        from src.chat.session import Session
+        """/llm provider switch: the override holds only explicitly chosen fields; connection fields come
+        from the llm_providers.deepseek section, not cross-wired into the openai connection (C2 regression)."""
+        from chat.session import Session
 
         pattern = _minimal_pattern("p_cli_test")
         session = Session(session_id="t-cross", pattern_code="p_cli_test")
         session.pattern = pattern
         session.cxt.module_map = pattern.module_map
         session.cxt.node_map = pattern.node_map
-        # 模拟 _do_llm 写入语义：只写显式选择字段
+        # Simulate the _do_llm write semantics: only explicitly chosen fields are written
         session.cxt.metadata["llm_override"] = {"code": "deepseek",
                                                 "model": "deepseek-chat"}
         _run_chat_turn(tmp_path, session)

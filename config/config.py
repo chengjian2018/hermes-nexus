@@ -1,9 +1,9 @@
 """
-配置加载模块 —— 从 local_config.yaml 读取本地配置。
+Configuration loading module — reads local configuration from local_config.yaml.
 
-LLM 配置项来源：``src/llm/provider.py`` 中的 ``ProviderEntry`` 和
-``BaseLLMProvider``，以及 ``src/llm/openai_provider.py`` 中的
-``OpenAICompatibleProvider``。
+LLM config fields come from ``ProviderEntry`` and ``BaseLLMProvider`` in
+``llm/provider.py``, plus ``OpenAICompatibleProvider`` in
+``llm/openai_provider.py``.
 """
 
 import logging
@@ -14,40 +14,40 @@ from typing import Any, Dict, Optional
 import yaml
 
 # ============================================================================
-# LLM 配置的必填字段与可选字段（来自 src/llm/provider.py 的 ProviderEntry）
+# Required and optional LLM config fields (from ProviderEntry in llm/provider.py)
 # ============================================================================
 
 _LLM_REQUIRED_FIELDS = {
-    "code",   # Provider 唯一编码，对应 registry 中注册的 provider
-    "model",  # 使用的模型名称
+    "code",   # Unique provider code, matching the provider registered in the registry
+    "model",  # Model name to use
 }
 
 _LLM_OPTIONAL_FIELDS = {
-    "api_base",     # API 地址（覆盖 provider 默认值）
-    "api_key",      # 直接设置 API key（优先级高于 api_key_env）
-    "api_key_env",  # API key 环境变量名，如 "DASHSCOPE_API_KEY"
-    "temperature",  # 生成温度，默认 0.7
-    "max_tokens",   # 最大输出 token 数，默认 2048
-    "timeout",      # 请求超时秒数，默认 60（来自 OpenAICompatibleProvider）
-    "max_retries",  # 失败重试次数，默认 2（来自 OpenAICompatibleProvider）
-    "enable_thinking",  # Qwen3 思考模式开关，默认 False（来自 OpenAICompatibleProvider）
+    "api_base",     # API base URL (overrides the provider default)
+    "api_key",      # Set the API key directly (takes precedence over api_key_env)
+    "api_key_env",  # Env var name holding the API key, e.g. "DASHSCOPE_API_KEY"
+    "temperature",  # Generation temperature, default 0.7
+    "max_tokens",   # Max output tokens, default 2048
+    "timeout",      # Request timeout in seconds, default 60 (from OpenAICompatibleProvider)
+    "max_retries",  # Retry count on failure, default 2 (from OpenAICompatibleProvider)
+    "enable_thinking",  # Qwen3 thinking-mode toggle, default False (from OpenAICompatibleProvider)
 }
 
-# 所有合法的 LLM 配置字段
+# All valid LLM config fields
 _LLM_ALL_FIELDS = _LLM_REQUIRED_FIELDS | _LLM_OPTIONAL_FIELDS
 
 
 # ============================================================================
-# Pattern 级 LLM 配置（spec 2026-09-02）：provider 连接 / 模型编排分离
+# Pattern-level LLM config (spec 2026-09-02): provider connection / model orchestration split
 # ============================================================================
 
-# 编排字段：llm_default 与 pattern_llm 各层条目允许的字段
+# Orchestration fields: fields allowed in llm_default and in pattern_llm per-level entries
 _ORCHESTRATION_FIELDS = {
     "code", "model", "temperature", "max_tokens",
     "timeout", "max_retries", "enable_thinking",
 }
 
-# 连接字段：llm_providers 各段允许的字段（legacy llm: 节点按此拆分）
+# Connection fields: fields allowed in each llm_providers section (legacy llm: node splits by this)
 _CONNECTION_FIELDS = {
     "api_base", "api_key", "api_key_env", "timeout", "max_retries",
 }
@@ -56,23 +56,39 @@ _PATTERN_LLM_SUBKEYS = {"modules", "nodes"}
 
 
 # ============================================================================
-# 会话持久化配置
+# Session persistence configuration
 # ============================================================================
 
-# 会话审计 SQLite 文件缺省路径（相对服务启动目录）
+# Default session audit SQLite file path (relative to the service startup directory)
 DEFAULT_SESSION_DB_PATH = "data/dialogue.db"
 
+# Default knowledge base SQLite file path (product/customer-service knowledge, scope-isolated)
+DEFAULT_KNOWLEDGE_DB_PATH = "data/knowledge.db"
+
+# Default dialogue-template directory (registered template JSON files,
+# replayed into the pattern registry at startup)
+DEFAULT_TEMPLATES_DIR = "data/templates"
+
+# Session history compression: triggers when estimated tokens exceed the threshold
+# (0 = off). The estimate is a character approximation
+# (CJK×2 + others×0.25, +4 per message), not an exact tokenizer
+DEFAULT_SESSION_COMPRESS_TOKEN_THRESHOLD = 6000
+
+# Number of recent messages kept after compression (tool rows included)
+DEFAULT_SESSION_COMPRESS_RETAIN_COUNT = 12
+
 
 # ============================================================================
-# 配置加载
+# Configuration loading
 # ============================================================================
 
 def _get_config_path() -> Path:
-    """获取 local_config.yaml 的路径。
+    """Get the path of local_config.yaml.
 
-    优先从项目根目录下的 config/ 目录查找。
+    Searched under the config/ directory of the project root.
     """
-    # 当前文件位于 config/config.py，config 目录即为项目配置目录
+    # This file lives in config/config.py, so the config directory is the
+    # project's configuration directory
     config_dir = Path(__file__).resolve().parent
     config_path = config_dir / "local_config.yaml"
 
@@ -86,20 +102,19 @@ def _get_config_path() -> Path:
 
 
 def _validate_llm_config(llm_config: Dict[str, Any]) -> None:
-    """校验 LLM 配置的完整性与合法性。
+    """Validate the completeness and legality of the LLM config.
 
     Args:
-        llm_config: 从 yaml 中解析出的 llm 配置字典。
+        llm_config: llm config dict parsed from yaml.
 
     Raises:
-        ValueError: 缺少必填字段或包含未知字段时。
+        ValueError: when required fields are missing or unknown fields present.
     """
     if not isinstance(llm_config, dict):
         raise ValueError(
             f"llm 配置应为字典类型，实际为: {type(llm_config).__name__}"
         )
 
-    # 检查必填字段
     missing = _LLM_REQUIRED_FIELDS - set(llm_config.keys())
     if missing:
         raise ValueError(
@@ -107,7 +122,7 @@ def _validate_llm_config(llm_config: Dict[str, Any]) -> None:
             f"必填字段: {sorted(_LLM_REQUIRED_FIELDS)}"
         )
 
-    # 检查未知字段（警告，不阻止运行）
+    # Unknown fields: warn only, do not block execution
     unknown = set(llm_config.keys()) - _LLM_ALL_FIELDS
     if unknown:
         import logging
@@ -117,7 +132,7 @@ def _validate_llm_config(llm_config: Dict[str, Any]) -> None:
 
 
 def _convert_legacy_llm(llm_cfg: Dict[str, Any]):
-    """legacy 顶层 llm: 节点 → (llm_providers, llm_default)（spec §6）。"""
+    """Legacy top-level llm: node → (llm_providers, llm_default) (spec §6)."""
     conn = {
         k: llm_cfg[k] for k in _CONNECTION_FIELDS
         if llm_cfg.get(k) not in (None, "")
@@ -128,8 +143,9 @@ def _convert_legacy_llm(llm_cfg: Dict[str, Any]):
 
 
 def _validate_pattern_llm(pattern_llm: Dict[str, Any]) -> None:
-    """pattern_llm 词表与嵌套校验：未知字段 warning 后剔除，modules/nodes 内
-    再嵌套 modules/nodes 视为非法嵌套，warning 后置空。"""
+    """pattern_llm vocabulary and nesting validation: unknown fields are stripped
+    after a warning; modules/nodes nested again inside modules/nodes count as
+    illegal nesting and are emptied after a warning."""
     for pcode, pcfg in pattern_llm.items():
         if not isinstance(pcfg, dict):
             raise ValueError(f"pattern_llm.{pcode} 应为字典，实际为: {type(pcfg).__name__}")
@@ -160,7 +176,8 @@ def _validate_pattern_llm(pattern_llm: Dict[str, Any]) -> None:
 
 
 def _validate_llm_providers(providers: Dict[str, Any]) -> None:
-    """llm_providers 各段字段超出连接词表 → warning 后剔除（spec §3.4）。"""
+    """Fields in each llm_providers section outside the connection vocabulary →
+    stripped after a warning (spec §3.4)."""
     for code, conn in providers.items():
         if not isinstance(conn, dict):
             raise ValueError(f"llm_providers.{code} 应为字典")
@@ -173,20 +190,21 @@ def _validate_llm_providers(providers: Dict[str, Any]) -> None:
 
 
 def load_config(config_path: str = "") -> Dict[str, Any]:
-    """从 local_config.yaml 读取本地配置并返回。
+    """Read the local configuration from local_config.yaml and return it.
 
     Args:
-        config_path: 可选，指定配置文件路径。为空时自动查找
-                     ``config/local_config.yaml``。
+        config_path: optional; explicit config file path. When empty, looks up
+                     ``config/local_config.yaml`` automatically.
 
     Returns:
-        配置字典，包含 ``llm_providers`` / ``llm_default`` / ``pattern_llm``
-        / ``session_db_path`` 键。legacy ``llm:`` 节点在加载期自动转换为
-        ``llm_providers`` + ``llm_default``。
+        Config dict containing the ``llm_providers`` / ``llm_default`` /
+        ``pattern_llm`` / ``session_db_path`` keys. A legacy ``llm:`` node is
+        converted automatically at load time into ``llm_providers`` +
+        ``llm_default``.
 
     Raises:
-        FileNotFoundError: 配置文件不存在时。
-        ValueError: 配置格式不合法时（缺少必填字段等）。
+        FileNotFoundError: when the config file does not exist.
+        ValueError: when the config format is illegal (missing required fields etc.).
 
     Example:
         >>> config = load_config()
@@ -194,13 +212,11 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
         >>> print(llm_cfg["code"])   # "openai"
         >>> print(llm_cfg["model"])  # "qwen3.8-max"
     """
-    # 确定配置文件路径
     if config_path:
         path = Path(config_path)
     else:
         path = _get_config_path()
 
-    # 读取 yaml
     with open(path, "r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
 
@@ -214,7 +230,7 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
             f"配置文件顶层应为字典，实际为: {type(raw).__name__}"
         )
 
-    # 提取 LLM 配置：新结构（llm_providers/llm_default/pattern_llm）或 legacy llm 节点
+    # Extract LLM config: new structure (llm_providers/llm_default/pattern_llm) or legacy llm node
     has_legacy = raw.get("llm") is not None
     has_new = raw.get("llm_providers") is not None or raw.get("llm_default") is not None
     if has_legacy and has_new:
@@ -224,13 +240,13 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
         )
     if has_legacy:
         llm_cfg = raw["llm"]
-        _validate_llm_config(llm_cfg)  # 旧节点沿用旧校验（code/model 必填）
+        _validate_llm_config(llm_cfg)  # legacy node keeps the legacy validation (code/model required)
         llm_providers, llm_default = _convert_legacy_llm(llm_cfg)
     elif raw.get("llm_default") is not None:
         llm_default = raw["llm_default"]
         if not isinstance(llm_default, dict):
             raise ValueError("llm_default 应为字典")
-        _validate_llm_config(llm_default)  # code/model 必填
+        _validate_llm_config(llm_default)  # code/model required
         llm_providers = raw.get("llm_providers") or {}
     else:
         raise ValueError(
@@ -248,22 +264,34 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
         "llm_providers": llm_providers,
         "llm_default": llm_default,
         "pattern_llm": pattern_llm,
-        # 会话持久化 SQLite 路径（可选，缺省 data/dialogue.db）
+        # Session persistence SQLite path (optional, default data/dialogue.db)
         "session_db_path": raw.get("session_db_path", DEFAULT_SESSION_DB_PATH),
-        # 后续可扩展其他节点，如: "dialogue", "logging", "storage" 等
+        # Knowledge base SQLite path (optional, default data/knowledge.db)
+        "knowledge_db_path": raw.get("knowledge_db_path", DEFAULT_KNOWLEDGE_DB_PATH),
+        # Dialogue-template directory (optional, default data/templates)
+        "templates_dir": raw.get("templates_dir", DEFAULT_TEMPLATES_DIR),
+        # Session history compression (optional; threshold 0 = off, defaults 6000 / keep 12)
+        "session_compress_token_threshold": int(raw.get(
+            "session_compress_token_threshold",
+            DEFAULT_SESSION_COMPRESS_TOKEN_THRESHOLD)),
+        "session_compress_retain_count": int(raw.get(
+            "session_compress_retain_count",
+            DEFAULT_SESSION_COMPRESS_RETAIN_COUNT)),
+        # More top-level nodes may be added later, e.g. "dialogue", "logging", "storage"
     }
 
 
 def _merge_connection(orch: Dict[str, Any], providers: Dict[str, Any]) -> Dict[str, Any]:
-    """编排结果 ⊕ 其 code 对应的 provider 连接段（无段则空，回落 registry 默认）。"""
+    """Orchestration result ⊕ the provider connection section for its code
+    (empty section when absent, falling back to registry defaults)."""
     return {**providers.get(orch.get("code", ""), {}), **orch}
 
 
 def _resolve_layered(cfg: Dict[str, Any], pattern_code: str,
                      module_code: str, node_code: str) -> Dict[str, Any]:
-    """llm_default ⊕ pattern ⊕ module ⊕ node 逐层浅合并（spec §3.2）。
+    """llm_default ⊕ pattern ⊕ module ⊕ node shallow-merged layer by layer (spec §3.2).
 
-    未配置/未知的 code 静默回退更浅层并 warning。
+    Unconfigured/unknown codes silently fall back to the shallower layer with a warning.
     """
     merged = dict(cfg["llm_default"])
     pcfg = cfg.get("pattern_llm", {}).get(pattern_code) if pattern_code else None
@@ -290,15 +318,18 @@ def _resolve_layered(cfg: Dict[str, Any], pattern_code: str,
 def get_llm_config(pattern_code: str = "", module_code: str = "",
                    node_code: str = "", override: Optional[Dict[str, Any]] = None,
                    config_path: str = "") -> Dict[str, Any]:
-    """按当前位置解析 LLM 配置（spec §3.3 / §4.1）。
+    """Resolve the LLM config for the current position (spec §3.3 / §4.1).
 
-    override 非 None：跳过三层解析，仅尝试并入 llm_providers[override.code]
-    连接段；yaml 加载失败静默降级为空连接段（保离线测试封闭）。
-    其余情况：三层合并后并入连接层；yaml 加载失败照常抛出。
+    override not None: skip the three-tier resolution and only try to merge in
+    the llm_providers[override.code] connection section; a yaml load failure
+    silently degrades to an empty connection section (keeps offline tests sealed).
+    Otherwise: merge the three tiers, then merge in the connection layer; a yaml
+    load failure raises as usual.
     """
     if override is not None:
-        # override 只携带用户显式字段（code/model 可能缺一），缺 code 时
-        # 从 llm_default 并入兜底（build_provider 依赖 llm_config["code"]）
+        # override carries only user-explicit fields (code/model may each be
+        # missing); when code is missing, backfill from llm_default
+        # (build_provider depends on llm_config["code"])
         merged = dict(override)
         code = merged.get("code") or ""
         try:
@@ -311,8 +342,9 @@ def get_llm_config(pattern_code: str = "", module_code: str = "",
         if not code and default.get("code"):
             merged["code"] = default["code"]
         if not merged.get("model") and default.get("model"):
-            # CLI 选「维持 config 配置」时 override 只带 code，缺 model 会导致
-            # run_agent 取 llm_config["model"] KeyError，同 code 一样兜底
+            # When the CLI picks "维持 config 配置", override carries only code;
+            # a missing model would make run_agent raise KeyError on
+            # llm_config["model"], so backfill it just like code
             merged["model"] = default["model"]
         return _merge_connection(merged, cfg.get("llm_providers", {}))
     cfg = load_config(config_path)
@@ -323,8 +355,33 @@ def get_llm_config(pattern_code: str = "", module_code: str = "",
 
 
 def get_session_db_path(config_path: str = "") -> str:
-    """便捷方法：返回会话持久化 SQLite 文件路径。
+    """Convenience method: return the session persistence SQLite file path.
 
     Equivalent to ``load_config(config_path)["session_db_path"]``.
     """
     return load_config(config_path)["session_db_path"]
+
+
+def get_knowledge_db_path(config_path: str = "") -> str:
+    """Convenience method: return the knowledge base SQLite file path.
+
+    Equivalent to ``load_config(config_path)["knowledge_db_path"]``.
+    """
+    return load_config(config_path)["knowledge_db_path"]
+
+
+def get_templates_dir(config_path: str = "") -> str:
+    """Convenience method: return the dialogue-template directory.
+
+    Equivalent to ``load_config(config_path)["templates_dir"]``.
+    """
+    return load_config(config_path)["templates_dir"]
+
+
+def get_session_compress_config(config_path: str = "") -> tuple:
+    """Convenience method: return (compression token threshold, retain count); threshold 0 = off."""
+    cfg = load_config(config_path)
+    return (
+        cfg["session_compress_token_threshold"],
+        cfg["session_compress_retain_count"],
+    )

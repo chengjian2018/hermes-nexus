@@ -1,12 +1,12 @@
-"""xianyu_agent（ROUTE 模式）离线测试 —— 复刻 xianyu-auto-reply agent 对话管理。
+"""xianyu_agent (ROUTE mode) offline tests -- replicating xianyu-auto-reply agent dialogue management.
 
-通过脚本化 FakeProvider 模拟 LLM 输出（不访问真实 API），覆盖：
-1. Pattern 结构与 AST 自动发现注册
-2. 本地意图检测关键词表（price/tech/default，复刻 detect_intent）
-3. 意图路由：议价/技术/通用 → 对应菜单节点，轮末回 root
-4. 议价轮数控制：第 max_bargain_rounds 次砍价起固定拒绝话术且零 LLM
-5. 议价参数注入：bargain_count/max_* 随 slots 进入 filled_slots 供 NLG
-6. 自定义议价设置：metadata.bargain_settings 覆盖默认值
+LLM output is simulated via the scripted FakeProvider (no real API access). Covers:
+1. Pattern structure and AST auto-discovery registration
+2. Local intent detection keyword tables (price/tech/default, replicating detect_intent)
+3. Intent routing: bargain/tech/default -> corresponding menu nodes, back to root at turn end
+4. Bargain round count control: from the max_bargain_rounds-th haggle on, fixed refusal script and zero LLM
+5. Bargain param injection: bargain_count/max_* enter filled_slots via slots for NLG
+6. Custom bargain settings: metadata.bargain_settings overrides the defaults
 """
 
 import logging
@@ -30,17 +30,17 @@ REFUSE_TEXT = "抱歉，这个价格已经是最优惠的了，不能再便宜�
 
 @pytest.fixture(scope="session", autouse=True)
 def _fake_provider():
-    """注册脚本化 provider，测试全程复用。"""
+    """Register the scripted provider, reused for the whole test run."""
     register_fake_provider()
 
 
 @pytest.fixture(scope="module")
 def pattern():
-    """发现内置 pattern 并返回 xianyu_agent。"""
-    from src.dialogue.register import discover_builtin_patterns, registry
+    """Discover builtin patterns and return xianyu_agent."""
+    from dialogue.register import discover_builtin_patterns, registry
 
     imported = discover_builtin_patterns()
-    assert "src.dialogue.xianyu_agent_route" in imported, (
+    assert "dialogue.xianyu_agent_route" in imported, (
         f"xianyu_agent_route 未被自动发现，已发现: {imported}"
     )
     return registry.get("xianyu_agent")
@@ -48,13 +48,13 @@ def pattern():
 
 @pytest.fixture()
 def sessions():
-    """每次测试独立的会话容器。"""
+    """A fresh session container per test."""
     return {}
 
 
 def launch(pattern, sessions, session_id="s1", bargain_settings=None):
-    """模拟 main.py 的 launch 流程：注册会话并注入管线上下文。"""
-    from src.chat.session import Session
+    """Simulate main.py's launch flow: register the session and inject pipeline context."""
+    from chat.session import Session
 
     session = Session(session_id=session_id, pattern_code=pattern.code)
     session.pattern = pattern
@@ -72,19 +72,19 @@ def launch(pattern, sessions, session_id="s1", bargain_settings=None):
 
 
 def chat(sessions, session_id, query):
-    """调用 src.chat.chat 处理一轮对话。"""
-    from src.chat.chat import chat as chat_fn
+    """Run one dialogue turn via chat.chat."""
+    from chat.chat import chat as chat_fn
 
     return chat_fn(query=query, session_id=session_id, all_sessions=sessions)
 
 
 # ============================================================================
-# 结构测试
+# Structure tests
 # ============================================================================
 
 def test_pattern_auto_discovered_and_structure(pattern):
-    """Pattern 可被 AST 自动发现，模块/节点结构与 ROUTE 语义正确。"""
-    from src.dialogue.module import ModuleType
+    """Pattern is AST-auto-discoverable; module/node structure and ROUTE semantics are correct."""
+    from dialogue.module import ModuleType
 
     assert pattern.code == "xianyu_agent"
     assert pattern.entry_module_code == "xianyu_root"
@@ -93,25 +93,25 @@ def test_pattern_auto_discovered_and_structure(pattern):
     root = pattern.module_map["xianyu_root"]
     assert root.type == ModuleType.ROUTE
 
-    # 路由模块节点顺序：root 必须位于 module_nodes[0]（首节点）
+    # Route module node order: root must be module_nodes[0] (first node)
     assert [n.node_code for n in root.module_nodes] == [
         "xy_route_root", "xy_menu_price", "xy_menu_price_refuse",
         "xy_menu_tech", "xy_menu_default",
     ]
 
-    # 意图菜单全部无 jump_module：留在路由模块，每轮回 root
+    # All intent menu nodes have no jump_module: stay in the route module, return to root every turn
     for node in root.module_nodes[1:]:
         assert not getattr(node, "jump_module", None)
 
-    # 意图菜单节点挂了意图级 NLG 模板（拒绝节点除外：走固定话术）
+    # Intent menu nodes carry intent-level NLG templates (except the refusal node: fixed script)
     assert pattern.node_map["xy_menu_price"].base_nlg_prompt
     assert pattern.node_map["xy_menu_tech"].base_nlg_prompt
     assert pattern.node_map["xy_menu_default"].base_nlg_prompt
 
 
 def test_generate_wired_at_module_level(pattern):
-    """XianyuIntentNLU / FixedNLG 挂在模块级 generate dict（nlu/nlg 位）。"""
-    from src.dialogue.xianyu_agent_route import FixedNLG, XianyuIntentNLU
+    """XianyuIntentNLU / FixedNLG are wired into the module-level generate dict (nlu/nlg slots)."""
+    from dialogue.xianyu_agent_route import FixedNLG, XianyuIntentNLU
 
     root = pattern.module_map["xianyu_root"]
     generate = root.generate
@@ -121,14 +121,14 @@ def test_generate_wired_at_module_level(pattern):
 
 
 def test_query_slot_wired_with_time_aug(pattern):
-    """pattern 级 query 槽位配置 TimeAugQueryRewriter（时间增强改写）。"""
-    from src.dialogue.query import TimeAugQueryRewriter
+    """The pattern-level query slot is wired with TimeAugQueryRewriter (time-augmented rewrite)."""
+    from stages.query import TimeAugQueryRewriter
 
     assert isinstance(pattern.query, TimeAugQueryRewriter)
 
 
 # ============================================================================
-# 意图检测测试（复刻 detect_intent 关键词表）
+# Intent detection tests (replicating the detect_intent keyword table)
 # ============================================================================
 
 @pytest.mark.parametrize("query,intent", [
@@ -142,27 +142,27 @@ def test_query_slot_wired_with_time_aug(pattern):
     ("参数发一下", "tech"),
     ("在吗", "default"),
     ("今天发货吗", "default"),
-    ("HELLO 在吗", "default"),  # lower() 后匹配，非关键词仍 default
+    ("HELLO 在吗", "default"),  # matched after lower(); non-keyword still default
 ])
 def test_detect_intent_keywords(query, intent):
-    """本地关键词意图检测与原实现关键词表一致。"""
-    from src.dialogue.xianyu_agent_route import detect_intent
+    """Local keyword intent detection matches the original implementation's keyword tables."""
+    from dialogue.xianyu_agent_route import detect_intent
 
     assert detect_intent(query) == intent
 
 
 # ============================================================================
-# 意图路由测试
+# Intent routing tests
 # ============================================================================
 
 def test_intent_routing_each_turn(pattern, sessions):
-    """三类意图各自路由到对应菜单节点，轮末回 root（每轮独立检测）。"""
+    """All three intents route to their menu nodes; back to root at turn end (independent detection each turn)."""
     session = launch(pattern, sessions)
 
     chat(sessions, "s1", "能便宜点吗")
     assert session.cxt.nlu_result["next_node"] == "xy_menu_price"
     assert session.cxt.nlu_result["intent"] == "price"
-    assert session.cxt.current_node_code == "xy_route_root"  # 轮末回 root
+    assert session.cxt.current_node_code == "xy_route_root"
 
     chat(sessions, "s1", "这个怎么用")
     assert session.cxt.nlu_result["next_node"] == "xy_menu_tech"
@@ -172,7 +172,7 @@ def test_intent_routing_each_turn(pattern, sessions):
 
 
 def test_intent_metadata_written_for_counting(pattern, sessions):
-    """每轮 user 消息回填 intent metadata，供议价计数回溯。"""
+    """Each turn's user message gets intent written back into metadata, for bargain count lookback."""
     session = launch(pattern, sessions)
     chat(sessions, "s1", "多少钱")
     user_msgs = [m for m in session.cxt.history if m.role == "user"]
@@ -184,11 +184,11 @@ def test_intent_metadata_written_for_counting(pattern, sessions):
 
 
 # ============================================================================
-# 议价轮数控制测试
+# Bargain round count control tests
 # ============================================================================
 
 def test_bargain_refuse_at_threshold_zero_llm(pattern, sessions):
-    """第 max_bargain_rounds 次砍价起：固定拒绝话术 + 零 LLM 调用。"""
+    """From the max_bargain_rounds-th haggle on: fixed refusal script + zero LLM calls."""
     session = launch(pattern, sessions)
     queries = ["能便宜点吗", "还能再少点", "最低多少钱", "再刀50"]
 
@@ -199,11 +199,11 @@ def test_bargain_refuse_at_threshold_zero_llm(pattern, sessions):
         llm_calls.append(FakeProvider.call_count - before)
 
         if i < 3:
-            # 前两次：正常议价节点，单次 LLM 生成
+            # First two turns: normal bargain node, a single LLM generation
             assert session.cxt.nlu_result["next_node"] == "xy_menu_price"
             assert llm_calls[-1] == 1
         else:
-            # 第 3/4 次：count >= max(3) → 固定拒绝，零 LLM
+            # Turns 3/4: count >= max (3) -> fixed refusal, zero LLM
             assert session.cxt.nlu_result["next_node"] == "xy_menu_price_refuse"
             assert reply == REFUSE_TEXT
             assert llm_calls[-1] == 0
@@ -212,20 +212,38 @@ def test_bargain_refuse_at_threshold_zero_llm(pattern, sessions):
 
 
 def test_bargain_count_persists_across_interleaved_intents(pattern, sessions):
-    """议价计数跨轮持久：中间穿插非议价消息不重置计数。"""
+    """Bargain count persists across turns: interleaved non-bargain messages do not reset it."""
     session = launch(pattern, sessions)
     chat(sessions, "s1", "能便宜点吗")     # price #1
-    chat(sessions, "s1", "这个怎么用")     # tech（不计数）
+    chat(sessions, "s1", "这个怎么用")
     chat(sessions, "s1", "还能再少点")     # price #2
-    chat(sessions, "s1", "在吗")           # default（不计数）
-    reply = chat(sessions, "s1", "最低多少钱")  # price #3 → 拒绝
+    chat(sessions, "s1", "在吗")
+    reply = chat(sessions, "s1", "最低多少钱")  # price #3 -> refusal
+
+    assert session.cxt.nlu_result["slots"]["bargain_count"] == 3
+    assert reply == REFUSE_TEXT
+
+
+def test_bargain_count_survives_intent_metadata_loss(pattern, sessions):
+    """重启恢复后 history 的 intent 标注丢失（消息落库快照早于 NLU 回写）：
+    议价计数靠 filled_slots 持久下限继续累积，拒绝阈值不失效。"""
+    session = launch(pattern, sessions)
+    chat(sessions, "s1", "能便宜点吗")     # price #1
+    chat(sessions, "s1", "还能再少点")     # price #2
+    assert session.cxt.filled_slots["bargain_count"] == 2
+
+    # 模拟重启恢复：intent 标注全部丢失，filled_slots（快照持久化）保留
+    for msg in session.cxt.history:
+        msg.metadata.pop("intent", None)
+
+    reply = chat(sessions, "s1", "最低多少钱")  # price #3（历史计 1，下限 2+1=3）→ 拒绝
 
     assert session.cxt.nlu_result["slots"]["bargain_count"] == 3
     assert reply == REFUSE_TEXT
 
 
 def test_custom_bargain_settings(pattern, sessions):
-    """metadata.bargain_settings 覆盖默认议价设置（max=1 → 第 1 次即拒绝）。"""
+    """metadata.bargain_settings overrides the default bargain settings (max=1 -> refused on the first haggle)."""
     session = launch(pattern, sessions,
                      bargain_settings={"max_bargain_rounds": 1})
     reply = chat(sessions, "s1", "能便宜点吗")
@@ -235,7 +253,7 @@ def test_custom_bargain_settings(pattern, sessions):
 
 
 def test_bargain_params_injected_into_slots(pattern, sessions):
-    """议价参数（count/max_*）随 slots 合并进 filled_slots，供 NLG 模板注入。"""
+    """Bargain params (count/max_*) merge into filled_slots via slots, for NLG template injection."""
     session = launch(pattern, sessions)
     chat(sessions, "s1", "能便宜点吗")
 
@@ -246,7 +264,7 @@ def test_bargain_params_injected_into_slots(pattern, sessions):
 
 
 def test_non_price_intent_no_bargain_params(pattern, sessions):
-    """非议价意图 bargain_count=0，参数仍注入（模板可统一引用）。"""
+    """Non-bargain intents get bargain_count=0; params are still injected (templates can reference them uniformly)."""
     session = launch(pattern, sessions)
     chat(sessions, "s1", "这个怎么用")
 
@@ -255,15 +273,15 @@ def test_non_price_intent_no_bargain_params(pattern, sessions):
 
 
 # ============================================================================
-# Prompt 组装测试
+# Prompt assembly tests
 # ============================================================================
 
 def test_price_prompt_contains_bargain_context(pattern, sessions):
-    """议价 NLG prompt 含商品信息/历史/议价设置/买家消息四要素。"""
+    """The bargain NLG prompt contains four elements: product info / history / bargain settings / buyer message."""
     session = launch(pattern, sessions)
 
     captured = {}
-    from src.dialogue.nlg import BaseNLG
+    from stages.nlg import BaseNLG
     original = BaseNLG._call_llm
 
     def spy(self, prompt, llm_config=None):
@@ -279,18 +297,18 @@ def test_price_prompt_contains_bargain_context(pattern, sessions):
     prompt = captured["prompt"]
     assert "议价" in prompt
     assert "商品信息" in prompt
-    assert "item_id: item1" in prompt          # task_info 商品信息注入
+    assert "item_id: item1" in prompt          # task_info product info injected
     assert "对话历史" in prompt
     assert "议价设置" in prompt
-    assert "bargain_count" in prompt           # 议价参数注入
-    assert "能便宜点吗" in prompt              # 买家消息
+    assert "bargain_count" in prompt           # bargain params injected
+    assert "能便宜点吗" in prompt
 
 
 def test_intent_specific_prompt_selected(pattern, sessions):
-    """技术意图走 tech 模板（含"技术专家"人设），通用走 default 模板。"""
+    """Tech intent uses the tech template (with the "tech expert" persona); default intent uses the default template."""
     session = launch(pattern, sessions)
 
-    from src.dialogue.nlg import BaseNLG
+    from stages.nlg import BaseNLG
     original = BaseNLG._call_llm
     captured = []
 
@@ -310,16 +328,17 @@ def test_intent_specific_prompt_selected(pattern, sessions):
 
 
 # ============================================================================
-# 时间增强改写贯通测试（query 槽位 → NLU/NLG 消费增强后消息）
+# Time augmentation rewrite end-to-end tests (query slot -> NLU/NLG consume the augmented message)
 # ============================================================================
 
 def test_time_augmented_query_flows_into_prompt(pattern, sessions):
-    """含相对时间的买家消息经 TimeAugQueryRewriter 增强后进入 NLG prompt。
+    """A buyer message carrying relative time is augmented by TimeAugQueryRewriter and lands in the NLG prompt.
 
-    注入固定 time_base（2026-09-03 10:00:00，周四）→ "明天下午3点前"
-    增强带绝对时间标注（jionlp 区间解析，含次日 2026-09-04）。
-    default 意图走 LLM 兜底，FakeProvider 返回非标签文本回落 default
-    菜单 → FixedNLG 单次 LLM。
+    Injects a fixed time_base (2026-09-03 10:00:00, Thursday); the query asking to
+    ship before "3pm tomorrow" gets an augmented annotation with the resolved absolute
+    time (jionlp range parsing, including the next day 2026-09-04).
+    The default intent goes through the LLM fallback: FakeProvider returns non-label
+    text, falls back to the default menu -> FixedNLG, a single LLM call.
     """
     import time as _time
 
@@ -327,7 +346,7 @@ def test_time_augmented_query_flows_into_prompt(pattern, sessions):
     session.cxt.metadata["time_base"] = _time.mktime(
         _time.strptime("2026-09-03 10:00:00", "%Y-%m-%d %H:%M:%S"))
 
-    from src.dialogue.nlg import BaseNLG
+    from stages.nlg import BaseNLG
     original = BaseNLG._call_llm
     captured = {}
 
@@ -341,7 +360,7 @@ def test_time_augmented_query_flows_into_prompt(pattern, sessions):
     finally:
         BaseNLG._call_llm = original
 
-    # 改写结果进 ctx 与 NLG prompt（增强标注含解析出的绝对时间）
+    # The rewrite lands in ctx and the NLG prompt (the augmented annotation contains the resolved absolute time)
     assert session.cxt.rewritten_queries[0] != "明天下午3点前能发货吗"
     assert "2026-09-04" in session.cxt.rewritten_queries[0]
     assert session.cxt.rewritten_queries[0] in captured["prompt"]

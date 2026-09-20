@@ -6,17 +6,22 @@ from typing import Any, Dict, List, Optional, Tuple
 import fastapi
 from pydantic import BaseModel
 
-from config.config import get_session_db_path
-from src.channel.base import EngineOps
-from src.channel.register import discover_builtin_channels
-from src.channel.webhooks import build_channel_routers
-from src.chat.chat import chat
-from src.chat.session import Session
-from src.chat.store import SessionStore
-from src.dialogue.register import registry as pattern_registry
-from src.dialogue.register import discover_builtin_patterns
-from src.tools.register import registry as tool_registry
-from src.tools.register import discover_builtin_tools
+from config.config import DEFAULT_TEMPLATES_DIR, get_session_db_path, get_templates_dir
+from channel.base import EngineOps
+from channel.register import discover_builtin_channels
+from channel.webhooks import build_channel_routers
+from chat.chat import chat
+from chat.session import Session
+from chat.store import SessionStore
+from dialogue.register import registry as pattern_registry
+from dialogue.register import discover_builtin_patterns
+from tasks.api import build_tasks_router
+from tasks.engine import EngineDeps, TaskEngine
+from tasks.store import TaskStore
+from templates.api import build_templates_router
+from templates.store import TemplateStore, replay_templates
+from tools.register import registry as tool_registry
+from tools.register import discover_builtin_tools
 
 logger = logging.getLogger(__name__)
 
@@ -28,33 +33,54 @@ app = fastapi.FastAPI()
 discover_builtin_tools()
 discover_builtin_patterns()
 
-# ----会话治理（常量可调）----
-# 会话空闲过期时间（秒）：自最近一次活跃（launch/chat）起计算，默认 2 小时
+# ----Session governance (tunable constants)----
+# Session idle expiry (seconds), counted from last activity (launch/chat)
 SESSION_TTL_SECONDS = 2 * 60 * 60
-# 会话数量上限：launch 新增会话时若达到上限，按最近活跃时间逐出最旧会话
+# Session cap: when a launch hits it, evict the oldest sessions by
+# last-active time
 MAX_SESSIONS = 10_000
 
 all_sessions: Dict[str, Session] = {}
-# session_id -> 最近活跃时间戳（time.monotonic 秒），与 all_sessions 同步增删
+# session_id -> last-active timestamp (time.monotonic seconds); kept in sync
+# with all_sessions on insert/remove
 _session_last_active: Dict[str, float] = {}
-# 保护 all_sessions / _session_last_active 的并发读写（launch 登记、chat 校验、过期与超限逐出）
+# Serializes concurrent access to all_sessions / _session_last_active
+# (launch registration, chat lookup, TTL and over-limit eviction)
 _sessions_lock = threading.Lock()
 
-# 会话持久化 store（SQLite 审计 + 重启恢复）；startup 时初始化，测试可替换。
-# None = 未启用（降级：对话正常，无审计/无恢复）
+# Session persistence store (SQLite audit + restart restore); initialized at
+# startup, replaceable in tests.
+# None = not enabled (degraded: dialogue works, no audit / no restore)
 store: Optional[SessionStore] = None
+
+# Dialogue-template store (data/templates/*.json + startup replay into the
+# pattern registry); initialized at startup, replaceable in tests.
+template_store: Optional[TemplateStore] = None
+
+# Autonomous-task persistence (tasks table in the same SQLite file, separate
+# connection); initialized at startup, replaceable in tests.
+task_store: Optional[TaskStore] = None
 
 
 def _touch_session(session_id: str) -> None:
-    """刷新会话最近活跃时间（滑动续期，须持有 _sessions_lock）。"""
+    """Refresh the session's last-active time (sliding renewal; requires _sessions_lock held)."""
     _session_last_active[session_id] = time.monotonic()
 
 
+def _touch_session_threadsafe(session_id: str) -> None:
+    """Lock-wrapped touch for background threads (task runner keeps its session
+    hot against TTL eviction)."""
+    with _sessions_lock:
+        if session_id in _session_last_active:
+            _touch_session(session_id)
+
+
 def _purge_expired_sessions() -> int:
-    """清理超过 SESSION_TTL_SECONDS 未活跃的过期会话（须持有 _sessions_lock）。
+    """Purge sessions idle beyond SESSION_TTL_SECONDS (requires _sessions_lock
+    held).
 
     Returns:
-        int: 本次清理的会话数
+        int: number of sessions purged in this call
     """
     now = time.monotonic()
     expired = [
@@ -71,12 +97,14 @@ def _purge_expired_sessions() -> int:
 
 
 def _evict_oldest_if_over_limit() -> int:
-    """会话数达到 MAX_SESSIONS 时逐出最近活跃最早的会话（须持有 _sessions_lock）。
+    """Evict the least-recently-active sessions once the count reaches
+    MAX_SESSIONS (requires _sessions_lock held).
 
-    在 launch 登记新会话前调用，保证插入后总数不超过上限。
+    Called before registering a new session at launch so the total stays
+    within the cap after insertion.
 
     Returns:
-        int: 本次逐出的会话数
+        int: number of sessions evicted in this call
     """
     evicted = []
     while len(all_sessions) >= MAX_SESSIONS and _session_last_active:
@@ -95,7 +123,7 @@ def _evict_oldest_if_over_limit() -> int:
 
 
 def _init_store() -> None:
-    """初始化会话持久化 store；失败降级为 None（对话可用，审计/恢复关闭）。"""
+    """Initialize the session persistence store; on failure degrade to None (dialogue works, audit/restore disabled)."""
     global store
     try:
         db_path = get_session_db_path()
@@ -106,14 +134,61 @@ def _init_store() -> None:
         store = None
 
 
-def _restore_sessions() -> int:
-    """从 store 恢复未过期会话回内存（重启恢复）。
+def _init_knowledge_store() -> None:
+    """Warm up the knowledge-base connection (moves the tools' lazy-init fallback to startup); failure does not block the service."""
+    try:
+        from database.knowledge_store import get_knowledge_store
+        kb = get_knowledge_store()
+        logger.info("知识库已启用: %s", kb._conn and "ok")
+    except Exception:
+        logger.exception("初始化知识库失败，知识工具将在首次调用时重试")
 
-    pattern 按 pattern_code 从注册中心重新解析并注入 node_map/module_map；
-    未注册的 pattern 跳过并 warning。DB 墙钟换算 monotonic 基准。
+
+def _init_template_store() -> None:
+    """Initialize the template store and replay persisted templates into the
+    pattern registry (must run before session restore — restored sessions
+    re-resolve their pattern from the registry). Failure degrades to None."""
+    global template_store
+    try:
+        dir_path = get_templates_dir()
+    except Exception:
+        logger.exception("读取 templates_dir 配置失败，回退默认目录")
+        dir_path = DEFAULT_TEMPLATES_DIR
+    try:
+        template_store = TemplateStore(dir_path)
+        replay_templates(template_store, pattern_registry)
+    except Exception:
+        logger.exception("初始化模版存储失败，模版注册/查询降级")
+        template_store = None
+
+
+def _init_task_store() -> None:
+    """Initialize the task store (same SQLite file as sessions, separate
+    WAL connection) and fail interrupted tasks from the previous process."""
+    global task_store
+    try:
+        db_path = get_session_db_path()
+    except Exception:
+        logger.exception("读取 session_db_path 配置失败，任务持久化禁用")
+        return
+    try:
+        task_store = TaskStore(db_path)
+        task_engine.recover_interrupted()
+    except Exception:
+        logger.exception("初始化任务存储失败，任务持久化降级")
+        task_store = None
+
+
+def _restore_sessions() -> int:
+    """Restore non-expired sessions from the store back into memory (restart
+    restore).
+
+    Patterns are re-resolved from the registry by pattern_code and injected
+    into node_map/module_map; unregistered patterns are skipped with a
+    warning. DB wall-clock times are converted onto the monotonic base.
 
     Returns:
-        int: 实际恢复的会话数
+        int: number of sessions actually restored
     """
     if store is None:
         return 0
@@ -137,6 +212,7 @@ def _restore_sessions() -> int:
             session.pattern = pattern
             session.cxt.module_map = pattern.module_map
             session.cxt.node_map = pattern.node_map
+            store.attach(session)  # re-attach write-through for the restored session (before it enters memory)
             with _sessions_lock:
                 all_sessions[session.session_id] = session
                 _session_last_active[session.session_id] = time.monotonic() - (
@@ -152,7 +228,7 @@ def _restore_sessions() -> int:
 
 
 def _cross_check_pattern_llm(config_path: str = "") -> None:
-    """交叉校验 pattern_llm 的 code 存在性（spec §5）：未知仅 warning 不阻断。"""
+    """Cross-check that pattern_llm codes exist (spec §5): unknown ones only warn, never block."""
     from config.config import load_config
     try:
         pattern_llm = load_config(config_path).get("pattern_llm", {})
@@ -178,26 +254,68 @@ def _cross_check_pattern_llm(config_path: str = "") -> None:
 
 @app.on_event("startup")
 def _startup_persistence() -> None:
-    """服务启动：初始化会话存储 + 恢复未过期会话 + 交叉校验 pattern_llm。"""
+    """Service startup: session store + template replay + task store (recovery) + session restore + knowledge store + pattern_llm cross-check."""
     _init_store()
+    _init_template_store()  # 模版重放须先于会话恢复（恢复时按 code 从 registry 重解析 pattern）
+    _init_task_store()      # 遗留任务改判 failed（后台线程随进程消亡）
     try:
         _restore_sessions()
     except Exception:
         logger.exception("重启恢复失败，跳过恢复")
+    _init_knowledge_store()
     _cross_check_pattern_llm()
+
+
+@app.on_event("shutdown")
+def _shutdown_stores() -> None:
+    """Service shutdown: release the knowledge-base / session-store / task-store connections."""
+    global store
+    try:
+        from database.knowledge_store import close_knowledge_store
+        close_knowledge_store()
+    except Exception:
+        logger.exception("关闭知识库失败")
+    if store is not None:
+        try:
+            store.close()
+        except Exception:
+            logger.exception("关闭会话存储失败")
+        store = None
+    if task_store is not None:
+        try:
+            task_store.close()
+        except Exception:
+            logger.exception("关闭任务存储失败")
+        task_store = None
 
 
 # # check aleady registried patterns and tools
 # print(pattern_registry._patterns)
 # print(tool_registry._tools)
 
-# 整体说明
-# 特定任务对话管理
-# 对话模板（src/dialogue）：由对话模块组成，每个模块复制不同的对话任务，模块也可以多个节点组成，整体为有限状态机跳转，模块有节点code，一个模块包含0到多个节点。模版可自助注册
-# 大模型提供商（src/llm）：提供大模型api请求
-# 工具（src/tools）：模版对话时可请求的工具，可自助注册，在模块定义时标明使用哪些工具或在工具注册时标明哪个模版或哪个模版的哪个模块可使用
-# 对话跳转（src/chat）：依据已有session，获取当前对话所处模块，若模块为 AGENT 型，组装system_prompt与对话记录，进行多轮工具对话（LLM 调 transfer_to_XX 工具即经 dispatch() 原语转移到邻接模块，同轮由接手方直接接话）；若为 FSM 型，按照节点的有限状态机进行两阶段跳转，先进行意图识别，再进行回复生成；若为 ROUTE 型，意图菜单命中带 jump_module 的节点时经 dispatch() 静默分发到子模块。
-# 调用api结束后，更新跳转状态，更新会话记录
+# Overall design
+# Task-specific dialogue management
+# Dialogue templates (dialogue): composed of dialogue modules, each module
+# covering a different dialogue task; a module may in turn consist of several
+# nodes, the whole behaving as a finite-state machine of node jumps. Modules
+# have node codes; one module contains 0..n nodes. Templates are
+# self-registering.
+# LLM providers (llm): issue LLM API requests.
+# Tools (tools): callable during template dialogue, self-registering; a module
+# declares which tools it uses at definition time, or a tool registration
+# declares which template — or which module of which template — may use it.
+# Dialogue jumps (chat): based on the existing session, locate the module the
+# dialogue is currently in. AGENT-type module: assemble the system_prompt and
+# conversation history and run a multi-round tool dialogue (when the LLM calls
+# a transfer_to_XX tool, a ModuleJumpEvent is written to cxt.actions and
+# consumed within the same turn by the chat layer's hop loop, which reroutes
+# so the taking-over module continues speaking directly). FSM-type module:
+# follow the node finite-state machine's two-phase jump — intent recognition
+# first, then reply generation. ROUTE-type module: when intent-menu matching
+# hits a node carrying jump_module (or the NLU directly outputs jump_module),
+# the stage loop detects it and writes a jump event; the chat layer consumes
+# it and jumps to the target module within the same turn.
+# After the API call completes, update the jump state and the session record.
 
 
 
@@ -224,7 +342,7 @@ class ChatResponse(BaseModel):
     code: str
     message: str
     status: bool
-    data: Dict[str, str] = {}
+    data: Dict[str, Any] = {}
 
 
 class SessionSummary(BaseModel):
@@ -251,6 +369,7 @@ class MessageItem(BaseModel):
     stage: str
     metadata: Dict[str, Any] = {}
     created_at: float
+    action: Dict[str, str] = {}
 
 
 class SessionMessagesResponse(BaseModel):
@@ -261,7 +380,7 @@ class SessionMessagesResponse(BaseModel):
 
 
 
-# ----引擎操作核心（endpoint 与 channel 共用；channel 由 main 注入这些函数）----
+# ----Engine-op core (shared by endpoints and channels; main injects these functions into channels)----
 
 def _launch_session_core(
     pattern_code: str,
@@ -270,15 +389,18 @@ def _launch_session_core(
     request_id: str,
     exist_ok: bool = False,
 ) -> Tuple[Optional[Session], str, str]:
-    """launch 核心：pattern 校验 + 会话治理（清理/查重/逐出）+ 审计落盘。
+    """Launch core: pattern validation + session governance
+    (purge/duplicate-check/eviction) + audit persistence.
 
     Args:
-        exist_ok: True 时 session_id 已存在视为成功并返回既有 session
-            （channel 的 get-or-create 语义），不覆盖原会话。
+        exist_ok: when True, an already-existing session_id counts as success
+            and returns the existing session (channel get-or-create
+            semantics) without overwriting it.
 
     Returns:
-        (session, code, message)：code == "0" 成功；失败时 session 为 None，
-        code/message 语义与 /api/v1/launch 响应一致。
+        (session, code, message): code == "0" means success; on failure
+        session is None and code/message carry the same semantics as the
+        /api/v1/launch response.
     """
     pattern = pattern_registry.get(pattern_code)
     if pattern is None:
@@ -311,18 +433,25 @@ def _launch_session_core(
         all_sessions[session_id] = session
         _touch_session(session_id)
 
-    # 审计落盘（内存登记成功后）；失败仅记日志，不阻断 launch
+    # Audit persistence (after in-memory registration succeeded); failure is
+    # only logged and never blocks launch.
+    # attach runs unconditionally — if create_session failed, sink write
+    # failures are swallowed anyway, so no messages are lost once the DB
+    # recovers mid-way.
     if store is not None:
         try:
             store.create_session(session)
         except Exception:
             logger.exception("会话落盘失败: session=%s", session_id)
+        store.attach(session)
 
     return session, "0", f"对话任务发起成功: session_id={session_id}"
 
 
 def _get_session(session_id: str) -> Optional[Session]:
-    """治理感知的会话查询：过期清理 + 命中刷新活跃时间（滑动续期）。"""
+    """Governance-aware session lookup: purge expired, and on a hit refresh
+    the last-active time (sliding renewal).
+    """
     with _sessions_lock:
         _purge_expired_sessions()
         session = all_sessions.get(session_id)
@@ -334,22 +463,27 @@ def _get_session(session_id: str) -> Optional[Session]:
 def _run_chat_turn_core(
     session: Session, query: str
 ) -> Tuple[Optional[str], Optional[Exception]]:
-    """单轮对话核心：调用 chat + 轮末审计落盘。
+    """Single chat-turn core: run chat + end-of-turn audit persistence.
 
-    锁外执行（LLM 调用耗时长，不能阻塞其他请求）；chat 内部按 session_id
-    重取会话，持有本地 session 引用仅供落盘快照，即便本轮处理中被并发逐出
-    也不影响本次对话。异常路径同样落盘（与成功路径一致）。
+    Runs outside the lock (LLM calls are slow and must not block other
+    requests); chat re-fetches the session by session_id internally, and the
+    local session reference here exists only for persisting the snapshot —
+    even a concurrent eviction mid-turn does not affect this dialogue. The
+    exception path persists too (same as the success path). Messages were
+    already persisted per-message by the sink; end of turn only writes back
+    the state snapshot.
 
     Returns:
-        (reply, error)：正常时 error 为 None；reply 为 None 仅出现在异常路径。
+        (reply, error): error is None on success; reply is None only on the
+        exception path.
     """
-    start_idx = len(session.cxt.history)
     error: Optional[Exception] = None
     try:
         response_text = chat(
             query=query,
             session_id=session.session_id,
             all_sessions=all_sessions,
+            store=store,
         )
     except Exception as e:
         logger.exception("对话处理异常")
@@ -357,17 +491,27 @@ def _run_chat_turn_core(
 
     if store is not None:
         try:
-            store.save_turn(session, start_idx)
+            store.save_snapshot(session)
         except Exception:
-            logger.exception("会话轮末落盘失败: session=%s", session.session_id)
+            logger.exception("会话轮末快照失败: session=%s", session.session_id)
 
     if error is not None:
         return None, error
     return response_text, None
 
 
+# func0 (liveness probe: for clients/skills to detect the service before use)
+@app.get("/api/v1/health")
+def health() -> Dict[str, Any]:
+    return {
+        "code": "0",
+        "message": "ok",
+        "status": True,
+        "data": {"status": "ok", "patterns": pattern_registry.list_codes()},
+    }
+
+
 # func1
-# 外呼任务发起：根据pattern_code注册一个对话任务，并新增session
 @app.post("/api/v1/launch")
 def launch_dialogue(dialogue_request: DialogueRequest) -> DialogueResponse:
     _session, code, message = _launch_session_core(
@@ -380,10 +524,8 @@ def launch_dialogue(dialogue_request: DialogueRequest) -> DialogueResponse:
 
 
 # func2
-# 对话请求：根据 session_id 获取 session，处理用户 query
 @app.post("/api/v1/chat")
 def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
-    # 1. 清理过期会话后校验 session 是否存在，命中则刷新活跃时间（滑动续期）
     session = _get_session(chat_request.session_id)
     if session is None:
         return ChatResponse(
@@ -392,7 +534,6 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
             message=f"session_id '{chat_request.session_id}' 不存在或已过期，请先发起对话任务",
         )
 
-    # 2. 单轮对话 + 轮末审计落盘（锁外执行，含异常路径）
     response_text, error = _run_chat_turn_core(session, chat_request.query)
 
     if error is not None:
@@ -414,9 +555,10 @@ def chat_dialogue(chat_request: ChatRequest) -> ChatResponse:
     )
 
 
-# ----channel 接线（外部消息源 → 引擎操作）----
-# AST 自动发现 src/channel/*.py 的声明式渠道（token/默认 pattern 走各渠道
-# 声明的环境变量，每次请求时读取可热改），通用 handler 生成 router
+# ----Channel wiring (external message sources -> engine ops)----
+# AST-discovers the declarative channels in channel/*.py (token / default
+# pattern come from each channel's declared env vars, re-read on every request
+# and thus hot-reloadable); a generic handler generates the routers
 discover_builtin_channels()
 for _router in build_channel_routers(EngineOps(
     get_session=_get_session,
@@ -425,9 +567,22 @@ for _router in build_channel_routers(EngineOps(
 )):
     app.include_router(_router)
 
+# ----Template registry wiring (dialogue-template register/validate/query)----
+app.include_router(build_templates_router(lambda: template_store))
 
-# func3（只读审计）
-# 会话列表：按 last_active_at 倒序，可按 pattern_code 过滤、分页
+# ----Task engine wiring (autonomous pattern×counterpart runs)----
+# deps 里的 getter 在请求期解析（测试可直接替换 main.store / main.task_store）
+task_engine = TaskEngine(EngineDeps(
+    launch_session=_launch_session_core,
+    touch_session=_touch_session_threadsafe,
+    all_sessions=all_sessions,
+    get_session_store=lambda: store,
+    get_task_store=lambda: task_store,
+))
+app.include_router(build_tasks_router(lambda: task_engine))
+
+
+# func3 (read-only audit)
 @app.get("/api/v1/sessions")
 def list_sessions(
     pattern_code: str = "", limit: int = 50, offset: int = 0
@@ -450,8 +605,7 @@ def list_sessions(
     )
 
 
-# func4（只读审计）
-# 某会话全程消息（含 NLU/NLG 等中间 stage 消息），按 id 升序
+# func4 (read-only audit)
 @app.get("/api/v1/sessions/{session_id}/messages")
 def get_session_messages(session_id: str) -> SessionMessagesResponse:
     if store is None:
@@ -471,3 +625,10 @@ def get_session_messages(session_id: str) -> SessionMessagesResponse:
     return SessionMessagesResponse(
         code="0", status=True, message="success", data={"messages": messages}
     )
+
+
+# ----Entrypoint (binds 127.0.0.1 only: local mock service, no auth by design)----
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)

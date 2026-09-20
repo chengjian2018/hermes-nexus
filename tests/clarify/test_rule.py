@@ -1,12 +1,12 @@
-"""ClarifyRouteRule —— R1 门控纯函数单测。"""
+"""ClarifyRouteRule — unit tests for the R1 gating pure functions."""
 
 import pytest
 
-from src.clarify.rule import ClarifyRouteRule
+from stages.clarify.rule import ClarifyRouteRule
 
 
 def _item(score, content="chunk", keywords=None):
-    """构造一条标准化召回结果。"""
+    """Build one standardized recall result."""
     return {
         "id": f"id-{score}",
         "content": content,
@@ -17,7 +17,7 @@ def _item(score, content="chunk", keywords=None):
 
 
 class TestRouteThreeBranches:
-    """门控三分支：kb / fallback / mixed。"""
+    """The three gating branches: kb / fallback / mixed."""
 
     def test_empty_recall_falls_back(self):
         rule = ClarifyRouteRule()
@@ -42,11 +42,12 @@ class TestRouteThreeBranches:
 
 
 class TestKeywordBonus:
-    """topic/keywords 与 chunk 关键词重叠 → top 分数加分。"""
+    """topic/keywords overlap with chunk keywords -> bonus added to the top score."""
 
     def test_keyword_overlap_raises_score_into_kb(self):
         rule = ClarifyRouteRule()
-        # 0.55 本是 mixed；keywords 命中 +0.1 → 0.65 ≥ t_high → kb
+        # 0.55 would be mixed on its own; a keywords hit adds +0.1
+        # -> 0.65 >= t_high -> kb
         mode, results = rule.route(
             [_item(0.55, keywords=["收费", "服务费"])],
             topic="费用",
@@ -67,7 +68,7 @@ class TestKeywordBonus:
 
 
 class TestThresholdBoundary:
-    """阈值边界：>= T_high 为 kb；T_low <= s < T_high 为 mixed。"""
+    """Threshold boundaries: >= T_high is kb; T_low <= s < T_high is mixed."""
 
     def test_score_equals_t_high_is_kb(self):
         rule = ClarifyRouteRule()

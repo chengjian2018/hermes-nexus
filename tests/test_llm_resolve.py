@@ -1,23 +1,23 @@
-"""build_provider 统一入口测试 -- 验证 local_config.yaml 的 provider 字段真正生效。
+"""build_provider unified-entry tests -- verify that local_config.yaml provider fields actually take effect.
 
-全部离线：不访问真实 API，仅断言配置覆盖是否传到 provider 实例。
+Fully offline: no real API access; only asserts that config overrides reach the provider instance.
 """
 
 import pytest
 
 import config.config
 from fake_provider import FAKE_PROVIDER_CODE, register_fake_provider
-from src.llm import registry as llm_registry
-from src.llm.openai_provider import OpenAICompatibleProvider
-from src.llm.resolve import build_provider
+from llm import registry as llm_registry
+from llm.openai_provider import OpenAICompatibleProvider
+from llm.resolve import build_provider
 
 
 # ============================================================================
-# 覆盖字段生效
+# Override fields take effect
 # ============================================================================
 
 def test_yaml_overrides_reach_provider():
-    """yaml 中非空的 api_base/api_key/api_key_env/timeout/max_retries 覆盖注册默认值。"""
+    """Non-empty api_base/api_key/api_key_env/timeout/max_retries in yaml override the registered defaults."""
     provider = build_provider({
         "code": "openai",
         "model": "qwen3.8-max",
@@ -37,7 +37,7 @@ def test_yaml_overrides_reach_provider():
 
 
 def test_blank_fields_fall_back_to_registered_defaults():
-    """空字符串 / None / 缺失字段不覆盖，落回 provider 注册时声明的默认值。"""
+    """Empty strings / None / missing fields do not override; fall back to the defaults declared at provider registration."""
     provider = build_provider({
         "code": "openai",
         "model": "qwen3.8-max",
@@ -48,12 +48,12 @@ def test_blank_fields_fall_back_to_registered_defaults():
     entry = llm_registry.get("openai")
     assert provider.api_base == entry.api_base
     assert provider.api_key_env == entry.api_key_env
-    assert provider.timeout == 60   # OpenAICompatibleProvider 构造默认
+    assert provider.timeout == 60   # OpenAICompatibleProvider constructor default
     assert provider.max_retries == 2
 
 
 def test_zero_max_retries_is_kept():
-    """max_retries=0 是合法值（不重试），不应被当作"未设置"丢弃。"""
+    """max_retries=0 is a legal value (no retries), not to be discarded as "unset"."""
     provider = build_provider({"code": "openai", "model": "m", "max_retries": 0})
     assert provider.max_retries == 0
 
@@ -64,35 +64,35 @@ def test_unknown_code_raises():
 
 
 def test_openai_provider_discovered_on_first_use():
-    """provider 未注册时，build_provider 内部触发自动发现并完成注册。"""
+    """When the provider is unregistered, build_provider triggers auto-discovery internally and completes registration."""
     import importlib
     import sys
 
     llm_registry.deregister("openai")
-    # 模块已在 sys.modules 缓存时 import_module 不会重新执行注册代码，
-    # 弹出缓存以模拟全新进程的首次导入
-    sys.modules.pop("src.llm.openai_provider", None)
+    # When a module is already cached in sys.modules, import_module will not re-run its
+    # registration code; pop the cache to simulate a first import in a fresh process
+    sys.modules.pop("llm.openai_provider", None)
     try:
         provider = build_provider({"code": "openai", "model": "m"})
         assert provider.code == "openai"
         assert llm_registry.is_registered("openai")
     finally:
-        # 还原现场：重新执行模块注册代码，保持 registry 与模块缓存一致
+        # Restore state: re-run the module registration code so the registry and the module cache stay consistent
         llm_registry.deregister("openai")
-        sys.modules.pop("src.llm.openai_provider", None)
-        importlib.import_module("src.llm.openai_provider")
+        sys.modules.pop("llm.openai_provider", None)
+        importlib.import_module("llm.openai_provider")
 
 
 # ============================================================================
-# _call_llm(llm_config=None) 回退路径
+# _call_llm(llm_config=None) fallback path
 # ============================================================================
 
 def test_call_llm_with_none_config_uses_loaded_config(monkeypatch):
-    """llm_config=None 时回退加载 local_config.yaml，model 取自加载后的配置而非入参。
+    """With llm_config=None, fall back to loading local_config.yaml; model comes from the loaded config, not the argument.
 
-    回归：旧实现此处抛 ``TypeError: 'NoneType' object is not subscriptable``。
+    Regression: the old implementation raised ``TypeError: 'NoneType' object is not subscriptable`` here.
     """
-    from src.dialogue.nlu import FSMNLU
+    from stages.nlu import FSMNLU
 
     register_fake_provider()
     monkeypatch.setattr(
@@ -101,14 +101,14 @@ def test_call_llm_with_none_config_uses_loaded_config(monkeypatch):
         lambda: {"code": FAKE_PROVIDER_CODE, "model": "fake-model"},
     )
 
-    out = FSMNLU()._call_llm("ping", None)  # 不应抛 TypeError
+    out = FSMNLU()._call_llm("ping", None)  # must not raise TypeError
     assert isinstance(out, str)
 
 
 def test_call_llm_with_none_config_loads_real_yaml(monkeypatch):
-    """回退路径读取真实 local_config.yaml 时能构建出配置生效的 provider。"""
-    from src.dialogue.nlg import FSMNLG
-    import src.dialogue.nlg.nlg as nlg_module
+    """When the fallback path reads the real local_config.yaml it builds a provider with the config applied."""
+    from stages.nlg import FSMNLG
+    import stages.nlg.nlg as nlg_module
 
     built = {}
 
@@ -123,5 +123,5 @@ def test_call_llm_with_none_config_loads_real_yaml(monkeypatch):
     monkeypatch.setattr(nlg_module, "build_provider", spy)
     FSMNLG()._call_llm("ping", None)
 
-    assert built.get("code") == "openai"  # local_config.yaml 中的 code
-    assert built.get("api_base")  # yaml 中的 api_base 随配置进入 build_provider
+    assert built.get("code") == "openai"  # the code from local_config.yaml
+    assert built.get("api_base")  # yaml's api_base flows into build_provider with the config

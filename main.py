@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import fastapi
 from pydantic import BaseModel
 
-from config.config import get_session_db_path
+from config.config import DEFAULT_TEMPLATES_DIR, get_session_db_path, get_templates_dir
 from channel.base import EngineOps
 from channel.register import discover_builtin_channels
 from channel.webhooks import build_channel_routers
@@ -15,6 +15,8 @@ from chat.session import Session
 from chat.store import SessionStore
 from dialogue.register import registry as pattern_registry
 from dialogue.register import discover_builtin_patterns
+from templates.api import build_templates_router
+from templates.store import TemplateStore, replay_templates
 from tools.register import registry as tool_registry
 from tools.register import discover_builtin_tools
 
@@ -47,6 +49,10 @@ _sessions_lock = threading.Lock()
 # startup, replaceable in tests.
 # None = not enabled (degraded: dialogue works, no audit / no restore)
 store: Optional[SessionStore] = None
+
+# Dialogue-template store (data/templates/*.json + startup replay into the
+# pattern registry); initialized at startup, replaceable in tests.
+template_store: Optional[TemplateStore] = None
 
 
 def _touch_session(session_id: str) -> None:
@@ -121,6 +127,24 @@ def _init_knowledge_store() -> None:
         logger.info("知识库已启用: %s", kb._conn and "ok")
     except Exception:
         logger.exception("初始化知识库失败，知识工具将在首次调用时重试")
+
+
+def _init_template_store() -> None:
+    """Initialize the template store and replay persisted templates into the
+    pattern registry (must run before session restore — restored sessions
+    re-resolve their pattern from the registry). Failure degrades to None."""
+    global template_store
+    try:
+        dir_path = get_templates_dir()
+    except Exception:
+        logger.exception("读取 templates_dir 配置失败，回退默认目录")
+        dir_path = DEFAULT_TEMPLATES_DIR
+    try:
+        template_store = TemplateStore(dir_path)
+        replay_templates(template_store, pattern_registry)
+    except Exception:
+        logger.exception("初始化模版存储失败，模版注册/查询降级")
+        template_store = None
 
 
 def _restore_sessions() -> int:
@@ -198,8 +222,9 @@ def _cross_check_pattern_llm(config_path: str = "") -> None:
 
 @app.on_event("startup")
 def _startup_persistence() -> None:
-    """Service startup: initialize the session store + restore non-expired sessions + cross-check pattern_llm."""
+    """Service startup: session store + template replay + session restore + knowledge store + pattern_llm cross-check."""
     _init_store()
+    _init_template_store()  # 模版重放须先于会话恢复（恢复时按 code 从 registry 重解析 pattern）
     try:
         _restore_sessions()
     except Exception:
@@ -502,6 +527,9 @@ for _router in build_channel_routers(EngineOps(
     run_chat_turn=_run_chat_turn_core,
 )):
     app.include_router(_router)
+
+# ----Template registry wiring (dialogue-template register/validate/query)----
+app.include_router(build_templates_router(lambda: template_store))
 
 
 # func3 (read-only audit)

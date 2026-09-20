@@ -65,6 +65,10 @@ DEFAULT_SESSION_DB_PATH = "data/dialogue.db"
 # Default knowledge base SQLite file path (product/customer-service knowledge, scope-isolated)
 DEFAULT_KNOWLEDGE_DB_PATH = "data/knowledge.db"
 
+# Default dialogue-template directory (registered template JSON files,
+# replayed into the pattern registry at startup)
+DEFAULT_TEMPLATES_DIR = "data/templates"
+
 # Session history compression: triggers when estimated tokens exceed the threshold
 # (0 = off). The estimate is a character approximation
 # (CJK×2 + others×0.25, +4 per message), not an exact tokenizer
@@ -264,6 +268,8 @@ def load_config(config_path: str = "") -> Dict[str, Any]:
         "session_db_path": raw.get("session_db_path", DEFAULT_SESSION_DB_PATH),
         # Knowledge base SQLite path (optional, default data/knowledge.db)
         "knowledge_db_path": raw.get("knowledge_db_path", DEFAULT_KNOWLEDGE_DB_PATH),
+        # Dialogue-template directory (optional, default data/templates)
+        "templates_dir": raw.get("templates_dir", DEFAULT_TEMPLATES_DIR),
         # Session history compression (optional; threshold 0 = off, defaults 6000 / keep 12)
         "session_compress_token_threshold": int(raw.get(
             "session_compress_token_threshold",
@@ -362,6 +368,14 @@ def get_knowledge_db_path(config_path: str = "") -> str:
     Equivalent to ``load_config(config_path)["knowledge_db_path"]``.
     """
     return load_config(config_path)["knowledge_db_path"]
+
+
+def get_templates_dir(config_path: str = "") -> str:
+    """Convenience method: return the dialogue-template directory.
+
+    Equivalent to ``load_config(config_path)["templates_dir"]``.
+    """
+    return load_config(config_path)["templates_dir"]
 
 
 def get_session_compress_config(config_path: str = "") -> tuple:
